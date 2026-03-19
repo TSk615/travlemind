@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+  pull_request:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run build:web
+
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python 3.11 --frozen --project apps/api
+      - run: uv run --project apps/api pytest apps/api/tests
+
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python 3.11 --project apps/worker
+      - run: uv run --project apps/worker python -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path('apps/api/src').resolve())); import travelmind_worker.worker"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg VITE_API_BASE_URL=http://localhost:8000 --file apps/web/Dockerfile --tag travelmind-web .
+      - run: docker build --file apps/api/Dockerfile --tag travelmind-api .
+      - run: docker build --file apps/worker/Dockerfile --tag travelmind-worker .
+      - run: docker compose --env-file infra/.env.example --file infra/docker-compose.yml config
+
+

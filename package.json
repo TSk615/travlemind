@@ -1,0 +1,17 @@
+{
+  "name": "travelmind-ai",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/web",
+    "packages/shared-types",
+    "packages/ui",
+    "packages/config"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @travelmind/web",
+    "build:web": "npm run build --workspace @travelmind/web",
+    "preview:web": "npm run preview --workspace @travelmind/web"
+  }
+}
+
