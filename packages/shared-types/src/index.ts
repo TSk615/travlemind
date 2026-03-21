@@ -1,4 +1,5 @@
-﻿export type JobStatus = "queued" | "running" | "completed" | "failed"
+export type JobStatus = "queued" | "running" | "completed" | "failed"
+export type LlmWireApi = "chat_completions" | "responses"
 
 export interface Envelope<T> {
   data: T | null
@@ -87,6 +88,22 @@ export interface ScoreBreakdown {
   ad_score: number
   final_score: number
   reasons: string[]
+}
+
+export interface LlmSettings {
+  base_url: string | null
+  model: string | null
+  api_key_masked: string | null
+  has_api_key: boolean
+  wire_api: LlmWireApi | null
+  configured: boolean
+}
+
+export interface LlmSettingsInput {
+  base_url: string
+  model: string
+  wire_api: LlmWireApi
+  api_key?: string
 }
 
 export interface SearchGeoPoint {

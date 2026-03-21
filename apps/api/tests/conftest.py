@@ -13,6 +13,16 @@ if str(SRC) not in sys.path:
 TEST_TMP_ROOT = Path(__file__).resolve().parents[3] / "storage" / ".pytest_tmp" / "api"
 TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
+LLM_ENV_VARS = [
+    "TRAVELMIND_LLM_BASE_URL",
+    "TRAVELMIND_LLM_API_KEY",
+    "TRAVELMIND_LLM_MODEL",
+    "TRAVELMIND_LLM_TIMEOUT_SECONDS",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_MODEL",
+]
+
 
 @pytest.fixture()
 def client(monkeypatch):
@@ -24,6 +34,8 @@ def client(monkeypatch):
     monkeypatch.setenv("TRAVELMIND_QUEUE_MODE", "inline")
     monkeypatch.setenv("TRAVELMIND_AGENT_PROVIDER", "stub")
     monkeypatch.setenv("TRAVELMIND_PUBLIC_API_URL", "http://testserver")
+    for variable in LLM_ENV_VARS:
+        monkeypatch.delenv(variable, raising=False)
 
     for name in list(sys.modules):
         if name.startswith("travelmind_api"):

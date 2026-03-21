@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,11 +36,21 @@ def create_app() -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+        del request
+        details = exc.errors()
+        first_message = details[0].get("msg", "Request validation failed") if details else "Request validation failed"
+        envelope = Envelope(
+            data=None,
+            error=ErrorPayload(code="request_validation_error", message=first_message, details={"errors": details}),
+            meta={},
+        )
+        return JSONResponse(status_code=422, content=envelope.model_dump(mode="json"))
+
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
         del request
-        # Keep every handled API failure inside the shared envelope so the web
-        # client never has to branch on FastAPI's default error shape.
         detail = exc.detail if isinstance(exc.detail, dict) else {"code": "http_error", "message": str(exc.detail)}
         envelope = Envelope(data=None, error=ErrorPayload(**detail), meta={})
         return JSONResponse(status_code=exc.status_code, content=envelope.model_dump(mode="json"))

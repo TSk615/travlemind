@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,9 +9,10 @@ from travelmind_api.agents.base import PlanningRequest, PlanningResult
 from travelmind_api.agents.factory import build_orchestrator
 from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import session_scope
-from travelmind_api.db.models import JobRecord, Trip
+from travelmind_api.db.models import JobRecord, Trip, User
 from travelmind_api.services.export_service import write_pdf_export
 from travelmind_api.services.job_service import ensure_job_record_schema, update_job_state
+from travelmind_api.services.llm import LlmConfig
 
 
 settings = get_settings()
@@ -128,6 +129,25 @@ def _build_request(trip: Trip) -> PlanningRequest:
     )
 
 
+def _resolve_llm_config(user: User | None, payload: dict) -> LlmConfig | None:
+    payload_value = payload.get("llm_config")
+    if isinstance(payload_value, dict):
+        payload_config = LlmConfig.from_mapping(payload_value)
+        if payload_config is not None:
+            return payload_config
+
+    if user is None:
+        return None
+
+    return LlmConfig.from_mapping(
+        {
+            "base_url": user.llm_base_url,
+            "api_key": user.llm_api_key,
+            "model": user.llm_model,
+        }
+    )
+
+
 def _load_plan_from_trip(trip: Trip) -> PlanningResult | None:
     if not trip.itinerary_json:
         return None
@@ -186,8 +206,9 @@ def _process_trip_generation(job: JobExecution) -> dict:
         trip = session.query(Trip).filter(Trip.id == job.trip_id).one_or_none()
         if not trip:
             raise HTTPException(status_code=404, detail="Trip not found for job")
+        user = session.query(User).filter(User.id == trip.user_id).one_or_none()
         request = _build_request(trip)
-        orchestrator = build_orchestrator(settings)
+        orchestrator = build_orchestrator(settings, llm_config=_resolve_llm_config(user, job.payload))
 
         _transition_job(job.id, stage="source_search", stage_message="Collecting grounded source inputs.", progress_percent=25)
         _transition_job(job.id, stage="source_scoring", stage_message="Scoring grounded source inputs.", progress_percent=45)
@@ -223,8 +244,9 @@ def _process_trip_refine(job: JobExecution) -> dict:
         trip = session.query(Trip).filter(Trip.id == job.trip_id).one_or_none()
         if not trip:
             raise HTTPException(status_code=404, detail="Trip not found for job")
+        user = session.query(User).filter(User.id == trip.user_id).one_or_none()
         request = _build_request(trip)
-        orchestrator = build_orchestrator(settings)
+        orchestrator = build_orchestrator(settings, llm_config=_resolve_llm_config(user, job.payload))
 
         _transition_job(job.id, stage="source_search", stage_message="Collecting context for refinement.", progress_percent=24)
         _transition_job(job.id, stage="source_scoring", stage_message="Scoring refinement context.", progress_percent=42)
@@ -259,7 +281,8 @@ def _process_pdf_export(job: JobExecution) -> dict:
             raise HTTPException(status_code=404, detail="Trip not found for job")
         if not trip.itinerary_json:
             raise HTTPException(status_code=400, detail="Generate itinerary before export")
-        orchestrator = build_orchestrator(settings)
+        user = session.query(User).filter(User.id == trip.user_id).one_or_none()
+        orchestrator = build_orchestrator(settings, llm_config=_resolve_llm_config(user, job.payload))
         request = _build_request(trip)
         plan = _load_plan_from_trip(trip)
         if plan is None:
@@ -290,4 +313,3 @@ def process_job(job_id: str) -> None:
         _mark_complete(job.id, result, stage="export_ready", stage_message=completion_message)
     except Exception as exc:  # pragma: no cover
         _mark_failed(job.id, _extract_error_message(exc))
-

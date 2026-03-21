@@ -1,7 +1,8 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, reactive, ref } from "vue"
 import { useRouter } from "vue-router"
 import type { TripPreferenceInput } from "@travelmind/shared-types"
+import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import StatePanel from "@/components/StatePanel.vue"
 import { api, getErrorMessage } from "@/lib/api"
 import { useI18n } from "@/lib/useI18n"
@@ -9,7 +10,19 @@ import { useI18n } from "@/lib/useI18n"
 const router = useRouter()
 const submitting = ref(false)
 const error = ref<string | null>(null)
-const { t } = useI18n()
+const { locale, t } = useI18n()
+
+const flowCopy = computed(() =>
+  locale.value === "zh-CN"
+    ? {
+        creatingMessage: "正在保存行程 Brief。下一页会直接带你进入行程详情，你再手动触发生成，不会自动调用规划任务。",
+        nextStepNote: "创建 trip 只会保存 Brief；下一步是在详情页点击“生成行程”，正式进入攻略生成链路。"
+      }
+    : {
+        creatingMessage: "Saving the trip brief now. The next screen will land on trip detail, where you explicitly start generation.",
+        nextStepNote: "Create trip only saves the brief; the next step is Generate itinerary on the trip detail page."
+      }
+)
 
 function createStarterTrip(): TripPreferenceInput {
   return {
@@ -131,7 +144,7 @@ async function submit() {
   submitting.value = true
   try {
     const trip = await api.createTrip(form)
-    await router.push(`/trips/${trip.id}`)
+    await router.push({ path: `/trips/${trip.id}`, query: { entry: "create" } })
   } catch (value) {
     error.value = getErrorMessage(value, t("tripForm.needsAttentionTitle"))
   } finally {
@@ -155,11 +168,13 @@ async function submit() {
         </div>
       </div>
 
+      <LlmStatusNotice compact />
+
       <StatePanel
         v-if="submitting"
         kind="loading"
         :title="t('tripForm.creatingTitle')"
-        :message="t('tripForm.creatingMessage')"
+        :message="flowCopy.creatingMessage"
         compact
       />
 
@@ -226,11 +241,11 @@ async function submit() {
         </div>
         <div class="field field--full">
           <label for="accommodation">{{ t('tripForm.accommodationLabel') }}</label>
-          <textarea id="accommodation" v-model="form.accommodation_preference" />
+          <textarea id="accommodation" v-model="form.accommodation_preference"></textarea>
         </div>
         <div class="field field--full inline-actions">
           <button class="primary" :disabled="submitting" type="submit">{{ submitting ? t('tripForm.creatingTrip') : t('tripForm.createTrip') }}</button>
-          <p class="muted">{{ t('tripForm.contractNote') }}</p>
+          <p class="muted">{{ flowCopy.nextStepNote }}</p>
         </div>
       </form>
     </article>

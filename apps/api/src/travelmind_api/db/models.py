@@ -1,10 +1,10 @@
-﻿from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, inspect, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from travelmind_api.core.database import Base
+from travelmind_api.core.database import Base, engine
 
 
 def utcnow() -> datetime:
@@ -20,6 +20,10 @@ class User(Base):
     avatar: Mapped[str | None] = mapped_column(String(512), nullable=True)
     locale: Mapped[str] = mapped_column(String(16), default="zh-CN")
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    llm_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    llm_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    llm_wire_api: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -73,3 +77,32 @@ class JobRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# Lightweight SQLite compatibility for local developer databases created before
+# the LLM config fields existed. Fresh databases still rely on create_all().
+def _ensure_sqlite_user_columns() -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "users" not in inspector.get_table_names():
+            return
+
+        existing_columns = {column["name"] for column in inspector.get_columns("users")}
+        statements: list[str] = []
+        if "llm_base_url" not in existing_columns:
+            statements.append("ALTER TABLE users ADD COLUMN llm_base_url VARCHAR(512)")
+        if "llm_api_key" not in existing_columns:
+            statements.append("ALTER TABLE users ADD COLUMN llm_api_key TEXT")
+        if "llm_model" not in existing_columns:
+            statements.append("ALTER TABLE users ADD COLUMN llm_model VARCHAR(255)")
+        if "llm_wire_api" not in existing_columns:
+            statements.append("ALTER TABLE users ADD COLUMN llm_wire_api VARCHAR(64)")
+
+        for statement in statements:
+            conn.execute(text(statement))
+
+
+_ensure_sqlite_user_columns()

@@ -126,6 +126,28 @@ def test_trip_create_list_get_and_update(client: TestClient):
 
 
 
+def test_trip_create_requires_explicit_generate_step(client: TestClient):
+    _register(client)
+
+    create_response = _create_trip(client)
+    trip = create_response.json()["data"]
+    assert trip["itinerary"] is None
+    assert trip["latest_agent_trace"] is None
+
+    detail_response = client.get(f"/api/v1/trips/{trip['id']}")
+    assert detail_response.status_code == 200
+    assert detail_response.json()["data"]["itinerary"] is None
+    assert detail_response.json()["data"]["latest_agent_trace"] is None
+
+    generate_response = client.post(f"/api/v1/trips/{trip['id']}/generate")
+    assert generate_response.status_code == 200
+    job = generate_response.json()["data"]
+    assert job["type"] == "trip.generate"
+    assert job["status"] == "queued"
+    assert job["stage"] == "queued"
+    assert job["progress_percent"] == 0
+
+
 def test_trip_create_rejects_invalid_date_range(client: TestClient):
     _register(client)
 
@@ -269,3 +291,4 @@ def test_refine_endpoint_updates_trip_and_trace(client: TestClient):
     assert detail_payload["itinerary"] is not None
     assert "Refined day 2" in detail_payload["itinerary"]["summary"]
     assert any(note == "Refine scope: day_plan." for note in detail_payload["latest_agent_trace"]["notes"])
+

@@ -30,6 +30,8 @@ storage/exports/*
 storage/.pytest_tmp/
 apps/web/dist/
 apps/web/node_modules/
+apps/web/src/*.js
+apps/web/src/**/*.js
 packages/*/dist/
 apps/api/.venv/
 apps/api/.pytest_tmp/

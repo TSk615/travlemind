@@ -1,16 +1,16 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.common import success_response
-from travelmind_api.api.schemas.trips import TripCreateRequest, TripRefineRequest, TripUpdateRequest
+from travelmind_api.api.schemas.trips import TripCreateRequest, TripItinerarySaveRequest, TripRefineRequest, TripUpdateRequest
 from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import get_db
 from travelmind_api.core.deps import get_current_user
 from travelmind_api.db.models import User
 from travelmind_api.services.job_service import create_job, dispatch_job, serialize_job
-from travelmind_api.services.trip_service import create_trip, get_trip_or_404, list_trips, serialize_trip, update_trip
+from travelmind_api.services.trip_service import create_trip, get_trip_or_404, list_trips, save_trip_itinerary, serialize_trip, update_trip
 
 router = APIRouter(prefix="/trips", tags=["trips"])
 
@@ -37,6 +37,18 @@ def get_trip_endpoint(trip_id: str, db: Session = Depends(get_db), current_user:
 def update_trip_endpoint(trip_id: str, payload: TripUpdateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     trip = get_trip_or_404(db, current_user, trip_id)
     trip = update_trip(db, trip, payload)
+    return success_response(serialize_trip(trip).model_dump(mode="json"))
+
+
+@router.put("/{trip_id}/itinerary")
+def save_trip_itinerary_endpoint(
+    trip_id: str,
+    payload: TripItinerarySaveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = get_trip_or_404(db, current_user, trip_id)
+    trip = save_trip_itinerary(db, trip, payload)
     return success_response(serialize_trip(trip).model_dump(mode="json"))
 
 

@@ -1,5 +1,17 @@
-﻿import { appConfig } from "@travelmind/config"
-import type { Envelope, ExportJob, SearchDocument, Trip, TripPreferenceInput, TripRefineInput, User } from "@travelmind/shared-types"
+import { appConfig } from "@travelmind/config"
+import type {
+  AgentRunTrace,
+  Envelope,
+  ExportJob,
+  GeneratedItinerary,
+  LlmSettings,
+  LlmSettingsInput,
+  SearchDocument,
+  Trip,
+  TripPreferenceInput,
+  TripRefineInput,
+  User
+} from "@travelmind/shared-types"
 
 interface LoginPayload {
   email: string
@@ -40,8 +52,6 @@ export function getErrorMessage(error: unknown, fallbackMessage: string): string
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  // Every endpoint returns the shared envelope shape, so the client can centralize
-  // transport, envelope, and cookie handling in one place.
   const response = await fetch(`${appConfig.apiBaseUrl}${path}`, {
     credentials: "include",
     headers: {
@@ -55,8 +65,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const rawPayload = contentType.includes("application/json") ? await response.json() : null
   const envelope = rawPayload as Envelope<T> | null
 
-  // Treat both HTTP failures and envelope-level failures the same way so
-  // view-layer code only has to handle a single ApiError type.
   if (!response.ok || envelope?.error) {
     throw new ApiError(response.status, envelope?.error, response.statusText || "Request failed")
   }
@@ -111,6 +119,12 @@ export const api = {
       body: JSON.stringify(payload)
     })
   },
+  saveTripItinerary(id: string, payload: { itinerary: GeneratedItinerary; latest_agent_trace: AgentRunTrace }) {
+    return request<Trip>(`/api/v1/trips/${id}/itinerary`, {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    })
+  },
   generateTrip(id: string) {
     return request<JobRecord>(`/api/v1/trips/${id}/generate`, {
       method: "POST"
@@ -119,6 +133,15 @@ export const api = {
   refineTrip(id: string, payload: TripRefineInput) {
     return request<JobRecord>(`/api/v1/trips/${id}/refine`, {
       method: "POST",
+      body: JSON.stringify(payload)
+    })
+  },
+  getLlmSettings() {
+    return request<LlmSettings>("/api/v1/settings/llm")
+  },
+  updateLlmSettings(payload: LlmSettingsInput) {
+    return request<LlmSettings>("/api/v1/settings/llm", {
+      method: "PUT",
       body: JSON.stringify(payload)
     })
   },

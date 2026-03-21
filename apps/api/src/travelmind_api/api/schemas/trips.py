@@ -1,8 +1,18 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class ItineraryItem(BaseModel):
@@ -15,6 +25,11 @@ class ItineraryItem(BaseModel):
     score: float
     note: str
 
+    @field_validator("score", mode="before")
+    @classmethod
+    def _normalize_score(cls, value: Any) -> float:
+        return _coerce_float(value, default=0.8)
+
 
 class ItineraryDay(BaseModel):
     day_index: int
@@ -22,6 +37,11 @@ class ItineraryDay(BaseModel):
     summary: str
     total_cost: float
     items: list[ItineraryItem]
+
+    @field_validator("total_cost", mode="before")
+    @classmethod
+    def _normalize_total_cost(cls, value: Any) -> float:
+        return _coerce_float(value, default=0.0)
 
 
 class AgentRunTrace(BaseModel):
@@ -36,6 +56,11 @@ class GeneratedItinerary(BaseModel):
     total_budget_estimate: float
     days: list[ItineraryDay]
     risks: list[str]
+
+    @field_validator("total_budget_estimate", mode="before")
+    @classmethod
+    def _normalize_total_budget_estimate(cls, value: Any) -> float:
+        return _coerce_float(value, default=0.0)
 
 
 class TripCreateRequest(BaseModel):
@@ -76,6 +101,11 @@ class TripRefineRequest(BaseModel):
         if not normalized:
             raise ValueError("value cannot be empty")
         return normalized
+
+
+class TripItinerarySaveRequest(BaseModel):
+    itinerary: dict[str, Any]
+    latest_agent_trace: dict[str, Any]
 
 
 class TripResponse(BaseModel):

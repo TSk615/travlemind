@@ -1,6 +1,7 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { onMounted, ref } from "vue"
 import type { Trip } from "@travelmind/shared-types"
+import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import StatePanel from "@/components/StatePanel.vue"
 import { api, getErrorMessage } from "@/lib/api"
 import { formatCurrency, formatDateRange } from "@/lib/format"
@@ -42,6 +43,8 @@ onMounted(() => {
       </div>
       <p class="muted">{{ t('trips.description') }}</p>
     </article>
+
+    <LlmStatusNotice compact />
 
     <StatePanel
       v-if="loading"

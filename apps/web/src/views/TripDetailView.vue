@@ -1,14 +1,20 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useRoute } from "vue-router"
 import type { JobTimelineEntry, SearchDocument, Trip, TripRefineInput } from "@travelmind/shared-types"
+import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
 import { api, getErrorMessage, type JobRecord } from "@/lib/api"
+import { generateTripInBrowser, refineTripInBrowser } from "@/lib/browserPlanner"
 import { formatCurrency, formatDateRange, formatDateTime } from "@/lib/format"
 import { useI18n } from "@/lib/useI18n"
+import { useLlmSettingsStore } from "@/stores/llmSettings"
 
 const route = useRoute()
+const settingsStore = useLlmSettingsStore()
+void settingsStore.bootstrap()
+
 const trip = ref<Trip | null>(null)
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -28,176 +34,247 @@ const manualLinks = ref("https://kyoto.travel/en")
 const customRefineInstruction = ref("")
 let timer: number | null = null
 
-const STORAGE_PREFIX = "travelmind.trip-job:"
-
+const { locale, t } = useI18n()
 const enCopy = {
   notAvailable: "N/A",
-  workspaceKicker: "Workbench",
-  workspaceTitle: "Run, track, and refine this trip",
-  workspaceDescription: "Generation, refinement, and export now share the same async job workspace.",
-  currentJobKicker: "Current job",
+  currentJob: "Current job",
+  noActiveJob: "No active job yet.",
+  noActiveJobMessage: "Generation and refinement call the third-party model directly from the browser. PDF export still uses your backend job pipeline.",
+  browserGenerateMessage: "Calling the third-party model directly from this browser.",
+  browserRefineMessage: "Calling the third-party model directly from this browser with the current itinerary and refine instruction.",
+  browserSaved: "Saved back to backend",
+  browserSavedMessage: "The generated itinerary has been persisted to your Trip record.",
+  directModeTitle: "Browser-direct third-party model mode",
+  directModeMessage: "Trip generation no longer depends on your backend model API. The browser now calls the third-party model endpoint directly.",
+  quickRefineTitle: "Quick refine",
+  quickRefineSubtitle: "Use browser-side refinement against the third-party model.",
+  customRefineLabel: "Custom refine instruction",
+  customRefinePlaceholder: "Example: make day 2 slower and move the photo-heavy stops earlier.",
+  customRefineSubmit: "Submit refine",
+  refining: "Refining...",
+  refineValidation: "Enter at least 3 characters.",
+  searchPanelTitle: "Search grounding",
+  searchPanelMessage: "These fixed or structured search results come from your backend and are used as grounding in the prompt.",
+  queryLabel: "Query",
+  linksLabel: "Manual links",
+  runSearch: "Run search",
+  searching: "Searching...",
+  searchValidation: "Enter at least 2 characters.",
+  sourceOpen: "Open source",
   stageLabel: "Stage",
-  stageMessageLabel: "Stage note",
   progressLabel: "Progress",
-  timelineTitle: "Timeline",
-  jobEmptyTitle: "No active job yet",
-  jobEmptyMessage: "Generate an itinerary, refine the plan, or export a PDF to populate the workbench.",
-  timelineEmptyTitle: "Timeline waiting for updates",
-  timelineEmptyMessage: "The backend will append stage updates here once the job starts reporting progress.",
-  refiningTitle: "Applying refinement",
-  refiningMessage: "Polling the job endpoint until the refined itinerary is written back to the trip.",
-  refineKicker: "Refine",
-  refineTitle: "Adjust the trip without leaving the workspace",
-  refineDescription: "Quick actions submit common refine requests. Use the text box for a custom instruction.",
-  refineInputLabel: "Custom refine instruction",
-  refinePlaceholder: "Example: make day 2 slower and move the photo-heavy stops earlier.",
-  refineSubmit: "Submit refine request",
-  refineValidation: "Add at least 3 characters before sending a refine request.",
-  refineActions: {
-    budget: "Cut budget",
-    transit: "Reduce transit",
-    photo: "Better for photos",
-    depth: "Add depth"
-  },
-  refinePresets: {
-    budget: "Lower the budget while keeping the trip practical and enjoyable.",
-    transit: "Reduce long transfers and keep each day easier to move through.",
-    photo: "Prioritize photogenic stops and better light for photos.",
-    depth: "Add more local context and deeper cultural experiences."
-  },
-  searchResultsKicker: "Results",
-  searchResultsTitle: "Structured source results",
-  searchResultsDescription: "Search documents now expose normalized place, hours, price, address, coordinates, and source type when available.",
-  searchValidation: "Enter at least 2 characters before searching.",
-  searchFields: {
-    placeName: "Place",
-    category: "Category",
-    openingHours: "Opening hours",
-    priceHint: "Price hint",
-    address: "Address",
-    geo: "Geo",
-    sourceType: "Source type"
-  },
+  updatedLabel: "Updated",
   jobStages: {
     queued: "Queued",
     brief_parsing: "Brief parsing",
-    source_search: "Source search",
-    source_scoring: "Source scoring",
-    route_planning: "Route planning",
-    hotel_matching: "Stay matching",
-    export_ready: "Finalizing"
+    source_search: "Fetch grounding",
+    route_planning: "Call third-party model",
+    export_ready: "Persist result",
+    failed: "Failed"
   } as Record<string, string>,
   jobTypes: {
-    "trip.generate": "Itinerary generation",
-    "trip.refine": "Trip refinement",
+    "trip.generate": "Browser generation",
+    "trip.refine": "Browser refine",
     "export.pdf": "PDF export"
-  } as Record<string, string>
+  } as Record<string, string>,
+  quickRefineActions: [
+    { label: "Cut budget", instruction: "Lower the overall budget while keeping the itinerary practical.", scope: "budget" },
+    { label: "Reduce transit", instruction: "Reduce long transfers and make each day easier to move through.", scope: "travel_flow" },
+    { label: "Better for photos", instruction: "Prioritize more photogenic stops and better photo timing.", scope: "photo_spots" },
+    { label: "Add depth", instruction: "Add more local context and deeper cultural experiences.", scope: "depth" }
+  ]
 }
 
 const zhCopy = {
   notAvailable: "暂无",
-  workspaceKicker: "工作台",
-  workspaceTitle: "在这里运行、跟踪并微调这次行程",
-  workspaceDescription: "生成、refine 和导出现在共用同一套异步任务工作台。",
-  currentJobKicker: "当前任务",
+  currentJob: "当前任务",
+  noActiveJob: "当前还没有活动任务。",
+  noActiveJobMessage: "生成和 refine 会直接由浏览器调用第三方模型。PDF 导出仍然走后端任务链路。",
+  browserGenerateMessage: "正在由当前浏览器直接调用第三方模型。",
+  browserRefineMessage: "正在由当前浏览器结合当前行程和 refine 指令直接调用第三方模型。",
+  browserSaved: "已回写到后端",
+  browserSavedMessage: "生成后的行程已经写回当前 Trip 记录。",
+  directModeTitle: "浏览器直连第三方模型模式",
+  directModeMessage: "Trip 生成已不再依赖后端模型 API。当前浏览器会直接调用第三方模型端点。",
+  quickRefineTitle: "快速微调",
+  quickRefineSubtitle: "使用浏览器侧 refine 能力，直接调整当前行程。",
+  customRefineLabel: "自定义微调指令",
+  customRefinePlaceholder: "例如：让第 2 天更轻松，并把更适合拍照的点位提前。",
+  customRefineSubmit: "提交微调",
+  refining: "微调中...",
+  refineValidation: "请输入至少 3 个字符。",
+  searchPanelTitle: "搜索 Grounding",
+  searchPanelMessage: "这些固定或结构化搜索结果来自你的后端，并会作为 prompt 的 grounding 输入。",
+  queryLabel: "查询词",
+  linksLabel: "手动链接",
+  runSearch: "开始检索",
+  searching: "检索中...",
+  searchValidation: "请输入至少 2 个字符。",
+  sourceOpen: "打开来源",
   stageLabel: "阶段",
-  stageMessageLabel: "阶段说明",
   progressLabel: "进度",
-  timelineTitle: "时间线",
-  jobEmptyTitle: "还没有活动任务",
-  jobEmptyMessage: "先生成行程、发起 refine，或导出 PDF，工作台就会开始记录进度。",
-  timelineEmptyTitle: "时间线等待更新",
-  timelineEmptyMessage: "任务开始上报后，后端会把阶段更新追加到这里。",
-  refiningTitle: "正在应用 refine",
-  refiningMessage: "正在轮询任务状态，直到新的行程结果写回 trip 记录。",
-  refineKicker: "Refine",
-  refineTitle: "不离开工作台就能调整行程",
-  refineDescription: "快捷操作会直接提交常见 refine 指令，也可以在文本框里输入自定义要求。",
-  refineInputLabel: "自定义 refine 指令",
-  refinePlaceholder: "例如：把第 2 天放慢一点，并把更适合拍照的点位提前。",
-  refineSubmit: "提交 refine 请求",
-  refineValidation: "请至少输入 3 个字符后再提交 refine。",
-  refineActions: {
-    budget: "压预算",
-    transit: "减少赶路",
-    photo: "更适合拍照",
-    depth: "增加深度体验"
-  },
-  refinePresets: {
-    budget: "请在保证行程可执行和体验不明显下降的前提下，尽量压低整体预算。",
-    transit: "请减少长距离转场，让每天的移动更轻松、节奏更顺。",
-    photo: "请优先安排更适合拍照的点位和更好的光线时段。",
-    depth: "请加入更多在地背景信息和更有深度的文化体验。"
-  },
-  searchResultsKicker: "结果",
-  searchResultsTitle: "结构化搜索结果",
-  searchResultsDescription: "搜索结果会尽量展示地点、营业时间、价格提示、地址、坐标和来源类型。",
-  searchValidation: "请至少输入 2 个字符后再搜索。",
-  searchFields: {
-    placeName: "地点",
-    category: "分类",
-    openingHours: "营业时间",
-    priceHint: "价格提示",
-    address: "地址",
-    geo: "坐标",
-    sourceType: "来源类型"
-  },
+  updatedLabel: "更新时间",
   jobStages: {
     queued: "已排队",
-    brief_parsing: "解析需求",
-    source_search: "收集来源",
-    source_scoring: "来源评分",
-    route_planning: "路线规划",
-    hotel_matching: "住宿补位",
-    export_ready: "整理结果"
+    brief_parsing: "解析 Brief",
+    source_search: "获取参考来源",
+    route_planning: "调用第三方模型",
+    export_ready: "回写结果",
+    failed: "失败"
   } as Record<string, string>,
   jobTypes: {
-    "trip.generate": "生成行程",
-    "trip.refine": "微调行程",
-    "export.pdf": "导出 PDF"
-  } as Record<string, string>
+    "trip.generate": "浏览器生成",
+    "trip.refine": "浏览器微调",
+    "export.pdf": "PDF 导出"
+  } as Record<string, string>,
+  quickRefineActions: [
+    { label: "压预算", instruction: "在保证整体可执行的前提下降低总预算。", scope: "budget" },
+    { label: "减少赶路", instruction: "减少长距离转场，让每天移动更轻松。", scope: "travel_flow" },
+    { label: "更适合拍照", instruction: "优先安排更适合拍照的点位和更好的拍摄时段。", scope: "photo_spots" },
+    { label: "增加深度体验", instruction: "增加更有在地感和文化深度的体验。", scope: "depth" }
+  ]
 }
 
-const { locale, t } = useI18n()
 const copy = computed(() => (locale.value === "zh-CN" ? zhCopy : enCopy))
 const tripId = computed(() => String(route.params.id ?? ""))
+const hasItinerary = computed(() => Boolean(trip.value?.itinerary))
 const isJobRunning = computed(() => activeJob.value?.status === "queued" || activeJob.value?.status === "running")
-const actionLocked = computed(() => generatePending.value || exportPending.value || refinePending.value || isJobRunning.value)
+const actionLocked = computed(() => generatePending.value || refinePending.value || exportPending.value || isJobRunning.value)
+const canUseBrowserModel = computed(() => settingsStore.loaded && settingsStore.isConfigured)
 const jobTimeline = computed<JobTimelineEntry[]>(() => (Array.isArray(activeJob.value?.timeline_json) ? activeJob.value.timeline_json : []))
 const jobProgress = computed(() => clampProgress(activeJob.value?.progress_percent, activeJob.value?.status))
 
-const quickRefineActions = computed(() => [
-  { key: "budget", label: copy.value.refineActions.budget, instruction: copy.value.refinePresets.budget, scope: "budget" },
-  { key: "transit", label: copy.value.refineActions.transit, instruction: copy.value.refinePresets.transit, scope: "travel_flow" },
-  { key: "photo", label: copy.value.refineActions.photo, instruction: copy.value.refinePresets.photo, scope: "photo_spots" },
-  { key: "depth", label: copy.value.refineActions.depth, instruction: copy.value.refinePresets.depth, scope: "depth" }
-])
+const quickRefineActions = computed(() => copy.value.quickRefineActions)
 
-function getStorageKey(id: string): string {
-  return `${STORAGE_PREFIX}${id}`
+function createBrowserJob(type: JobRecord["type"], stage: string, stageMessage: string, progressPercent: number): JobRecord {
+  const now = new Date().toISOString()
+  return {
+    job_id: `browser:${type}:${Date.now()}`,
+    status: "running",
+    type,
+    trip_id: tripId.value,
+    created_at: now,
+    updated_at: now,
+    stage,
+    stage_message: stageMessage,
+    progress_percent: progressPercent,
+    timeline_json: [
+      {
+        recorded_at: now,
+        status: "running",
+        stage,
+        stage_message: stageMessage,
+        progress_percent: progressPercent
+      }
+    ],
+    result: null,
+    error_message: null
+  }
 }
 
-function rememberJob(job: JobRecord): void {
-  if (typeof window === "undefined") {
+function updateBrowserJob(update: {
+  status?: JobRecord["status"]
+  stage?: string
+  stage_message?: string
+  progress_percent?: number
+  result?: Record<string, unknown> | null
+  error_message?: string | null
+}) {
+  if (!activeJob.value) {
     return
   }
 
-  try {
-    window.localStorage.setItem(getStorageKey(tripId.value), job.job_id)
-  } catch {
-    // Ignore storage errors and keep the current in-memory state.
+  const now = new Date().toISOString()
+  const nextStatus = update.status ?? activeJob.value.status
+  const nextStage = update.stage ?? activeJob.value.stage ?? null
+  const nextStageMessage = update.stage_message ?? activeJob.value.stage_message ?? null
+  const nextProgress = typeof update.progress_percent === "number" ? update.progress_percent : activeJob.value.progress_percent ?? null
+
+  activeJob.value = {
+    ...activeJob.value,
+    ...update,
+    status: nextStatus,
+    stage: nextStage,
+    stage_message: nextStageMessage,
+    progress_percent: nextProgress,
+    updated_at: now,
+    timeline_json: [
+      ...activeJob.value.timeline_json,
+      {
+        recorded_at: now,
+        status: nextStatus,
+        stage: nextStage,
+        stage_message: nextStageMessage,
+        progress_percent: nextProgress
+      }
+    ]
   }
 }
 
-function clearRememberedJob(): void {
-  if (typeof window === "undefined") {
-    return
+function ensureBrowserLlmConfig() {
+  const config = settingsStore.resolvedConfig
+  if (!config || !settingsStore.isConfigured) {
+    throw new Error(locale.value === "zh-CN" ? "请先配置 base URL、API Key、model 和接口格式。" : "Configure base URL, API key, model, and API format first.")
+  }
+  return config
+}
+
+function clampProgress(value?: number | null, status?: string): number {
+  if (typeof value === "number") {
+    return Math.max(0, Math.min(100, Math.round(value)))
+  }
+  if (status === "completed") {
+    return 100
+  }
+  return 0
+}
+
+function formatProgress(value?: number | null, status?: string): string {
+  if (typeof value === "number" || status === "queued" || status === "running" || status === "completed") {
+    return `${clampProgress(value, status)}%`
+  }
+  return copy.value.notAvailable
+}
+
+function fieldValue(value?: string | null): string {
+  const normalized = value?.trim()
+  return normalized && normalized.length > 0 ? normalized : copy.value.notAvailable
+}
+
+function paceLabel(value: string): string {
+  const key = `common.pace.${value}`
+  const translated = t(key)
+  return translated === key ? value : translated
+}
+
+function formatStage(value?: string | null): string {
+  if (!value) {
+    return copy.value.notAvailable
+  }
+  return copy.value.jobStages[value] ?? value
+}
+
+function formatJobType(value?: string | null): string {
+  if (!value) {
+    return copy.value.notAvailable
+  }
+  return copy.value.jobTypes[value] ?? value
+}
+
+async function loadTrip(initial = false) {
+  if (initial) {
+    loading.value = true
+    error.value = null
   }
 
   try {
-    window.localStorage.removeItem(getStorageKey(tripId.value))
-  } catch {
-    // Ignore storage cleanup errors.
+    trip.value = await api.getTrip(tripId.value)
+  } catch (value) {
+    error.value = getErrorMessage(value, t("tripDetail.unavailableTitle"))
+  } finally {
+    if (initial) {
+      loading.value = false
+    }
   }
 }
 
@@ -208,194 +285,117 @@ function stopPolling() {
   }
 }
 
-function paceLabel(value: string): string {
-  const key = `common.pace.${value}`
-  const translated = t(key)
-  return translated === key ? value : translated
-}
-
-function humanizeToken(value: string): string {
-  return value
-    .split(/[_\-.]+/)
-    .filter(Boolean)
-    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-    .join(" ")
-}
-
-function formatStage(value?: string | null): string {
-  if (!value) {
-    return copy.value.notAvailable
-  }
-
-  return copy.value.jobStages[value] ?? humanizeToken(value)
-}
-
-function formatJobType(value?: string | null): string {
-  if (!value) {
-    return copy.value.notAvailable
-  }
-
-  return copy.value.jobTypes[value] ?? humanizeToken(value)
-}
-
-function clampProgress(value?: number | null, status?: string): number {
-  if (typeof value === "number") {
-    return Math.max(0, Math.min(100, Math.round(value)))
-  }
-
-  if (status === "completed") {
-    return 100
-  }
-
-  return 0
-}
-
-function formatProgress(value?: number | null, status?: string): string {
-  if (typeof value === "number" || status === "queued" || status === "running" || status === "completed") {
-    return `${clampProgress(value, status)}%`
-  }
-
-  return copy.value.notAvailable
-}
-
-function fieldValue(value?: string | null): string {
-  const normalized = value?.trim()
-  return normalized && normalized.length > 0 ? normalized : copy.value.notAvailable
-}
-
-function formatGeo(doc: SearchDocument): string {
-  if (!doc.geo || !Number.isFinite(doc.geo.lat) || !Number.isFinite(doc.geo.lng)) {
-    return copy.value.notAvailable
-  }
-
-  return `${doc.geo.lat.toFixed(4)}, ${doc.geo.lng.toFixed(4)}`
-}
-
-function setJobError(jobType: string | undefined, message: string): void {
-  if (jobType === "export.pdf") {
-    exportError.value = message
-    return
-  }
-
-  if (jobType === "trip.refine") {
-    refineError.value = message
-    return
-  }
-
-  generateError.value = message
-}
-
-async function loadTrip(options: { initial?: boolean } = {}) {
-  const initial = options.initial ?? false
-
-  if (initial) {
-    loading.value = true
-    error.value = null
-  }
-
-  try {
-    trip.value = await api.getTrip(tripId.value)
-  } catch (value) {
-    if (initial || !trip.value) {
-      trip.value = null
-      error.value = getErrorMessage(value, t("tripDetail.unavailableTitle"))
-    }
-  } finally {
-    if (initial) {
-      loading.value = false
-    }
-  }
-}
-
-async function restoreRememberedJob() {
-  if (typeof window === "undefined") {
-    return
-  }
-
-  const rememberedId = window.localStorage.getItem(getStorageKey(tripId.value))
-  if (!rememberedId) {
-    return
-  }
-
-  try {
-    activeJob.value = await api.getJob(rememberedId)
-    rememberJob(activeJob.value)
-
-    if (activeJob.value.status === "queued" || activeJob.value.status === "running") {
-      timer = window.setTimeout(() => {
-        void pollJob(rememberedId)
-      }, 1500)
-    }
-  } catch {
-    activeJob.value = null
-    clearRememberedJob()
-  }
-}
-
-async function pollJob(jobId: string) {
+async function pollExportJob(jobId: string) {
   stopPolling()
 
   try {
     activeJob.value = await api.getJob(jobId)
-    rememberJob(activeJob.value)
-
     if (activeJob.value.status === "completed" || activeJob.value.status === "failed") {
-      await loadTrip()
+      await loadTrip(false)
       return
     }
-
     timer = window.setTimeout(() => {
-      void pollJob(jobId)
+      void pollExportJob(jobId)
     }, 1500)
   } catch (value) {
-    const message = getErrorMessage(value, t("tripDetail.asyncFailedTitle"))
-    setJobError(activeJob.value?.type, message)
+    exportError.value = getErrorMessage(value, t("tripDetail.exportFailedTitle"))
+  }
+}
+
+async function collectGroundingDocs(): Promise<SearchDocument[]> {
+  if (!trip.value) {
+    return []
+  }
+
+  const query = searchQuery.value.trim() || `${trip.value.destination} ${trip.value.interests.join(" ")}`.trim()
+  if (query.length < 2) {
+    return searchResults.value
+  }
+
+  try {
+    searchPending.value = true
+    searchError.value = null
+    const docs = await api.search({
+      query,
+      destination: trip.value.destination,
+      manual_links: manualLinks.value
+        .split(/\r?\n|,/) 
+        .map((value) => value.trim())
+        .filter(Boolean)
+    })
+    searchResults.value = docs
+    hasSearched.value = true
+    return docs
+  } catch (value) {
+    searchError.value = getErrorMessage(value, t("tripDetail.searchFailedTitle"))
+    return searchResults.value
+  } finally {
+    searchPending.value = false
   }
 }
 
 async function generate() {
+  if (!trip.value) {
+    return
+  }
+
   generatePending.value = true
   generateError.value = null
 
   try {
-    const job = await api.generateTrip(tripId.value)
-    activeJob.value = job
-    rememberJob(job)
-    await pollJob(job.job_id)
+    await settingsStore.fetch(true)
+    const config = ensureBrowserLlmConfig()
+    activeJob.value = createBrowserJob("trip.generate", "brief_parsing", copy.value.browserGenerateMessage, 12)
+    const groundedDocs = await collectGroundingDocs()
+    updateBrowserJob({ stage: "source_search", stage_message: copy.value.searchPanelMessage, progress_percent: 32 })
+    updateBrowserJob({ stage: "route_planning", stage_message: copy.value.browserGenerateMessage, progress_percent: 76 })
+    const result = await generateTripInBrowser(config, trip.value, groundedDocs)
+    updateBrowserJob({ stage: "export_ready", stage_message: copy.value.browserSavedMessage, progress_percent: 92 })
+    trip.value = await api.saveTripItinerary(tripId.value, {
+      itinerary: result.itinerary,
+      latest_agent_trace: result.trace
+    })
+    updateBrowserJob({ status: "completed", stage: "export_ready", stage_message: copy.value.browserSaved, progress_percent: 100, result: { summary: result.itinerary.summary } })
   } catch (value) {
-    generateError.value = getErrorMessage(value, t("tripDetail.generationFailedTitle"))
+    const message = getErrorMessage(value, t("tripDetail.generationFailedTitle"))
+    generateError.value = message
+    if (activeJob.value?.type === "trip.generate") {
+      updateBrowserJob({ status: "failed", error_message: message, stage_message: message })
+    }
   } finally {
     generatePending.value = false
   }
 }
 
-async function exportPdf() {
-  exportPending.value = true
-  exportError.value = null
-
-  try {
-    const job = await api.exportPdf(tripId.value)
-    activeJob.value = job
-    rememberJob(job)
-    await pollJob(job.job_id)
-  } catch (value) {
-    exportError.value = getErrorMessage(value, t("tripDetail.exportFailedTitle"))
-  } finally {
-    exportPending.value = false
-  }
-}
-
 async function submitRefine(payload: TripRefineInput) {
+  if (!trip.value || !trip.value.itinerary) {
+    refineError.value = t("tripDetail.itineraryEmptyMessage")
+    return
+  }
+
   refinePending.value = true
   refineError.value = null
 
   try {
-    const job = await api.refineTrip(tripId.value, payload)
-    activeJob.value = job
-    rememberJob(job)
-    await pollJob(job.job_id)
+    await settingsStore.fetch(true)
+    const config = ensureBrowserLlmConfig()
+    activeJob.value = createBrowserJob("trip.refine", "brief_parsing", copy.value.browserRefineMessage, 12)
+    const groundedDocs = hasSearched ? searchResults.value : await collectGroundingDocs()
+    updateBrowserJob({ stage: "source_search", stage_message: copy.value.searchPanelMessage, progress_percent: 32 })
+    updateBrowserJob({ stage: "route_planning", stage_message: copy.value.browserRefineMessage, progress_percent: 76 })
+    const result = await refineTripInBrowser(config, trip.value, groundedDocs, payload)
+    updateBrowserJob({ stage: "export_ready", stage_message: copy.value.browserSavedMessage, progress_percent: 92 })
+    trip.value = await api.saveTripItinerary(tripId.value, {
+      itinerary: result.itinerary,
+      latest_agent_trace: result.trace
+    })
+    updateBrowserJob({ status: "completed", stage: "export_ready", stage_message: copy.value.browserSaved, progress_percent: 100, result: { summary: result.itinerary.summary } })
   } catch (value) {
-    refineError.value = getErrorMessage(value, t("tripDetail.asyncFailedTitle"))
+    const message = getErrorMessage(value, t("tripDetail.asyncFailedTitle"))
+    refineError.value = message
+    if (activeJob.value?.type === "trip.refine") {
+      updateBrowserJob({ status: "failed", error_message: message, stage_message: message })
+    }
   } finally {
     refinePending.value = false
   }
@@ -422,6 +422,21 @@ async function runPresetRefine(action: { instruction: string; scope: string }) {
   })
 }
 
+async function exportPdf() {
+  exportPending.value = true
+  exportError.value = null
+
+  try {
+    const job = await api.exportPdf(tripId.value)
+    activeJob.value = job
+    await pollExportJob(job.job_id)
+  } catch (value) {
+    exportError.value = getErrorMessage(value, t("tripDetail.exportFailedTitle"))
+  } finally {
+    exportPending.value = false
+  }
+}
+
 async function runSearch() {
   const query = searchQuery.value.trim()
   if (query.length < 2) {
@@ -431,30 +446,7 @@ async function runSearch() {
     return
   }
 
-  hasSearched.value = true
-  searchPending.value = true
-  searchError.value = null
-
-  try {
-    searchResults.value = await api.search({
-      query,
-      destination: trip.value?.destination,
-      manual_links: manualLinks.value
-        .split(/\r?\n|,/) 
-        .map((value) => value.trim())
-        .filter(Boolean)
-    })
-  } catch (value) {
-    searchResults.value = []
-    searchError.value = getErrorMessage(value, t("tripDetail.searchFailedTitle"))
-  } finally {
-    searchPending.value = false
-  }
-}
-
-async function initializeView() {
-  await loadTrip({ initial: true })
-  await restoreRememberedJob()
+  await collectGroundingDocs()
 }
 
 watch(
@@ -468,10 +460,8 @@ watch(
     searchError.value = null
     searchResults.value = []
     hasSearched.value = false
-    searchQuery.value = "best quiet morning spots"
-    manualLinks.value = "https://kyoto.travel/en"
     customRefineInstruction.value = ""
-    void initializeView()
+    void loadTrip(true)
   },
   { immediate: true }
 )
@@ -483,21 +473,9 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="page-grid">
-    <StatePanel
-      v-if="loading"
-      kind="loading"
-      :title="t('tripDetail.loadingTitle')"
-      :message="t('tripDetail.loadingMessage')"
-    />
+    <StatePanel v-if="loading" kind="loading" :title="t('tripDetail.loadingTitle')" :message="t('tripDetail.loadingMessage')" />
 
-    <StatePanel
-      v-else-if="error"
-      kind="error"
-      :title="t('tripDetail.unavailableTitle')"
-      :message="error"
-      :action-label="t('common.retry')"
-      @action="initializeView"
-    />
+    <StatePanel v-else-if="error" kind="error" :title="t('tripDetail.unavailableTitle')" :message="error" :action-label="t('common.retry')" @action="loadTrip(true)" />
 
     <template v-else-if="trip">
       <article class="panel panel-stack">
@@ -511,49 +489,36 @@ onBeforeUnmount(() => {
               <span>{{ t('common.travelersCount', { count: trip.travelers }) }}</span>
               <span>{{ t('common.paceValue', { value: paceLabel(trip.pace) }) }}</span>
             </div>
-            <p v-if="trip.interests.length" class="muted">{{ trip.interests.join(' · ') }}</p>
           </div>
           <div class="stack-actions">
-            <button class="primary" type="button" :disabled="actionLocked" @click="generate">
+            <button class="primary" type="button" :disabled="actionLocked || !settingsStore.loaded" @click="generate">
               {{ generatePending ? t('common.generating') : t('common.generateItinerary') }}
             </button>
-            <button type="button" :disabled="actionLocked" @click="exportPdf">
+            <button type="button" :disabled="!hasItinerary || actionLocked" @click="exportPdf">
               {{ exportPending ? t('common.exporting') : t('common.exportPdf') }}
             </button>
           </div>
         </div>
       </article>
 
+      <LlmStatusNotice compact />
+      <StatePanel kind="info" :title="copy.directModeTitle" :message="copy.directModeMessage" compact />
+      <StatePanel v-if="generateError" kind="error" :title="t('tripDetail.generationFailedTitle')" :message="generateError" compact />
+      <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="refineError" compact />
+      <StatePanel v-if="exportError" kind="error" :title="t('tripDetail.exportFailedTitle')" :message="exportError" compact />
+
       <div class="workspace-layout">
         <div class="workspace-column">
           <article class="panel panel-stack">
             <div>
-              <p class="kicker">{{ copy.workspaceKicker }}</p>
-              <h2>{{ copy.workspaceTitle }}</h2>
-              <p class="muted">{{ copy.workspaceDescription }}</p>
+              <p class="kicker">{{ copy.currentJob }}</p>
+              <h2>{{ activeJob ? formatJobType(activeJob.type) : copy.noActiveJob }}</h2>
+              <p class="muted">{{ activeJob ? activeJob.job_id : copy.noActiveJobMessage }}</p>
             </div>
 
-            <StatePanel
-              v-if="!activeJob"
-              kind="info"
-              :title="copy.jobEmptyTitle"
-              :message="copy.jobEmptyMessage"
-              compact
-            />
+            <StatePanel v-if="!activeJob" kind="info" :title="copy.noActiveJob" :message="copy.noActiveJobMessage" compact />
 
             <template v-else>
-              <div class="inline-actions" style="justify-content: space-between; align-items: flex-start;">
-                <div>
-                  <p class="kicker">{{ copy.currentJobKicker }}</p>
-                  <h3>{{ formatJobType(activeJob.type) }}</h3>
-                  <p class="muted">{{ activeJob.job_id }}</p>
-                </div>
-                <div class="stack-actions">
-                  <StatusPill :status="activeJob.status" />
-                  <span class="muted">{{ t('common.updatedAt', { value: formatDateTime(activeJob.updated_at) }) }}</span>
-                </div>
-              </div>
-
               <div class="metric-grid">
                 <article class="metric-card">
                   <p class="kicker">{{ copy.stageLabel }}</p>
@@ -564,83 +529,27 @@ onBeforeUnmount(() => {
                   <strong>{{ formatProgress(activeJob.progress_percent, activeJob.status) }}</strong>
                 </article>
                 <article class="metric-card">
-                  <p class="kicker">{{ copy.stageMessageLabel }}</p>
-                  <p>{{ fieldValue(activeJob.stage_message) }}</p>
+                  <p class="kicker">{{ copy.updatedLabel }}</p>
+                  <p>{{ formatDateTime(activeJob.updated_at) }}</p>
                 </article>
               </div>
 
-              <div class="progress-block">
-                <div class="progress-inline">
-                  <span>{{ copy.progressLabel }}</span>
-                  <strong>{{ formatProgress(activeJob.progress_percent, activeJob.status) }}</strong>
-                </div>
-                <div class="progress-track" aria-hidden="true">
-                  <div class="progress-fill" :style="{ width: `${jobProgress}%` }"></div>
-                </div>
+              <div class="progress-track" aria-hidden="true">
+                <div class="progress-fill" :style="{ width: `${jobProgress}%` }"></div>
               </div>
 
-              <div v-if="activeJob" class="inline-actions" style="align-items: center;">
-                <RouterLink v-if="activeJob.type === 'export.pdf'" class="button-link" :to="`/exports/${activeJob.job_id}`">{{ t('common.openExport') }}</RouterLink>
-                <a
-                  v-if="activeJob.type === 'export.pdf' && typeof activeJob.result?.file_url === 'string'"
-                  class="button-link primary"
-                  :href="activeJob.result.file_url"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {{ t('common.downloadPdf') }}
-                </a>
-              </div>
+              <p class="muted">{{ fieldValue(activeJob.stage_message) }}</p>
 
-              <StatePanel v-if="generateError" kind="error" :title="t('tripDetail.generationFailedTitle')" :message="generateError" compact />
-              <StatePanel v-if="exportError" kind="error" :title="t('tripDetail.exportFailedTitle')" :message="exportError" compact />
-              <StatePanel v-if="refineError" kind="error" :title="copy.refineTitle" :message="refineError" compact />
-
-              <StatePanel
-                v-if="activeJob.status === 'queued' || activeJob.status === 'running'"
-                kind="loading"
-                :title="activeJob.type === 'trip.refine' ? copy.refiningTitle : activeJob.type === 'export.pdf' ? t('tripDetail.exportingTitle') : t('tripDetail.generatingTitle')"
-                :message="activeJob.type === 'trip.refine' ? copy.refiningMessage : t('tripDetail.generatingMessage')"
-                compact
-              />
-
-              <StatePanel
-                v-if="activeJob.status === 'failed' && activeJob.error_message"
-                kind="error"
-                :title="t('tripDetail.asyncFailedTitle')"
-                :message="activeJob.error_message"
-                compact
-              />
-
-              <div class="panel-subsection">
-                <div class="inline-actions" style="justify-content: space-between; align-items: center;">
-                  <h3>{{ copy.timelineTitle }}</h3>
-                  <span class="muted">{{ jobTimeline.length }}</span>
-                </div>
-
-                <StatePanel
-                  v-if="jobTimeline.length === 0"
-                  kind="info"
-                  :title="copy.timelineEmptyTitle"
-                  :message="copy.timelineEmptyMessage"
-                  compact
-                />
-
-                <ol v-else class="timeline-list">
-                  <li v-for="entry in jobTimeline" :key="`${entry.recorded_at}-${entry.status}-${entry.stage ?? 'none'}`" class="timeline-item">
-                    <div class="timeline-meta">
-                      <StatusPill :status="entry.status" />
-                      <span class="muted">{{ formatStage(entry.stage) }}</span>
-                      <span class="muted">{{ formatDateTime(entry.recorded_at) }}</span>
-                    </div>
-                    <p>{{ fieldValue(entry.stage_message) }}</p>
-                    <div class="progress-inline">
-                      <span>{{ copy.progressLabel }}</span>
-                      <strong>{{ formatProgress(entry.progress_percent, entry.status) }}</strong>
-                    </div>
-                  </li>
-                </ol>
-              </div>
+              <ol v-if="jobTimeline.length" class="timeline-list">
+                <li v-for="entry in jobTimeline" :key="`${entry.recorded_at}-${entry.status}-${entry.stage ?? 'none'}`" class="timeline-item">
+                  <div class="timeline-meta">
+                    <StatusPill :status="entry.status" />
+                    <span class="muted">{{ formatStage(entry.stage) }}</span>
+                    <span class="muted">{{ formatDateTime(entry.recorded_at) }}</span>
+                  </div>
+                  <p>{{ fieldValue(entry.stage_message) }}</p>
+                </li>
+              </ol>
             </template>
           </article>
 
@@ -669,14 +578,6 @@ onBeforeUnmount(() => {
             </div>
 
             <StatePanel
-              v-else-if="generatePending || refinePending || (activeJob && (activeJob.type === 'trip.generate' || activeJob.type === 'trip.refine') && activeJob.status !== 'failed')"
-              kind="loading"
-              :title="t('tripDetail.itineraryPendingTitle')"
-              :message="t('tripDetail.itineraryPendingMessage')"
-              compact
-            />
-
-            <StatePanel
               v-else
               kind="empty"
               :title="t('tripDetail.itineraryEmptyTitle')"
@@ -684,172 +585,75 @@ onBeforeUnmount(() => {
               compact
             >
               <template #actions>
-                <button class="primary" type="button" :disabled="actionLocked" @click="generate">{{ t('common.generateItinerary') }}</button>
+                <button class="primary" type="button" :disabled="actionLocked || !settingsStore.loaded" @click="generate">{{ t('common.generateItinerary') }}</button>
               </template>
             </StatePanel>
-          </article>
-
-          <article class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ copy.searchResultsKicker }}</p>
-              <h2>{{ copy.searchResultsTitle }}</h2>
-              <p class="muted">{{ copy.searchResultsDescription }}</p>
-            </div>
-
-            <StatePanel
-              v-if="searchPending"
-              kind="loading"
-              :title="t('tripDetail.searchLoadingTitle')"
-              :message="t('tripDetail.searchLoadingMessage')"
-              compact
-            />
-
-            <StatePanel
-              v-else-if="searchError"
-              kind="error"
-              :title="t('tripDetail.searchFailedTitle')"
-              :message="searchError"
-              compact
-            />
-
-            <StatePanel
-              v-else-if="!hasSearched"
-              kind="info"
-              :title="t('tripDetail.searchEmptyBeforeTitle')"
-              :message="t('tripDetail.searchEmptyBeforeMessage')"
-              compact
-            />
-
-            <StatePanel
-              v-else-if="searchResults.length === 0"
-              kind="empty"
-              :title="t('tripDetail.searchEmptyTitle')"
-              :message="t('tripDetail.searchEmptyMessage')"
-              compact
-            />
-
-            <div v-else class="page-grid">
-              <article v-for="doc in searchResults" :key="doc.id" class="search-card panel-stack">
-                <div class="inline-actions" style="justify-content: space-between; align-items: flex-start;">
-                  <div>
-                    <p class="kicker">{{ doc.platform }}</p>
-                    <h3>{{ doc.place_name || doc.title }}</h3>
-                  </div>
-                  <p class="muted">{{ t('common.finalScore', { value: doc.scores.final_score }) }}</p>
-                </div>
-                <p>{{ doc.summary }}</p>
-                <dl class="data-grid">
-                  <div class="data-pair">
-                    <dt>{{ copy.searchFields.placeName }}</dt>
-                    <dd>{{ fieldValue(doc.place_name) }}</dd>
-                  </div>
-                  <div class="data-pair">
-                    <dt>{{ copy.searchFields.category }}</dt>
-                    <dd>{{ fieldValue(doc.category) }}</dd>
-                  </div>
-                  <div class="data-pair">
-                    <dt>{{ copy.searchFields.openingHours }}</dt>
-                    <dd>{{ fieldValue(doc.opening_hours) }}</dd>
-                  </div>
-                  <div class="data-pair">
-                    <dt>{{ copy.searchFields.priceHint }}</dt>
-                    <dd>{{ fieldValue(doc.price_hint) }}</dd>
-                  </div>
-                  <div class="data-pair">
-                    <dt>{{ copy.searchFields.address }}</dt>
-                    <dd>{{ fieldValue(doc.address) }}</dd>
-                  </div>
-                  <div class="data-pair">
-                    <dt>{{ copy.searchFields.geo }}</dt>
-                    <dd>{{ formatGeo(doc) }}</dd>
-                  </div>
-                  <div class="data-pair">
-                    <dt>{{ copy.searchFields.sourceType }}</dt>
-                    <dd>{{ fieldValue(doc.source_type) }}</dd>
-                  </div>
-                </dl>
-                <ul v-if="doc.scores.reasons.length" class="summary-list">
-                  <li v-for="reason in doc.scores.reasons" :key="reason">{{ reason }}</li>
-                </ul>
-                <div class="inline-actions" style="justify-content: space-between; align-items: center;">
-                  <span class="muted">{{ doc.title }}</span>
-                  <a class="button-link" :href="doc.url" target="_blank" rel="noreferrer">{{ t('common.openSource') }}</a>
-                </div>
-              </article>
-            </div>
           </article>
         </div>
 
         <div class="workspace-column">
           <article class="panel panel-stack">
             <div>
-              <p class="kicker">{{ copy.refineKicker }}</p>
-              <h2>{{ copy.refineTitle }}</h2>
-              <p class="muted">{{ copy.refineDescription }}</p>
+              <p class="kicker">{{ copy.quickRefineTitle }}</p>
+              <h2>{{ copy.quickRefineTitle }}</h2>
+              <p class="muted">{{ copy.quickRefineSubtitle }}</p>
             </div>
 
             <div class="quick-actions-grid">
-              <button
-                v-for="action in quickRefineActions"
-                :key="action.key"
-                type="button"
-                :disabled="actionLocked"
-                @click="runPresetRefine(action)"
-              >
+              <button v-for="action in quickRefineActions" :key="action.label" type="button" :disabled="actionLocked || !canUseBrowserModel" @click="runPresetRefine(action)">
                 {{ action.label }}
               </button>
             </div>
 
             <div class="field">
-              <label for="custom-refine">{{ copy.refineInputLabel }}</label>
-              <textarea id="custom-refine" v-model="customRefineInstruction" :placeholder="copy.refinePlaceholder"></textarea>
+              <label for="custom-refine">{{ copy.customRefineLabel }}</label>
+              <textarea id="custom-refine" v-model="customRefineInstruction" :placeholder="copy.customRefinePlaceholder"></textarea>
             </div>
 
             <div class="inline-actions">
-              <button class="primary" type="button" :disabled="actionLocked" @click="submitCustomRefine">
-                {{ refinePending ? copy.refiningTitle : copy.refineSubmit }}
+              <button class="primary" type="button" :disabled="actionLocked || !canUseBrowserModel" @click="submitCustomRefine">
+                {{ refinePending ? copy.refining : copy.customRefineSubmit }}
               </button>
             </div>
           </article>
 
           <article class="panel panel-stack">
             <div>
-              <p class="kicker">{{ t('tripDetail.searchKicker') }}</p>
-              <h2>{{ t('tripDetail.searchTitle') }}</h2>
-              <p class="muted">{{ t('tripDetail.searchDescription') }}</p>
+              <p class="kicker">{{ copy.searchPanelTitle }}</p>
+              <h2>{{ copy.searchPanelTitle }}</h2>
+              <p class="muted">{{ copy.searchPanelMessage }}</p>
             </div>
 
             <div class="field">
-              <label for="query">{{ t('tripDetail.queryLabel') }}</label>
+              <label for="query">{{ copy.queryLabel }}</label>
               <input id="query" v-model="searchQuery" />
             </div>
 
             <div class="field">
-              <label for="links">{{ t('tripDetail.linksLabel') }}</label>
+              <label for="links">{{ copy.linksLabel }}</label>
               <textarea id="links" v-model="manualLinks"></textarea>
             </div>
 
             <div class="inline-actions">
               <button class="primary" type="button" :disabled="searchPending" @click="runSearch">
-                {{ searchPending ? t('common.searching') : t('common.runSearch') }}
+                {{ searchPending ? copy.searching : copy.runSearch }}
               </button>
             </div>
-          </article>
 
-          <article v-if="trip.latest_agent_trace" class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ t('tripDetail.agentTrace') }}</p>
-              <h2>{{ trip.latest_agent_trace.provider }}</h2>
-              <p class="muted">{{ trip.latest_agent_trace.workflow_id }}</p>
+            <StatePanel v-if="searchError" kind="error" :title="t('tripDetail.searchFailedTitle')" :message="searchError" compact />
+
+            <div v-if="searchResults.length" class="page-grid">
+              <article v-for="doc in searchResults" :key="doc.id" class="search-card panel-stack">
+                <p class="kicker">{{ doc.platform }}</p>
+                <h3>{{ doc.place_name || doc.title }}</h3>
+                <p>{{ doc.summary }}</p>
+                <p class="muted">{{ t('common.finalScore', { value: doc.scores.final_score }) }}</p>
+                <a class="button-link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+              </article>
             </div>
-            <ul class="detail-list">
-              <li v-for="note in trip.latest_agent_trace.notes" :key="note">{{ note }}</li>
-            </ul>
-            <p v-if="trip.latest_agent_trace.license_notice" class="muted">{{ trip.latest_agent_trace.license_notice }}</p>
           </article>
         </div>
       </div>
     </template>
   </section>
 </template>
-

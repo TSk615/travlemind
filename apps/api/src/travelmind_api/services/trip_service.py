@@ -1,18 +1,20 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from travelmind_api.api.schemas.trips import TripCreateRequest, TripResponse, TripUpdateRequest
+from travelmind_api.api.schemas.trips import TripCreateRequest, TripItinerarySaveRequest, TripResponse, TripUpdateRequest
 from travelmind_api.core.security import generate_identifier
 from travelmind_api.db.models import Trip, User
 
 
 def _validation_error(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": code, "message": message})
+
 
 
 def _normalize_required_text(value: str, *, code: str, label: str) -> str:
@@ -22,10 +24,12 @@ def _normalize_required_text(value: str, *, code: str, label: str) -> str:
     return normalized
 
 
+
 def _normalize_optional_text(value: str | None) -> str | None:
     if value is None:
         return None
     return value.strip()
+
 
 
 def _normalize_interests(interests: list[str] | None) -> list[str] | None:
@@ -35,8 +39,6 @@ def _normalize_interests(interests: list[str] | None) -> list[str] | None:
     normalized: list[str] = []
     seen: set[str] = set()
     for interest in interests:
-        # Normalize user-entered chips aggressively so downstream planning logic
-        # receives a stable, deduplicated preference list.
         candidate = interest.strip()
         if not candidate:
             continue
@@ -48,9 +50,11 @@ def _normalize_interests(interests: list[str] | None) -> list[str] | None:
     return normalized
 
 
+
 def _validate_trip_dates(start_date: date, end_date: date) -> None:
     if end_date < start_date:
         raise _validation_error("invalid_trip_dates", "end_date must be on or after start_date")
+
 
 
 def _reject_null_updates(updates: dict[str, object]) -> None:
@@ -59,6 +63,7 @@ def _reject_null_updates(updates: dict[str, object]) -> None:
         return
     fields = ", ".join(sorted(null_fields))
     raise _validation_error("null_update_value", f"Null is not allowed for: {fields}")
+
 
 
 def serialize_trip(trip: Trip) -> TripResponse:
@@ -80,6 +85,7 @@ def serialize_trip(trip: Trip) -> TripResponse:
         itinerary=trip.itinerary_json,
         latest_agent_trace=trip.latest_agent_trace_json,
     )
+
 
 
 def create_trip(session: Session, user: User, payload: TripCreateRequest) -> Trip:
@@ -104,8 +110,10 @@ def create_trip(session: Session, user: User, payload: TripCreateRequest) -> Tri
     return trip
 
 
+
 def list_trips(session: Session, user: User) -> list[Trip]:
     return list(session.scalars(select(Trip).where(Trip.user_id == user.id).order_by(Trip.created_at.desc())))
+
 
 
 def get_trip_or_404(session: Session, user: User, trip_id: str) -> Trip:
@@ -115,12 +123,11 @@ def get_trip_or_404(session: Session, user: User, trip_id: str) -> Trip:
     return trip
 
 
+
 def update_trip(session: Session, trip: Trip, payload: TripUpdateRequest) -> Trip:
     updates = payload.model_dump(exclude_unset=True)
     _reject_null_updates(updates)
 
-    # Validate the merged range, not just the incoming fields, so partial date
-    # updates cannot accidentally create an invalid trip window.
     merged_start_date = updates.get("start_date", trip.start_date)
     merged_end_date = updates.get("end_date", trip.end_date)
     _validate_trip_dates(merged_start_date, merged_end_date)
@@ -140,6 +147,16 @@ def update_trip(session: Session, trip: Trip, payload: TripUpdateRequest) -> Tri
 
     for field, value in updates.items():
         setattr(trip, field, value)
+    session.add(trip)
+    session.commit()
+    session.refresh(trip)
+    return trip
+
+
+
+def save_trip_itinerary(session: Session, trip: Trip, payload: TripItinerarySaveRequest) -> Trip:
+    trip.itinerary_json = payload.itinerary
+    trip.latest_agent_trace_json = payload.latest_agent_trace
     session.add(trip)
     session.commit()
     session.refresh(trip)

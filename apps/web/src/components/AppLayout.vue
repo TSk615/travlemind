@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed } from "vue"
 import { RouterLink, useRoute } from "vue-router"
 import { brand } from "@travelmind/ui"
@@ -10,9 +10,15 @@ const route = useRoute()
 const auth = useAuthStore()
 const { locale, supportedLocales, setLocale, t } = useI18n()
 
+const settingsNavLabel = computed(() => (locale.value === "zh-CN" ? "模型设置" : "Model settings"))
+
 const currentSection = computed(() => {
   if (route.name === "trips" || route.name === "trip-new" || route.name === "trip-detail" || route.name === "export-detail") {
     return "trips"
+  }
+
+  if (route.name === "settings") {
+    return "settings"
   }
 
   return route.name
@@ -38,6 +44,7 @@ function switchLocale(nextLocale: LocaleCode) {
         <RouterLink :class="['nav-link', { current: currentSection === 'home' }]" to="/">{{ t('layout.nav.home') }}</RouterLink>
         <RouterLink :class="['nav-link', { current: currentSection === 'trips' }]" to="/trips">{{ t('layout.nav.trips') }}</RouterLink>
         <RouterLink :class="['nav-link', { current: route.name === 'trip-new' }]" to="/trips/new">{{ t('layout.nav.newTrip') }}</RouterLink>
+        <RouterLink v-if="auth.user" :class="['nav-link', { current: currentSection === 'settings' }]" to="/settings">{{ settingsNavLabel }}</RouterLink>
       </nav>
 
       <div class="account-box">
