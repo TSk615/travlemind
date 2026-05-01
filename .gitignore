@@ -39,3 +39,5 @@ apps/api/.tmp/
 apps/api/pytest-cache-files-*/
 apps/api/storage/pytest-cache-files-*/
 apps/worker/.venv/
+apps/xhs-crawler/vendor/MediaCrawler/*
+!apps/xhs-crawler/vendor/MediaCrawler/.gitkeep

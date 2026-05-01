@@ -46,6 +46,7 @@ def test_stub_orchestrator_consumes_structured_map_provider_data():
     request = PlanningRequest(
         trip_id="trip_test",
         title="Kyoto calm days",
+        origin="Shanghai",
         destination="Kyoto",
         start_date=date(2026, 4, 14),
         end_date=date(2026, 4, 15),

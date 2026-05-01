@@ -27,3 +27,7 @@ class UserResponse(BaseModel):
 
 class LogoutResponse(BaseModel):
     success: bool = True
+
+
+class RefreshResponse(BaseModel):
+    success: bool = True

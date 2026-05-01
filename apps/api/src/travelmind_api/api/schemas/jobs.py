@@ -1,13 +1,18 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
 class ExportPdfRequest(BaseModel):
     trip_id: str
+
+
+class ExportRequest(BaseModel):
+    trip_id: str
+    formats: list[Literal["md", "pdf", "json"]] = Field(default_factory=lambda: ["md", "pdf", "json"])
 
 
 class JobTimelineEntry(BaseModel):
