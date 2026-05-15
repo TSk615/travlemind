@@ -225,3 +225,21 @@ def dispatch_job(job_id: str, settings: Settings, background_tasks: BackgroundTa
 
     _mark_dispatch_failed(job_id, f"Unsupported queue mode: {settings.queue_mode}")
 
+
+def dispatch_job_now(job_id: str, settings: Settings) -> None:
+    if settings.queue_mode == "inline":
+        from travelmind_api.jobs.handlers import process_job
+
+        process_job(job_id)
+        return
+
+    if settings.queue_mode == "arq":
+        try:
+            asyncio.run(_enqueue_via_arq(settings.redis_url, job_id))
+        except Exception as exc:
+            message = str(exc).strip() or exc.__class__.__name__
+            _mark_dispatch_failed(job_id, f"Failed to enqueue ARQ job: {message}")
+        return
+
+    _mark_dispatch_failed(job_id, f"Unsupported queue mode: {settings.queue_mode}")
+

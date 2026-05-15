@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,7 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=255)
     destination: str | None = None
     manual_links: list[str] = Field(default_factory=list)
+    interests: list[str] = Field(default_factory=list)
 
 
 class SearchGeoPoint(BaseModel):
@@ -36,5 +37,10 @@ class SearchDocumentResponse(BaseModel):
     price_hint: str | None = None
     address: str | None = None
     geo: SearchGeoPoint | None = None
+    author: str | None = None
+    published_at: str | None = None
+    engagement_hint: str | None = None
+    source_tags: list[str] = Field(default_factory=list)
+    image_urls: list[str] = Field(default_factory=list)
     source_type: str
     scores: ScoreBreakdown

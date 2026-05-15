@@ -1,4 +1,4 @@
-services:
+﻿services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
@@ -21,6 +21,10 @@ services:
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
+        PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
     depends_on:
       - redis
     environment:
@@ -33,6 +37,18 @@ services:
       TRAVELMIND_PUBLIC_API_URL: ${TRAVELMIND_PUBLIC_API_URL:-http://localhost:8000}
       TRAVELMIND_CORS_ORIGINS: >-
         ${TRAVELMIND_CORS_ORIGINS:-["http://127.0.0.1:5173","http://localhost:5173","http://127.0.0.1:3000","http://localhost:3000"]}
+      TRAVELMIND_SEARCH_SERVICE_PROVIDER: ${TRAVELMIND_SEARCH_SERVICE_PROVIDER:-exa}
+      TRAVELMIND_SEARCH_SERVICE_TRANSPORT: ${TRAVELMIND_SEARCH_SERVICE_TRANSPORT:-mcp}
+      TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL: ${TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL:-http://groksearch-bridge:8085/mcp}
+      TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY: ${TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY:-travelmind-groksearch-dev-key}
+      TRAVELMIND_GROKSEARCH_BRIDGE_TIMEOUT_SECONDS: ${TRAVELMIND_GROKSEARCH_BRIDGE_TIMEOUT_SECONDS:-30}
+      TRAVELMIND_XHS_CRAWLER_ENABLED: ${TRAVELMIND_XHS_CRAWLER_ENABLED:-false}
+      TRAVELMIND_XHS_CRAWLER_BASE_URL: ${TRAVELMIND_XHS_CRAWLER_BASE_URL:-http://xhs-crawler:8090}
+      TRAVELMIND_XHS_CRAWLER_API_KEY: ${TRAVELMIND_XHS_CRAWLER_API_KEY:-}
+      TRAVELMIND_XHS_CRAWLER_TIMEOUT_SECONDS: ${TRAVELMIND_XHS_CRAWLER_TIMEOUT_SECONDS:-20}
+      TRAVELMIND_XHS_CACHE_TTL_SECONDS: ${TRAVELMIND_XHS_CACHE_TTL_SECONDS:-1800}
+      TRAVELMIND_XHS_LIMIT_PER_QUERY: ${TRAVELMIND_XHS_LIMIT_PER_QUERY:-5}
+      TRAVELMIND_XHS_MAX_RESULTS: ${TRAVELMIND_XHS_MAX_RESULTS:-10}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -42,6 +58,10 @@ services:
     build:
       context: ..
       dockerfile: apps/worker/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
+        PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
     depends_on:
       - redis
     environment:
@@ -54,8 +74,67 @@ services:
       TRAVELMIND_PUBLIC_API_URL: ${TRAVELMIND_PUBLIC_API_URL:-http://localhost:8000}
       TRAVELMIND_CORS_ORIGINS: >-
         ${TRAVELMIND_CORS_ORIGINS:-["http://127.0.0.1:5173","http://localhost:5173","http://127.0.0.1:3000","http://localhost:3000"]}
+      TRAVELMIND_SEARCH_SERVICE_PROVIDER: ${TRAVELMIND_SEARCH_SERVICE_PROVIDER:-exa}
+      TRAVELMIND_SEARCH_SERVICE_TRANSPORT: ${TRAVELMIND_SEARCH_SERVICE_TRANSPORT:-mcp}
+      TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL: ${TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL:-http://groksearch-bridge:8085/mcp}
+      TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY: ${TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY:-travelmind-groksearch-dev-key}
+      TRAVELMIND_GROKSEARCH_BRIDGE_TIMEOUT_SECONDS: ${TRAVELMIND_GROKSEARCH_BRIDGE_TIMEOUT_SECONDS:-30}
+      TRAVELMIND_XHS_CRAWLER_ENABLED: ${TRAVELMIND_XHS_CRAWLER_ENABLED:-false}
+      TRAVELMIND_XHS_CRAWLER_BASE_URL: ${TRAVELMIND_XHS_CRAWLER_BASE_URL:-http://xhs-crawler:8090}
+      TRAVELMIND_XHS_CRAWLER_API_KEY: ${TRAVELMIND_XHS_CRAWLER_API_KEY:-}
+      TRAVELMIND_XHS_CRAWLER_TIMEOUT_SECONDS: ${TRAVELMIND_XHS_CRAWLER_TIMEOUT_SECONDS:-20}
+      TRAVELMIND_XHS_CACHE_TTL_SECONDS: ${TRAVELMIND_XHS_CACHE_TTL_SECONDS:-1800}
+      TRAVELMIND_XHS_LIMIT_PER_QUERY: ${TRAVELMIND_XHS_LIMIT_PER_QUERY:-5}
+      TRAVELMIND_XHS_MAX_RESULTS: ${TRAVELMIND_XHS_MAX_RESULTS:-10}
     volumes:
       - storage-data:/app/storage
+
+  xhs-crawler:
+    profiles: ["xhs"]
+    build:
+      context: ..
+      dockerfile: apps/xhs-crawler/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
+        PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
+    environment:
+      TRAVELMIND_XHS_DATA_ROOT: /app/data
+      TRAVELMIND_XHS_NODE_BINARY: ${TRAVELMIND_XHS_NODE_BINARY:-node}
+      TRAVELMIND_XHS_OPENCLI_BINARY: ${TRAVELMIND_XHS_OPENCLI_BINARY:-opencli}
+      TRAVELMIND_XHS_OPENCLI_TIMEOUT_SECONDS: ${TRAVELMIND_XHS_OPENCLI_TIMEOUT_SECONDS:-45}
+    ports:
+      - "${XHS_CRAWLER_PORT:-8090}:8090"
+    volumes:
+      - xhs-crawler-data:/app/data
+
+  groksearch-bridge:
+    build:
+      context: ..
+      dockerfile: apps/groksearch-bridge/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
+        PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
+        GROKSEARCH_GIT_URL: ${GROKSEARCH_GIT_URL:-https://github.com/GuDaStudio/GrokSearch}
+        GROKSEARCH_REF: ${GROKSEARCH_REF:-grok-with-tavily}
+    environment:
+      TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY: ${TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY:-travelmind-groksearch-dev-key}
+      TRAVELMIND_GROKSEARCH_COMMAND: ${TRAVELMIND_GROKSEARCH_COMMAND:-grok-search}
+      GUDA_BASE_URL: ${GUDA_BASE_URL:-https://code.guda.studio}
+      GUDA_API_KEY: ${GUDA_API_KEY:-}
+      GROK_API_URL: ${GROK_API_URL:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      GROK_MODEL: ${GROK_MODEL:-grok-4.20-beta}
+      TAVILY_ENABLED: ${TAVILY_ENABLED:-true}
+      TAVILY_API_URL: ${TAVILY_API_URL:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      GROK_DEBUG: ${GROK_DEBUG:-false}
+      GROK_LOG_LEVEL: ${GROK_LOG_LEVEL:-INFO}
+    ports:
+      - "${GROKSEARCH_BRIDGE_PORT:-8085}:8085"
 
   web:
     build:
@@ -71,3 +150,4 @@ services:
 volumes:
   postgres-data:
   storage-data:
+  xhs-crawler-data:

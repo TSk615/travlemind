@@ -1,5 +1,8 @@
-from fastapi.testclient import TestClient
+﻿from fastapi.testclient import TestClient
 
+
+
+from datetime import date, timedelta
 
 
 def _register(client: TestClient):
@@ -16,14 +19,22 @@ def _register(client: TestClient):
 
 
 
+def _future_trip_dates(*, start_offset_days: int = 1, duration_days: int = 2) -> tuple[str, str]:
+    start_date = date.today() + timedelta(days=start_offset_days)
+    end_date = start_date + timedelta(days=duration_days)
+    return start_date.isoformat(), end_date.isoformat()
+
+
 def _create_trip(client: TestClient):
+    start_date, end_date = _future_trip_dates()
     response = client.post(
         "/api/v1/trips",
         json={
             "title": "Kyoto calm days",
+            "origin": "Shanghai",
             "destination": "Kyoto",
-            "start_date": "2026-04-14",
-            "end_date": "2026-04-16",
+            "start_date": start_date,
+            "end_date": end_date,
             "budget": 4800,
             "travelers": 2,
             "interests": ["temples", "coffee"],
@@ -43,36 +54,91 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
     initial_response = client.get("/api/v1/settings/llm")
     assert initial_response.status_code == 200
     assert initial_response.json()["data"] == {
-        "base_url": None,
-        "api_key_masked": None,
-        "has_api_key": False,
-        "model": None,
-        "wire_api": None,
-        "configured": False,
+        "agent": {
+            "base_url": None,
+            "api_key_masked": None,
+            "has_api_key": False,
+            "model": None,
+            "wire_api": None,
+            "agent_provider": "standard",
+            "configured": False,
+        },
+        "search": {
+            "provider": "exa",
+            "transport": "mcp",
+            "base_url": None,
+            "api_key_masked": None,
+            "has_api_key": False,
+            "timeout_seconds": 30.0,
+            "xhs_source_enabled": False,
+            "configured": False,
+        },
+        "image": {
+            "base_url": None,
+            "api_key_masked": None,
+            "has_api_key": False,
+            "model": None,
+            "provider": "openai_compatible",
+            "configured": False,
+        },
     }
 
     raw_api_key = "sk-travelmind-secret-1234"
+    raw_search_key = "search-secret-5678"
     update_response = client.put(
         "/api/v1/settings/llm",
         json={
-            "base_url": " https://api.example.com/v1/ ",
-            "api_key": raw_api_key,
-            "model": "gpt-5.4-mini",
-            "wire_api": "responses",
+            "agent": {
+                "base_url": " https://api.example.com/v1/ ",
+                "api_key": raw_api_key,
+                "model": "gpt-5.4-mini",
+                "wire_api": "responses",
+                "agent_provider": "helloagents",
+            },
+            "search": {
+                "provider": "exa",
+                "transport": "api",
+                "base_url": " https://search.example.com ",
+                "api_key": raw_search_key,
+                "timeout_seconds": 45,
+                "xhs_source_enabled": True,
+            },
+            "image": {
+                "base_url": " https://images.example.com/v1 ",
+                "api_key": "img-secret-9012",
+                "model": "gpt-image-1",
+                "provider": "openai_compatible",
+            },
         },
     )
     assert update_response.status_code == 200, update_response.text
 
     updated = update_response.json()["data"]
-    assert updated["base_url"] == "https://api.example.com/v1"
-    assert updated["model"] == "gpt-5.4-mini"
-    assert updated["wire_api"] == "responses"
-    assert updated["configured"] is True
-    assert updated["has_api_key"] is True
-    assert updated["api_key_masked"].startswith(raw_api_key[:4])
-    assert updated["api_key_masked"].endswith(raw_api_key[-4:])
-    assert updated["api_key_masked"] != raw_api_key
+    assert updated["agent"]["base_url"] == "https://api.example.com/v1"
+    assert updated["agent"]["model"] == "gpt-5.4-mini"
+    assert updated["agent"]["wire_api"] == "responses"
+    assert updated["agent"]["agent_provider"] == "helloagents"
+    assert updated["agent"]["configured"] is True
+    assert updated["agent"]["has_api_key"] is True
+    assert updated["agent"]["api_key_masked"].startswith(raw_api_key[:4])
+    assert updated["agent"]["api_key_masked"].endswith(raw_api_key[-4:])
+    assert updated["agent"]["api_key_masked"] != raw_api_key
+    assert updated["search"]["provider"] == "exa"
+    assert updated["search"]["transport"] == "api"
+    assert updated["search"]["base_url"] == "https://search.example.com"
+    assert updated["search"]["timeout_seconds"] == 45.0
+    assert updated["search"]["xhs_source_enabled"] is True
+    assert updated["search"]["configured"] is True
+    assert updated["search"]["has_api_key"] is True
+    assert updated["search"]["api_key_masked"].startswith(raw_search_key[:4])
+    assert updated["search"]["api_key_masked"].endswith(raw_search_key[-4:])
+    assert updated["image"]["base_url"] == "https://images.example.com/v1"
+    assert updated["image"]["model"] == "gpt-image-1"
+    assert updated["image"]["provider"] == "openai_compatible"
+    assert updated["image"]["configured"] is True
+    assert updated["image"]["has_api_key"] is True
     assert raw_api_key not in update_response.text
+    assert raw_search_key not in update_response.text
 
     get_response = client.get("/api/v1/settings/llm")
     assert get_response.status_code == 200
@@ -87,10 +153,25 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
         assert user.llm_api_key == raw_api_key
         assert user.llm_model == "gpt-5.4-mini"
         assert user.llm_wire_api == "responses"
+        assert user.llm_agent_provider == "helloagents"
+        assert user.search_service_provider == "exa"
+        assert user.search_service_transport == "api"
+        assert user.search_service_base_url == "https://search.example.com"
+        assert user.search_service_api_key == raw_search_key
+        assert user.search_service_timeout_seconds == 45.0
+        assert user.xhs_source_enabled is True
+        assert user.image_base_url == "https://images.example.com/v1"
+        assert user.image_model == "gpt-image-1"
+        assert user.image_api_key == "img-secret-9012"
+        assert user.image_provider == "openai_compatible"
 
 
 
-def test_trip_jobs_do_not_persist_llm_secret_snapshots(client: TestClient):
+def test_trip_jobs_do_not_persist_llm_secret_snapshots(client: TestClient, monkeypatch):
+    from travelmind_api.agents.stub import StubOrchestrator
+    import travelmind_api.jobs.handlers as job_handlers
+
+    monkeypatch.setattr(job_handlers, "build_orchestrator", lambda *args, **kwargs: StubOrchestrator())
     _register(client)
 
     raw_config = {
@@ -98,6 +179,8 @@ def test_trip_jobs_do_not_persist_llm_secret_snapshots(client: TestClient):
         "api_key": "sk-job-snapshot-5678",
         "model": "gpt-5.4",
         "wire_api": "responses",
+        "agent_provider": "helloagents",
+        "xhs_source_enabled": True,
     }
     settings_response = client.put("/api/v1/settings/llm", json=raw_config)
     assert settings_response.status_code == 200, settings_response.text
@@ -130,3 +213,90 @@ def test_trip_jobs_do_not_persist_llm_secret_snapshots(client: TestClient):
         assert "llm_config" not in refine_job.payload_json
         assert refine_job.payload_json["instruction"] == "Focus more on food."
         assert refine_job.payload_json["scope"] == "full_trip"
+
+
+def test_search_settings_accept_groksearch_mcp_and_reject_api_transport(client: TestClient):
+    _register(client)
+
+    valid_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "search": {
+                "provider": "groksearch",
+                "transport": "mcp",
+                "base_url": "https://groksearch.example.com/mcp",
+                "api_key": "grok-bridge-key",
+                "timeout_seconds": 20,
+            }
+        },
+    )
+    assert valid_response.status_code == 200, valid_response.text
+    updated = valid_response.json()["data"]
+    assert updated["search"]["provider"] == "groksearch"
+    assert updated["search"]["transport"] == "mcp"
+    assert updated["search"]["base_url"] == "https://groksearch.example.com/mcp"
+    assert updated["search"]["configured"] is True
+
+    invalid_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "search": {
+                "transport": "api",
+            }
+        },
+    )
+    assert invalid_response.status_code == 422, invalid_response.text
+    assert invalid_response.json()["error"]["code"] == "invalid_search_transport"
+
+
+def test_search_settings_accept_tavily_api_and_reject_mcp_transport(client: TestClient):
+    _register(client)
+
+    valid_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "search": {
+                "provider": "tavily",
+                "transport": "api",
+                "base_url": "https://api.tavily.com/search",
+                "api_key": "tvly-test-key",
+                "timeout_seconds": 20,
+            }
+        },
+    )
+    assert valid_response.status_code == 200, valid_response.text
+    updated = valid_response.json()["data"]
+    assert updated["search"]["provider"] == "tavily"
+    assert updated["search"]["transport"] == "api"
+    assert updated["search"]["base_url"] == "https://api.tavily.com/search"
+    assert updated["search"]["configured"] is True
+
+    invalid_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "search": {
+                "transport": "mcp",
+            }
+        },
+    )
+    assert invalid_response.status_code == 422, invalid_response.text
+    assert invalid_response.json()["error"]["code"] == "invalid_search_transport"
+
+
+def test_image_settings_accept_multiple_provider_types(client: TestClient):
+    _register(client)
+
+    for provider in ("openai_compatible", "huggingface", "gitee_ai", "modelscope", "a4f"):
+        response = client.put(
+            "/api/v1/settings/llm",
+            json={
+                "image": {
+                    "base_url": "https://images.example.com/v1",
+                    "api_key": "img-secret-1234",
+                    "model": "demo-model",
+                    "provider": provider,
+                }
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["image"]["provider"] == provider

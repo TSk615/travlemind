@@ -14,6 +14,8 @@ class LlmPlanItem(BaseModel):
     location: str = Field(default="")
     score: float = 0.8
     note: str = Field(default="")
+    booking_info: "LlmBookingInfo | None" = None
+    visit_requirements: "LlmVisitRequirements | None" = None
 
     @field_validator("score", mode="before")
     @classmethod
@@ -23,6 +25,58 @@ class LlmPlanItem(BaseModel):
         except (TypeError, ValueError):
             numeric = 0.8
         return max(0.0, min(1.0, numeric))
+
+
+class LlmBookingInfo(BaseModel):
+    price_label: str | None = None
+    estimated_price: float | None = None
+    booking_required: bool = False
+    reservation_required: bool = False
+    official_booking_url: str | None = None
+    booking_window: str | None = None
+    reminder: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
+
+    @field_validator("estimated_price", mode="before")
+    @classmethod
+    def normalize_estimated_price(cls, value: Any) -> float | None:
+        if value in {None, ""}:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+
+class LlmVisitRequirements(BaseModel):
+    reservation_policy: str | None = None
+    timed_entry: bool = False
+    identity_required: bool = False
+    advance_booking_note: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class LlmTransportBookingSummary(BaseModel):
+    summary: str | None = None
+    recommended_option: str | None = None
+    estimated_intercity_cost: float = 0.0
+    estimated_local_transport_cost: float = 0.0
+    booking_required: bool = False
+    official_booking_url: str | None = None
+    booking_window: str | None = None
+    pass_or_ticket_notes: list[str] = Field(default_factory=list)
+    reminders: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
+
+    @field_validator("estimated_intercity_cost", "estimated_local_transport_cost", mode="before")
+    @classmethod
+    def normalize_estimated_cost(cls, value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
 
 class LlmPlanDay(BaseModel):
@@ -37,6 +91,10 @@ class LlmPlanningPayload(BaseModel):
     total_budget_estimate: float | None = None
     days: list[LlmPlanDay] = Field(min_length=1)
     risks: list[str] = Field(default_factory=list)
+    transport_booking_summary: LlmTransportBookingSummary | None = None
+
+
+LlmPlanItem.model_rebuild()
 
 
 class PlanningResponseParseError(ValueError):
@@ -78,6 +136,23 @@ def _extract_json_payload(content: str) -> dict[str, Any]:
 
     if not isinstance(payload, dict):
         raise PlanningResponseParseError("LLM response root must be a JSON object")
+    return _unwrap_nested_itinerary_payload(payload)
+
+
+def _unwrap_nested_itinerary_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if "summary" in payload and "days" in payload:
+        return payload
+
+    itinerary = payload.get("itinerary")
+    if isinstance(itinerary, dict) and ("summary" in itinerary or "days" in itinerary):
+        return itinerary
+
+    nested_payload = payload.get("payload")
+    if isinstance(nested_payload, dict):
+        nested_itinerary = nested_payload.get("itinerary")
+        if isinstance(nested_itinerary, dict) and ("summary" in nested_itinerary or "days" in nested_itinerary):
+            return nested_itinerary
+
     return payload
 
 

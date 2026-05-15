@@ -2,14 +2,16 @@
 name = "travelmind-worker"
 version = "0.1.0"
 description = "TravelMind AI background worker"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
   "arq>=0.26.3,<1.0.0",
   "fastapi>=0.115.0,<1.0.0",
   "httpx>=0.28.1,<1.0.0",
   "sqlalchemy>=2.0.36,<3.0.0",
   "pydantic-settings>=2.7.0,<3.0.0",
-  "pyjwt>=2.10.1,<3.0.0"
+  "pyjwt>=2.10.1,<3.0.0",
+  "reportlab>=4.4.0,<5.0.0",
+  "hello-agents>=1.0.0,<2.0.0"
 ]
 
 [build-system]

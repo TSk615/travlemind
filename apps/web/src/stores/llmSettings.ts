@@ -1,20 +1,32 @@
 import { defineStore } from "pinia"
-import type { LlmSettings, LlmSettingsInput, LlmWireApi } from "@travelmind/shared-types"
-import { getErrorMessage } from "@/lib/api"
-
-const STORAGE_KEY = "travelmind.llm.settings"
-const DEMO_STORAGE_KEY = "travelmind.llm.demo"
+import type {
+  ImageProvider,
+  LlmAgentProvider,
+  LlmSettings,
+  LlmSettingsInput,
+  LlmWireApi,
+  SearchServiceProvider,
+  SearchServiceTransport
+} from "@travelmind/shared-types"
+import { api, getErrorMessage } from "@/lib/api"
 
 export interface RuntimeLlmConfig {
   base_url: string
-  api_key: string
   model: string
   wire_api: LlmWireApi
+  agent_provider: LlmAgentProvider
+}
+
+export interface RuntimeImageConfig {
+  base_url: string
+  model: string
+  provider: ImageProvider
 }
 
 interface LlmSettingsState {
   settings: LlmSettings | null
   runtimeConfig: RuntimeLlmConfig | null
+  imageRuntimeConfig: RuntimeImageConfig | null
   loaded: boolean
   loading: boolean
   pending: boolean
@@ -22,89 +34,86 @@ interface LlmSettingsState {
   saveError: string | null
 }
 
-function maskApiKey(apiKey: string | null): string | null {
-  if (!apiKey) {
-    return null
-  }
-  if (apiKey.length <= 8) {
-    return `${apiKey.slice(0, 2)}${"*".repeat(Math.max(apiKey.length - 2, 2))}`
-  }
-  return `${apiKey.slice(0, 4)}${"*".repeat(apiKey.length - 8)}${apiKey.slice(-4)}`
-}
-
 function normalizeWireApi(value: string | null | undefined): LlmWireApi {
   return value === "chat_completions" ? "chat_completions" : "responses"
 }
 
-function buildPublicSettings(config: RuntimeLlmConfig | null): LlmSettings {
+function normalizeAgentProvider(value: string | null | undefined): LlmAgentProvider {
+  return value === "helloagents" ? "helloagents" : "standard"
+}
+
+function normalizeSearchTransport(value: string | null | undefined): SearchServiceTransport {
+  return value === "api" ? "api" : "mcp"
+}
+
+function normalizeSearchProvider(value: string | null | undefined): SearchServiceProvider {
+  if (value === "tavily") {
+    return "tavily"
+  }
+  return value === "groksearch" ? "groksearch" : "exa"
+}
+
+function normalizeImageProvider(value: string | null | undefined): ImageProvider {
+  if (value === "huggingface") {
+    return "huggingface"
+  }
+  if (value === "gitee_ai") {
+    return "gitee_ai"
+  }
+  if (value === "modelscope") {
+    return "modelscope"
+  }
+  if (value === "a4f") {
+    return "a4f"
+  }
+  return "openai_compatible"
+}
+
+function normalizeSettings(settings: LlmSettings): LlmSettings {
   return {
-    base_url: config?.base_url ?? null,
-    model: config?.model ?? null,
-    api_key_masked: maskApiKey(config?.api_key ?? null),
-    has_api_key: Boolean(config?.api_key),
-    wire_api: config?.wire_api ?? "responses",
-    configured: Boolean(config?.base_url && config?.api_key && config?.model)
+    agent: {
+      ...settings.agent,
+      wire_api: normalizeWireApi(settings.agent.wire_api),
+      agent_provider: normalizeAgentProvider(settings.agent.agent_provider)
+    },
+    search: {
+      ...settings.search,
+      provider: normalizeSearchProvider(settings.search.provider),
+      transport: normalizeSearchTransport(settings.search.transport),
+      xhs_source_enabled: Boolean(settings.search.xhs_source_enabled)
+    },
+    image: {
+      ...settings.image,
+      provider: normalizeImageProvider(settings.image.provider)
+    }
   }
 }
 
-function readStoredConfig(): RuntimeLlmConfig | null {
-  if (typeof window === "undefined") {
+function buildRuntimeConfig(settings: LlmSettings | null): RuntimeLlmConfig | null {
+  const base_url = settings?.agent.base_url?.trim() ?? ""
+  const model = settings?.agent.model?.trim() ?? ""
+  if (!base_url || !model) {
     return null
   }
-
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-    if (!raw) {
-      return null
-    }
-    const parsed = JSON.parse(raw) as Partial<RuntimeLlmConfig>
-    const base_url = String(parsed.base_url ?? "").trim()
-    const api_key = String(parsed.api_key ?? "").trim()
-    const model = String(parsed.model ?? "").trim()
-    const wire_api = normalizeWireApi(parsed.wire_api)
-
-    if (!base_url && !api_key && !model) {
-      return null
-    }
-
-    return {
-      base_url,
-      api_key,
-      model,
-      wire_api
-    }
-  } catch {
-    return null
-  }
-}
-
-function writeStoredConfig(config: RuntimeLlmConfig | null): void {
-  if (typeof window === "undefined") {
-    return
-  }
-
-  try {
-    if (config === null) {
-      window.localStorage.removeItem(STORAGE_KEY)
-      return
-    }
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
-  } catch {
-    // Ignore storage failures in restricted contexts.
-  }
-}
-
-function mergePayload(current: RuntimeLlmConfig | null, payload: LlmSettingsInput): RuntimeLlmConfig {
-  const base_url = payload.base_url.trim()
-  const model = payload.model.trim()
-  const api_key = payload.api_key?.trim() ? payload.api_key.trim() : current?.api_key ?? ""
-  const wire_api = normalizeWireApi(payload.wire_api)
 
   return {
     base_url,
-    api_key,
     model,
-    wire_api
+    wire_api: normalizeWireApi(settings?.agent.wire_api),
+    agent_provider: normalizeAgentProvider(settings?.agent.agent_provider)
+  }
+}
+
+function buildImageRuntimeConfig(settings: LlmSettings | null): RuntimeImageConfig | null {
+  const base_url = settings?.image.base_url?.trim() ?? ""
+  const model = settings?.image.model?.trim() ?? ""
+  if (!base_url || !model) {
+    return null
+  }
+  return {
+    base_url,
+    model,
+    provider: normalizeImageProvider(settings?.image.provider)
   }
 }
 
@@ -112,6 +121,7 @@ export const useLlmSettingsStore = defineStore("llm-settings", {
   state: (): LlmSettingsState => ({
     settings: null,
     runtimeConfig: null,
+    imageRuntimeConfig: null,
     loaded: false,
     loading: false,
     pending: false,
@@ -119,14 +129,19 @@ export const useLlmSettingsStore = defineStore("llm-settings", {
     saveError: null
   }),
   getters: {
-    isConfigured: (state) => Boolean(state.settings?.configured),
-    hasStoredKey: (state) => Boolean(state.settings?.has_api_key || state.settings?.api_key_masked),
-    resolvedConfig: (state) => state.runtimeConfig
+    isConfigured: (state) => Boolean(state.settings?.agent.configured),
+    isImageConfigured: (state) => Boolean(state.settings?.image.configured),
+    hasStoredKey: (state) => Boolean(state.settings?.agent.has_api_key || state.settings?.agent.api_key_masked),
+    resolvedConfig: (state) => state.runtimeConfig,
+    resolvedImageConfig: (state) => state.imageRuntimeConfig,
+    agentProvider: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider),
+    usesHelloAgents: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider) === "helloagents"
   },
   actions: {
     reset() {
       this.settings = null
       this.runtimeConfig = null
+      this.imageRuntimeConfig = null
       this.loaded = false
       this.loading = false
       this.pending = false
@@ -147,11 +162,14 @@ export const useLlmSettingsStore = defineStore("llm-settings", {
       this.loading = true
       this.error = null
       try {
-        this.runtimeConfig = readStoredConfig()
-        this.settings = buildPublicSettings(this.runtimeConfig)
+        const settings = normalizeSettings(await api.getLlmSettings())
+        this.settings = settings
+        this.runtimeConfig = buildRuntimeConfig(settings)
+        this.imageRuntimeConfig = buildImageRuntimeConfig(settings)
       } catch (error) {
         this.runtimeConfig = null
-        this.settings = buildPublicSettings(null)
+        this.imageRuntimeConfig = null
+        this.settings = null
         this.error = getErrorMessage(error, "Unable to load model settings")
       } finally {
         this.loaded = true
@@ -164,10 +182,10 @@ export const useLlmSettingsStore = defineStore("llm-settings", {
       this.error = null
 
       try {
-        const nextConfig = mergePayload(this.runtimeConfig, payload)
-        writeStoredConfig(nextConfig)
-        this.runtimeConfig = nextConfig
-        this.settings = buildPublicSettings(nextConfig)
+        const settings = normalizeSettings(await api.updateLlmSettings(payload))
+        this.settings = settings
+        this.runtimeConfig = buildRuntimeConfig(settings)
+        this.imageRuntimeConfig = buildImageRuntimeConfig(settings)
         this.loaded = true
         return this.settings
       } catch (error) {

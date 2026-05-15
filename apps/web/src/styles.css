@@ -107,6 +107,12 @@ button:disabled,
   transform: none;
 }
 
+.nav-link--disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+
 .account-box {
   display: flex;
   align-items: center;
@@ -131,6 +137,24 @@ button:disabled,
 
 .content-area {
   padding-top: 24px;
+}
+
+.background-job-banner {
+  margin-top: 16px;
+  padding: 16px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid rgba(11, 85, 78, 0.18);
+  border-radius: var(--tm-radius-xl);
+  background: linear-gradient(135deg, rgba(13, 122, 111, 0.1), rgba(255, 250, 242, 0.92));
+  box-shadow: var(--tm-shadow);
+}
+
+.background-job-banner p {
+  margin: 6px 0 0;
+  color: var(--tm-muted);
 }
 
 .page-grid {
@@ -355,6 +379,11 @@ textarea {
   color: #0f5e3c;
 }
 
+.status-pill--draft {
+  background: #f1e7ff;
+  color: #5a3b8a;
+}
+
 .status-pill--failed {
   background: #ffe2df;
   color: #8a2317;
@@ -388,6 +417,11 @@ textarea {
   .account-box {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .background-job-banner {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .hero-copy h1 {
@@ -522,5 +556,396 @@ textarea {
   .workspace-layout,
   .quick-actions-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.detail-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--tm-border);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--tm-ink);
+}
+
+.detail-chip--soft {
+  background: rgba(13, 122, 111, 0.08);
+}
+
+.day-card__header,
+.search-card__header,
+.item-topline,
+.item-badges {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.day-card__cost {
+  font-size: 1rem;
+  white-space: nowrap;
+}
+
+.itinerary-day-card {
+  gap: 16px;
+}
+
+.day-weather {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgba(13, 122, 111, 0.16);
+  border-radius: 18px;
+  background: rgba(13, 122, 111, 0.06);
+}
+
+.day-weather__header {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.day-weather__summary {
+  margin: 0;
+  color: var(--tm-ink);
+  font-weight: 600;
+}
+
+.day-weather__notes {
+  margin: 0;
+}
+
+.itinerary-visuals {
+  gap: 14px;
+}
+
+.visual-doc-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.reference-doc-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.reference-doc-card {
+  display: grid;
+  gap: 10px;
+}
+
+.visual-doc-card {
+  display: grid;
+  gap: 10px;
+}
+
+.visual-doc-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.visual-doc-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.visual-doc-images img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 14px;
+  border: 1px solid rgba(30, 28, 23, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.itinerary-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.itinerary-item {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px 0;
+  border-top: 1px solid rgba(30, 28, 23, 0.08);
+}
+
+.itinerary-item:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.item-time {
+  font-weight: 700;
+  color: var(--tm-ink);
+}
+
+.item-main {
+  display: grid;
+  gap: 6px;
+}
+
+.item-note {
+  margin: 0;
+  color: var(--tm-muted);
+}
+
+.itinerary-item-images {
+  margin-top: 4px;
+}
+
+.item-badge,
+.score-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  border: 1px solid var(--tm-border);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.score-chip {
+  background: rgba(13, 122, 111, 0.12);
+  color: var(--tm-accent);
+  font-weight: 700;
+}
+
+.search-card__header h3,
+.day-card__header h3,
+.panel-subsection h3 {
+  margin: 0;
+}
+
+@media (max-width: 960px) {
+  .itinerary-item {
+    grid-template-columns: 1fr;
+  }
+}
+
+.agent-run-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.agent-run-card {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-run-card__header {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.button-danger {
+  border-color: rgba(138, 35, 23, 0.25);
+  background: rgba(255, 226, 223, 0.85);
+  color: #8a2317;
+}
+
+.trip-card__status,
+.community-note {
+  color: var(--tm-ink);
+  font-weight: 600;
+}
+
+.community-page {
+  max-width: 1240px;
+  margin: 0 auto;
+}
+
+.community-card,
+.community-meta {
+  display: grid;
+  gap: 10px;
+}
+
+.community-meta {
+  color: var(--tm-muted);
+}
+
+.community-cover,
+.community-detail-cover {
+  width: 100%;
+  object-fit: cover;
+  border-radius: 18px;
+  border: 1px solid rgba(30, 28, 23, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.community-cover {
+  aspect-ratio: 16 / 9;
+}
+
+.community-detail-cover {
+  aspect-ratio: 18 / 8;
+}
+
+.community-note {
+  margin: 0;
+}
+
+.community-note--large {
+  font-size: 1.05rem;
+  line-height: 1.65;
+}
+
+.panel-banner {
+  padding: 14px 16px;
+  border: 1px solid rgba(13, 122, 111, 0.2);
+  border-radius: 18px;
+  background: rgba(13, 122, 111, 0.08);
+}
+
+.panel-banner--warn {
+  border-color: rgba(201, 109, 59, 0.28);
+  background: rgba(201, 109, 59, 0.12);
+}
+
+.subtle-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(13, 122, 111, 0.18);
+  background: rgba(13, 122, 111, 0.08);
+  color: var(--tm-ink);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(30, 28, 23, 0.38);
+  z-index: 20;
+}
+
+.modal-card {
+  width: min(680px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.image-studio-page {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+.image-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.image-studio-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(380px, 0.85fr);
+  gap: 20px;
+}
+
+.image-create-panel {
+  align-self: start;
+  position: sticky;
+  top: 24px;
+}
+
+.image-upload-preview,
+.image-job-card {
+  display: grid;
+  gap: 12px;
+}
+
+.image-upload-preview__source img,
+.image-card__media img,
+.image-result-grid img {
+  width: 100%;
+  border-radius: 18px;
+  object-fit: cover;
+  border: 1px solid rgba(30, 28, 23, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.image-upload-preview__source img {
+  max-height: 340px;
+}
+
+.image-card-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.image-card {
+  display: grid;
+  gap: 12px;
+}
+
+.image-card__media img {
+  aspect-ratio: 16 / 10;
+}
+
+.image-card__body {
+  display: grid;
+  gap: 10px;
+}
+
+.image-result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.image-result-grid img {
+  aspect-ratio: 1 / 1;
+}
+
+.image-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .image-studio-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .image-create-panel {
+    position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  .image-filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .image-hero {
+    flex-direction: column;
   }
 }

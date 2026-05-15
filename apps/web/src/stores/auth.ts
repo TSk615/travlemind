@@ -22,6 +22,12 @@ export const useAuthStore = defineStore("auth", {
     clearError() {
       this.error = null
     },
+    invalidateSession() {
+      this.user = null
+      this.error = null
+      this.pending = false
+      this.bootstrapping = false
+    },
     async bootstrap() {
       if (this.initialized || this.bootstrapping) {
         return

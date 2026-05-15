@@ -7,7 +7,8 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url))
-    }
+    },
+    extensions: [".ts", ".tsx", ".js", ".jsx", ".json", ".mjs"]
   },
   server: {
     port: 5173,

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from collections.abc import Mapping
@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 WireApi = Literal["chat_completions", "responses"]
+_ROLE_OVERRIDE_ENV_PREFIX = "TRAVELMIND_LLM_ROLE_"
 
 
 def normalize_wire_api(value: object | None, *, default: WireApi = "chat_completions") -> WireApi:
@@ -18,7 +19,7 @@ def normalize_wire_api(value: object | None, *, default: WireApi = "chat_complet
     return default
 
 
-class LlmConfig(BaseModel):
+class LlmEndpointConfig(BaseModel):
     base_url: str
     api_key: str
     model: str
@@ -37,49 +38,146 @@ class LlmConfig(BaseModel):
             return normalized_base
         return f"{normalized_base}/chat/completions"
 
+
+def _config_values_from_mapping(
+    payload: Mapping[str, object] | None,
+    *,
+    default: LlmEndpointConfig | None = None,
+) -> dict[str, object] | None:
+    if payload is None and default is None:
+        return None
+
+    raw_payload = payload or {}
+    base_url = str(raw_payload.get("base_url") or getattr(default, "base_url", "")).strip().rstrip("/")
+    api_key = str(raw_payload.get("api_key") or getattr(default, "api_key", "")).strip()
+    model = str(raw_payload.get("model") or getattr(default, "model", "")).strip()
+    wire_api = normalize_wire_api(raw_payload.get("wire_api"), default=getattr(default, "wire_api", "responses"))
+    timeout_raw = str(raw_payload.get("timeout_seconds") or getattr(default, "timeout_seconds", "30")).strip()
+
+    if not base_url or not api_key or not model:
+        return None
+
+    try:
+        timeout_seconds = float(timeout_raw)
+    except ValueError:
+        timeout_seconds = float(getattr(default, "timeout_seconds", 30.0))
+
+    return {
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "wire_api": wire_api,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
+def _endpoint_config_from_mapping(
+    payload: Mapping[str, object] | None,
+    *,
+    default: LlmEndpointConfig | None = None,
+) -> LlmEndpointConfig | None:
+    values = _config_values_from_mapping(payload, default=default)
+    if values is None:
+        return None
+    return LlmEndpointConfig(**values)
+
+
+def _role_override_from_env(role_name: str, *, default: LlmEndpointConfig) -> LlmEndpointConfig | None:
+    prefix = f"{_ROLE_OVERRIDE_ENV_PREFIX}{role_name.upper()}_"
+    raw_payload = {
+        "base_url": os.getenv(f"{prefix}BASE_URL"),
+        "api_key": os.getenv(f"{prefix}API_KEY"),
+        "model": os.getenv(f"{prefix}MODEL"),
+        "wire_api": os.getenv(f"{prefix}WIRE_API"),
+        "timeout_seconds": os.getenv(f"{prefix}TIMEOUT_SECONDS"),
+    }
+    if not any(value is not None and str(value).strip() for value in raw_payload.values()):
+        return None
+    return _endpoint_config_from_mapping(raw_payload, default=default)
+
+
+def _collect_role_overrides_from_mapping(
+    payload: Mapping[str, object] | None,
+    *,
+    default: LlmEndpointConfig,
+) -> dict[str, LlmEndpointConfig]:
+    raw_overrides = payload.get("role_overrides") if payload is not None else None
+    if not isinstance(raw_overrides, Mapping):
+        return {}
+
+    overrides: dict[str, LlmEndpointConfig] = {}
+    for raw_role_name, raw_override in raw_overrides.items():
+        if not isinstance(raw_override, Mapping):
+            continue
+        role_name = str(raw_role_name or "").strip()
+        if not role_name:
+            continue
+        override = _endpoint_config_from_mapping(raw_override, default=default)
+        if override is not None:
+            overrides[role_name] = override
+    return overrides
+
+
+def _collect_role_overrides_from_env(*, default: LlmEndpointConfig) -> dict[str, LlmEndpointConfig]:
+    role_names: set[str] = set()
+    for key, value in os.environ.items():
+        if not key.startswith(_ROLE_OVERRIDE_ENV_PREFIX) or not str(value).strip():
+            continue
+        suffix = key[len(_ROLE_OVERRIDE_ENV_PREFIX) :]
+        parts = suffix.split("_")
+        if len(parts) < 2:
+            continue
+        role_name = "_".join(part.lower() for part in parts[:-1] if part)
+        if role_name:
+            role_names.add(role_name)
+
+    overrides: dict[str, LlmEndpointConfig] = {}
+    for role_name in sorted(role_names):
+        override = _role_override_from_env(role_name, default=default)
+        if override is not None:
+            overrides[role_name] = override
+    return overrides
+
+
+class LlmConfig(LlmEndpointConfig):
+    role_overrides: dict[str, LlmEndpointConfig] = Field(default_factory=dict)
+
+    def config_for_role(self, role_name: str) -> LlmEndpointConfig:
+        role_key = str(role_name or "").strip()
+        return self.role_overrides.get(role_key) or LlmEndpointConfig(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            wire_api=self.wire_api,
+            timeout_seconds=self.timeout_seconds,
+        )
+
     @classmethod
     def from_env(cls) -> LlmConfig | None:
-        base_url = (os.getenv("TRAVELMIND_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").strip()
-        api_key = (os.getenv("TRAVELMIND_LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
-        model = (os.getenv("TRAVELMIND_LLM_MODEL") or os.getenv("OPENAI_MODEL") or "").strip()
-        wire_api = normalize_wire_api(os.getenv("TRAVELMIND_LLM_WIRE_API") or os.getenv("OPENAI_WIRE_API"), default="chat_completions")
-        timeout_raw = (os.getenv("TRAVELMIND_LLM_TIMEOUT_SECONDS") or "30").strip()
-        if not base_url or not api_key or not model:
+        default_config = _endpoint_config_from_mapping(
+            {
+                "base_url": os.getenv("TRAVELMIND_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL"),
+                "api_key": os.getenv("TRAVELMIND_LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
+                "model": os.getenv("TRAVELMIND_LLM_MODEL") or os.getenv("OPENAI_MODEL"),
+                "wire_api": os.getenv("TRAVELMIND_LLM_WIRE_API") or os.getenv("OPENAI_WIRE_API"),
+                "timeout_seconds": os.getenv("TRAVELMIND_LLM_TIMEOUT_SECONDS") or "30",
+            }
+        )
+        if default_config is None:
             return None
-        try:
-            timeout_seconds = float(timeout_raw)
-        except ValueError:
-            timeout_seconds = 30.0
+
         return cls(
-            base_url=base_url.rstrip("/"),
-            api_key=api_key,
-            model=model,
-            wire_api=wire_api,
-            timeout_seconds=timeout_seconds,
+            **default_config.model_dump(),
+            role_overrides=_collect_role_overrides_from_env(default=default_config),
         )
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object] | None) -> LlmConfig | None:
-        if payload is None:
+        default_config = _endpoint_config_from_mapping(payload)
+        if default_config is None:
             return None
-
-        base_url = str(payload.get("base_url") or "").strip().rstrip("/")
-        api_key = str(payload.get("api_key") or "").strip()
-        model = str(payload.get("model") or "").strip()
-        wire_api = normalize_wire_api(payload.get("wire_api"), default="responses")
-        timeout_raw = str(payload.get("timeout_seconds") or "30").strip()
-        if not base_url or not api_key or not model:
-            return None
-
-        try:
-            timeout_seconds = float(timeout_raw)
-        except ValueError:
-            timeout_seconds = 30.0
 
         return cls(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            wire_api=wire_api,
-            timeout_seconds=timeout_seconds,
+            **default_config.model_dump(),
+            role_overrides=_collect_role_overrides_from_mapping(payload, default=default_config),
         )

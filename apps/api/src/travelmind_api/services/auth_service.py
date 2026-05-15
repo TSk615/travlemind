@@ -7,8 +7,15 @@ from fastapi import HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from travelmind_api.agents.provider import AGENT_PROVIDER_STANDARD, is_supported_agent_provider, normalize_agent_provider
 from travelmind_api.api.schemas.auth import LoginRequest, RegisterRequest, UserResponse
-from travelmind_api.api.schemas.settings import LlmSettingsResponse, LlmSettingsUpdateRequest
+from travelmind_api.api.schemas.settings import (
+    AgentSettingsResponse,
+    ImageSettingsResponse,
+    RuntimeSettingsResponse,
+    RuntimeSettingsUpdateRequest,
+    SearchSettingsResponse,
+)
 from travelmind_api.core.config import Settings
 from travelmind_api.core.security import (
     create_access_token,
@@ -19,7 +26,14 @@ from travelmind_api.core.security import (
     verify_password,
 )
 from travelmind_api.db.models import RefreshSession, User
+from travelmind_api.services.images.provider import IMAGE_PROVIDER_OPENAI_COMPATIBLE, is_supported_image_provider, normalize_image_provider
 from travelmind_api.services.llm.config import normalize_wire_api
+from travelmind_api.services.search_connector import normalize_search_service_provider, normalize_search_service_transport
+
+
+def _utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
 
 
 def _normalize_email(email: str) -> str:
@@ -77,9 +91,76 @@ def _normalize_api_key(api_key: str | None) -> str | None:
 def _normalize_wire_api_value(wire_api: str | None) -> str | None:
     normalized = _normalize_optional_text(wire_api)
     if normalized is None:
-      return None
+        return None
     return normalize_wire_api(normalized, default="responses")
 
+
+
+def _normalize_agent_provider_value(agent_provider: str | None) -> str | None:
+    normalized = _normalize_optional_text(agent_provider)
+    if normalized is None:
+        return None
+    if not is_supported_agent_provider(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_agent_provider", "message": "agent_provider must be standard or helloagents"},
+        )
+    return normalize_agent_provider(normalized, default=AGENT_PROVIDER_STANDARD)
+
+
+
+def _normalize_search_provider_value(provider: str | None) -> str | None:
+    normalized = _normalize_optional_text(provider)
+    if normalized is None:
+        return None
+    if str(normalized).strip().lower() not in {"exa", "groksearch", "grok-search", "grok_search", "grok", "tavily"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_search_provider", "message": "search provider must be exa, groksearch, or tavily"},
+        )
+    return normalize_search_service_provider(normalized)
+
+
+def _normalize_search_transport_value(transport: str | None) -> str | None:
+    normalized = _normalize_optional_text(transport)
+    if normalized is None:
+        return None
+    if str(normalized).strip().lower() not in {"mcp", "api", "rest", "http"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_search_transport", "message": "search transport must be mcp or api"},
+        )
+    return normalize_search_service_transport(normalized)
+
+
+def _normalize_image_provider_value(provider: str | None) -> str | None:
+    normalized = _normalize_optional_text(provider)
+    if normalized is None:
+        return None
+    if not is_supported_image_provider(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_image_provider", "message": "image provider must be openai_compatible, huggingface, gitee_ai, modelscope, or a4f"},
+        )
+    return normalize_image_provider(normalized)
+
+
+def _normalize_timeout_seconds(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_timeout_seconds", "message": "timeout_seconds must be a positive number"},
+        ) from exc
+    if normalized <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_timeout_seconds", "message": "timeout_seconds must be a positive number"},
+        )
+    return normalized
 
 
 def mask_api_key(api_key: str | None) -> str | None:
@@ -103,14 +184,35 @@ def serialize_user(user: User) -> UserResponse:
 
 
 
-def serialize_llm_settings(user: User) -> LlmSettingsResponse:
-    return LlmSettingsResponse(
-        base_url=user.llm_base_url,
-        api_key_masked=mask_api_key(user.llm_api_key),
-        has_api_key=bool(user.llm_api_key),
-        model=user.llm_model,
-        wire_api=user.llm_wire_api,
-        configured=bool(user.llm_base_url and user.llm_api_key and user.llm_model),
+def serialize_runtime_settings(user: User, settings: Settings) -> RuntimeSettingsResponse:
+    return RuntimeSettingsResponse(
+        agent=AgentSettingsResponse(
+            base_url=user.llm_base_url,
+            api_key_masked=mask_api_key(user.llm_api_key),
+            has_api_key=bool(user.llm_api_key),
+            model=user.llm_model,
+            wire_api=user.llm_wire_api,
+            agent_provider=normalize_agent_provider(user.llm_agent_provider, default=normalize_agent_provider(settings.agent_provider)),
+            configured=bool(user.llm_base_url and user.llm_api_key and user.llm_model),
+        ),
+        search=SearchSettingsResponse(
+            provider=normalize_search_service_provider(getattr(user, "search_service_provider", None), default="exa"),
+            transport=normalize_search_service_transport(getattr(user, "search_service_transport", None), default="mcp"),
+            base_url=getattr(user, "search_service_base_url", None),
+            api_key_masked=mask_api_key(getattr(user, "search_service_api_key", None)),
+            has_api_key=bool(getattr(user, "search_service_api_key", None)),
+            timeout_seconds=float(getattr(user, "search_service_timeout_seconds", 30.0) or 30.0),
+            xhs_source_enabled=bool(getattr(user, "xhs_source_enabled", False)),
+            configured=bool(getattr(user, "search_service_base_url", None) and getattr(user, "search_service_api_key", None)),
+        ),
+        image=ImageSettingsResponse(
+            base_url=getattr(user, "image_base_url", None),
+            api_key_masked=mask_api_key(getattr(user, "image_api_key", None)),
+            has_api_key=bool(getattr(user, "image_api_key", None)),
+            model=getattr(user, "image_model", None),
+            provider=normalize_image_provider(getattr(user, "image_provider", None), default=IMAGE_PROVIDER_OPENAI_COMPATIBLE),
+            configured=bool(getattr(user, "image_base_url", None) and getattr(user, "image_api_key", None) and getattr(user, "image_model", None)),
+        ),
     )
 
 
@@ -153,11 +255,16 @@ def issue_tokens(session: Session, user: User, settings: Settings) -> tuple[str,
         id=generate_identifier("rfs"),
         user_id=user.id,
         token_hash=hash_refresh_token(refresh_token),
-        expires_at=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=settings.refresh_token_days),
+        expires_at=_utcnow() + dt.timedelta(days=settings.refresh_token_days),
     )
     session.add(refresh_session)
     session.commit()
     return access_token, refresh_token
+
+
+
+def issue_access_token(user: User, settings: Settings) -> str:
+    return create_access_token({"sub": user.id, "email": user.email}, settings)
 
 
 
@@ -185,6 +292,64 @@ def attach_auth_cookies(response: Response, access_token: str, refresh_token: st
 
 
 
+def attach_access_cookie(response: Response, access_token: str, settings: Settings) -> None:
+    response.set_cookie(
+        key=settings.access_cookie_name,
+        value=access_token,
+        httponly=True,
+        secure=False,
+        samesite="lax",
+        max_age=settings.access_token_minutes * 60,
+        path="/",
+    )
+
+
+
+def clear_auth_cookies(response: Response, settings: Settings) -> None:
+    response.delete_cookie(settings.access_cookie_name, path="/")
+    response.delete_cookie(settings.refresh_cookie_name, path="/")
+
+
+
+def refresh_access_token(session: Session, refresh_token: str | None, settings: Settings) -> str:
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "refresh_session_not_found", "message": "Refresh session not found"},
+        )
+
+    token_hash = hash_refresh_token(refresh_token)
+    refresh_session = session.scalar(select(RefreshSession).where(RefreshSession.token_hash == token_hash))
+    if refresh_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "refresh_session_not_found", "message": "Refresh session not found"},
+        )
+
+    expires_at = refresh_session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=dt.timezone.utc)
+    if expires_at <= _utcnow():
+        session.delete(refresh_session)
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "refresh_session_expired", "message": "Refresh session expired"},
+        )
+
+    user = session.scalar(select(User).where(User.id == refresh_session.user_id))
+    if user is None:
+        session.delete(refresh_session)
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "user_not_found", "message": "User not found"},
+        )
+
+    return issue_access_token(user, settings)
+
+
+
 def revoke_refresh_session(session: Session, refresh_token: str | None) -> None:
     if not refresh_token:
         return
@@ -194,19 +359,75 @@ def revoke_refresh_session(session: Session, refresh_token: str | None) -> None:
 
 
 
-def update_user_llm_settings(session: Session, user: User, payload: LlmSettingsUpdateRequest) -> User:
-    updates = payload.model_dump(exclude_unset=True)
-    if not updates:
+def update_user_runtime_settings(session: Session, user: User, payload: RuntimeSettingsUpdateRequest) -> User:
+    agent_updates = payload.agent.model_dump(exclude_unset=True) if payload.agent is not None else {}
+    search_updates = payload.search.model_dump(exclude_unset=True) if payload.search is not None else {}
+    image_updates = payload.image.model_dump(exclude_unset=True) if payload.image is not None else {}
+    if not agent_updates and not search_updates and not image_updates:
         return user
 
-    if "base_url" in updates:
-        user.llm_base_url = _normalize_base_url(updates["base_url"])
-    if "api_key" in updates:
-        user.llm_api_key = _normalize_api_key(updates["api_key"])
-    if "model" in updates:
-        user.llm_model = _normalize_model(updates["model"])
-    if "wire_api" in updates:
-        user.llm_wire_api = _normalize_wire_api_value(updates["wire_api"])
+    if "base_url" in agent_updates:
+        user.llm_base_url = _normalize_base_url(agent_updates["base_url"])
+    if "api_key" in agent_updates:
+        user.llm_api_key = _normalize_api_key(agent_updates["api_key"])
+    if "model" in agent_updates:
+        user.llm_model = _normalize_model(agent_updates["model"])
+    if "wire_api" in agent_updates:
+        user.llm_wire_api = _normalize_wire_api_value(agent_updates["wire_api"])
+    if "agent_provider" in agent_updates:
+        user.llm_agent_provider = _normalize_agent_provider_value(agent_updates["agent_provider"])
+
+    next_search_provider = normalize_search_service_provider(getattr(user, "search_service_provider", None), default="exa")
+    next_search_transport = normalize_search_service_transport(getattr(user, "search_service_transport", None), default="mcp")
+    next_search_base_url = getattr(user, "search_service_base_url", None)
+    next_search_api_key = getattr(user, "search_service_api_key", None)
+    next_search_timeout = float(getattr(user, "search_service_timeout_seconds", 30.0) or 30.0)
+    next_xhs_source_enabled = bool(getattr(user, "xhs_source_enabled", False))
+
+    if "provider" in search_updates:
+        normalized_provider = _normalize_search_provider_value(search_updates["provider"])
+        if normalized_provider is not None:
+            next_search_provider = normalized_provider
+    if "transport" in search_updates:
+        normalized_transport = _normalize_search_transport_value(search_updates["transport"])
+        if normalized_transport is not None:
+            next_search_transport = normalized_transport
+    if next_search_provider == "groksearch" and next_search_transport != "mcp":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_search_transport", "message": "groksearch currently only supports mcp transport"},
+        )
+    if next_search_provider == "tavily" and next_search_transport != "api":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_search_transport", "message": "tavily currently only supports api transport"},
+        )
+    if "base_url" in search_updates:
+        next_search_base_url = _normalize_base_url(search_updates["base_url"])
+    if "api_key" in search_updates:
+        next_search_api_key = _normalize_api_key(search_updates["api_key"])
+    if "timeout_seconds" in search_updates:
+        normalized_timeout = _normalize_timeout_seconds(search_updates["timeout_seconds"])
+        if normalized_timeout is not None:
+            next_search_timeout = normalized_timeout
+    if "xhs_source_enabled" in search_updates and search_updates["xhs_source_enabled"] is not None:
+        next_xhs_source_enabled = bool(search_updates["xhs_source_enabled"])
+
+    user.search_service_provider = next_search_provider
+    user.search_service_transport = next_search_transport
+    user.search_service_base_url = next_search_base_url
+    user.search_service_api_key = next_search_api_key
+    user.search_service_timeout_seconds = next_search_timeout
+    user.xhs_source_enabled = next_xhs_source_enabled
+
+    if "base_url" in image_updates:
+        user.image_base_url = _normalize_base_url(image_updates["base_url"])
+    if "api_key" in image_updates:
+        user.image_api_key = _normalize_api_key(image_updates["api_key"])
+    if "model" in image_updates:
+        user.image_model = _normalize_model(image_updates["model"])
+    if "provider" in image_updates:
+        user.image_provider = _normalize_image_provider_value(image_updates["provider"])
 
     session.add(user)
     session.commit()

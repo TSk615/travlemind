@@ -1,31 +1,81 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue"
-import type { LlmSettingsInput, LlmWireApi } from "@travelmind/shared-types"
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue"
+import type {
+  ImageProvider,
+  LlmAgentProvider,
+  LlmSettingsInput,
+  LlmWireApi,
+  SearchServiceProvider,
+  SearchServiceTransport,
+  XhsAccountStatus,
+  XhsBindingStatus
+} from "@travelmind/shared-types"
 import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import StatePanel from "@/components/StatePanel.vue"
+import { api, getErrorMessage } from "@/lib/api"
 import { useI18n } from "@/lib/useI18n"
 import { useLlmSettingsStore } from "@/stores/llmSettings"
 
 const settingsStore = useLlmSettingsStore()
 const saveSuccess = ref<string | null>(null)
+const xhsStatus = ref<XhsAccountStatus | null>(null)
+const xhsBinding = ref<XhsBindingStatus | null>(null)
+const xhsPending = ref(false)
+const xhsError = ref<string | null>(null)
+let xhsPollTimer: number | null = null
 void settingsStore.bootstrap()
 
 const form = reactive<{
-  base_url: string
-  api_key: string
-  model: string
-  wire_api: LlmWireApi
+  agent_base_url: string
+  agent_api_key: string
+  agent_model: string
+  agent_wire_api: LlmWireApi
+  agent_provider: LlmAgentProvider
+  search_provider: SearchServiceProvider
+  search_transport: SearchServiceTransport
+  search_base_url: string
+  search_api_key: string
+  search_timeout_seconds: number
+  xhs_source_enabled: boolean
+  image_base_url: string
+  image_api_key: string
+  image_model: string
+  image_provider: ImageProvider
 }>({
-  base_url: "",
-  api_key: "",
-  model: "",
-  wire_api: "responses"
+  agent_base_url: "",
+  agent_api_key: "",
+  agent_model: "",
+  agent_wire_api: "responses",
+  agent_provider: "standard",
+  search_provider: "exa",
+  search_transport: "mcp",
+  search_base_url: "",
+  search_api_key: "",
+  search_timeout_seconds: 30,
+  xhs_source_enabled: false,
+  image_base_url: "",
+  image_api_key: "",
+  image_model: "",
+  image_provider: "openai_compatible"
 })
 
 const enCopy = {
   kicker: "Settings",
-  title: "Browser-side model configuration",
-  description: "These values are stored only in your current browser. Generation and refinement will call the third-party model directly from the frontend.",
+  title: "Agent, Search, and Image Settings",
+  description:
+    "Agent model settings, search service settings, and image model settings are managed separately. Prompt optimization uses the text model settings, while final image generation uses the saved image model settings.",
+  refresh: "Reload",
+  save: "Save settings",
+  saving: "Saving...",
+  saveSuccessTitle: "Settings saved",
+  saveSuccessMessage: "Agent model settings and search service settings have been updated.",
+  loadErrorTitle: "Unable to load settings",
+  saveErrorTitle: "Unable to save settings",
+  agentSection: "Agent model",
+  agentSectionHint: "Controls the model endpoint used for generation and refinement.",
+  providerLabel: "Planning provider",
+  providerStandard: "Standard",
+  providerHelloAgents: "HelloAgents (PoC)",
   baseUrlLabel: "Base URL",
   baseUrlPlaceholder: "https://api.example.com/v1",
   modelLabel: "Model",
@@ -35,91 +85,399 @@ const enCopy = {
   wireApiChat: "Chat Completions API",
   apiKeyLabel: "API key",
   apiKeyPlaceholder: "Enter a new key to save or replace",
-  savedKeyLabel: "Stored key",
+  storedKeyLabel: "Stored key",
   noStoredKey: "No API key is stored yet.",
-  keyHelp: "Leave the API key blank to keep the currently stored key unchanged in this browser.",
-  save: "Save settings",
-  saving: "Saving...",
-  refresh: "Reload",
-  saveSuccessTitle: "Settings saved locally",
-  saveSuccessMessage: "The browser will use this configuration for direct third-party model calls.",
-  loadErrorTitle: "Unable to load local settings",
-  saveErrorTitle: "Unable to save local settings",
-  statusHint: "Use Responses API when the provider exposes /responses. Use Chat Completions API when it exposes /chat/completions."
+  keyHelp: "Leave the API key blank to keep the current stored value.",
+  searchSection: "Search service",
+  searchSectionHint:
+    "Controls the search grounding service used by backend search and HelloAgents. You can switch between MCP access and direct API access.",
+  searchProviderLabel: "Search provider",
+  searchProviderExa: "Exa",
+  searchProviderGrokSearch: "GrokSearch bridge",
+  searchProviderTavily: "Tavily",
+  searchProviderHint: "GrokSearch currently works through the MCP bridge only. Tavily currently works through the API only.",
+  searchTransportLabel: "Connection type",
+  searchTransportMcp: "MCP",
+  searchTransportApi: "API",
+  searchBaseUrlLabel: "Search base URL",
+  searchBaseUrlMcpPlaceholder: "https://your-mcp-server.example.com/mcp",
+  searchBaseUrlApiPlaceholder: "https://your-search-api.example.com",
+  searchTimeoutLabel: "Timeout (seconds)",
+  xhsToggleLabel: "Enable Xiaohongshu source",
+  xhsToggleHint: "Allow Xiaohongshu posts to be merged into search grounding when available.",
+  searchStoredKeyLabel: "Stored search key",
+  statusHint:
+    "Agent settings affect text model execution. Search service settings affect grounded search. Image settings affect final image generation jobs.",
+  imageSection: "Image model",
+  imageSectionHint: "Controls the model endpoint used for text-to-image and image-to-image jobs.",
+  imageProviderLabel: "Image provider",
+  imageProviderOpenAICompatible: "OpenAI-compatible",
+  imageProviderHuggingFace: "Hugging Face",
+  imageProviderGiteeAI: "Gitee AI",
+  imageProviderModelScope: "ModelScope",
+  imageProviderA4F: "A4F",
+  imageStoredKeyLabel: "Stored image key"
 }
 
 const zhCopy = {
   kicker: "设置",
-  title: "浏览器端模型配置",
-  description: "这些配置只保存在当前浏览器中。生成和 refine 会由前端直接调用第三方模型接口。",
-  baseUrlLabel: "Base URL",
-  baseUrlPlaceholder: "https://api.example.com/v1",
-  modelLabel: "Model",
-  modelPlaceholder: "gpt-5.4",
-  wireApiLabel: "接口格式",
-  wireApiResponses: "Responses API",
-  wireApiChat: "Chat Completions API",
-  apiKeyLabel: "API Key",
-  apiKeyPlaceholder: "输入新的 key 以保存或替换",
-  savedKeyLabel: "已保存的 Key",
-  noStoredKey: "当前还没有保存 API Key。",
-  keyHelp: "如果不想替换当前 key，可以把 API Key 输入框留空。",
+  title: "模型与搜索设置",
+  description:
+    "模型配置与搜索服务配置分开管理。后端会使用已保存的搜索服务执行搜索与 HelloAgents 工具调用。",
+  refresh: "重新加载",
   save: "保存设置",
   saving: "保存中...",
-  refresh: "重新加载",
-  saveSuccessTitle: "设置已保存到浏览器",
-  saveSuccessMessage: "当前浏览器会用这组配置直接调用第三方模型接口。",
-  loadErrorTitle: "读取本地设置失败",
-  saveErrorTitle: "保存本地设置失败",
-  statusHint: "如果第三方提供的是 /responses，请选择 Responses API；如果提供的是 /chat/completions，请选择 Chat Completions API。"
+  saveSuccessTitle: "设置已保存",
+  saveSuccessMessage: "模型配置与搜索服务配置已更新。",
+  loadErrorTitle: "无法加载设置",
+  saveErrorTitle: "无法保存设置",
+  agentSection: "模型配置",
+  agentSectionHint: "控制生成和润色时使用的模型接口。",
+  providerLabel: "规划提供方",
+  providerStandard: "标准模式",
+  providerHelloAgents: "HelloAgents（PoC）",
+  baseUrlLabel: "接口地址",
+  baseUrlPlaceholder: "https://api.example.com/v1",
+  modelLabel: "模型",
+  modelPlaceholder: "gpt-5.4",
+  wireApiLabel: "接口格式",
+  wireApiResponses: "Responses 接口",
+  wireApiChat: "Chat Completions 接口",
+  apiKeyLabel: "API 密钥",
+  apiKeyPlaceholder: "输入新的密钥以保存或替换",
+  storedKeyLabel: "已保存的密钥",
+  noStoredKey: "当前还没有保存 API 密钥。",
+  keyHelp: "如果要保留当前已保存的 API 密钥，请将输入框留空。",
+  searchSection: "搜索服务",
+  searchSectionHint:
+    "控制后端搜索与 HelloAgents 使用的搜索服务。你可以在 MCP 访问和直接 API 访问之间切换。",
+  searchProviderLabel: "搜索提供方",
+  searchProviderExa: "Exa",
+  searchProviderGrokSearch: "GrokSearch 桥接",
+  searchProviderTavily: "Tavily",
+  searchProviderHint: "GrokSearch 目前仅支持通过 MCP 桥接使用；Tavily 目前仅支持 API 传输。",
+  searchTransportLabel: "连接方式",
+  searchTransportMcp: "MCP",
+  searchTransportApi: "API",
+  searchBaseUrlLabel: "搜索接口地址",
+  searchBaseUrlMcpPlaceholder: "https://your-mcp-server.example.com/mcp",
+  searchBaseUrlApiPlaceholder: "https://your-search-api.example.com",
+  searchTimeoutLabel: "超时时间（秒）",
+  xhsToggleLabel: "启用小红书来源",
+  xhsToggleHint: "可用时允许将小红书帖子合并到搜索 grounding 结果中。",
+  searchStoredKeyLabel: "已保存的搜索密钥",
+  statusHint:
+    "模型设置会影响模型执行；搜索服务设置会影响后端搜索，包括 MCP 或直接 API 调用。"
 }
 
 const { locale } = useI18n()
-const copy = computed(() => (locale.value === "zh-CN" ? zhCopy : enCopy))
-const storedKeyText = computed(() => settingsStore.settings?.api_key_masked?.trim() || copy.value.noStoredKey)
+const copy = computed<typeof enCopy>(() => (locale.value === "zh-CN" ? ({ ...enCopy, ...zhCopy } as typeof enCopy) : enCopy))
+const xhsCopy = computed(() =>
+  locale.value === "zh-CN"
+    ? {
+        section: "小红书账号",
+        hint: "绑定后可复用你自己的小红书登录态；未绑定或失效时，搜索会自动降级为非小红书来源。",
+        statusLabel: "当前状态",
+        statusBound: "已绑定",
+        statusPending: "等待扫码",
+        statusExpired: "会话已过期",
+        statusUnbound: "未绑定",
+        statusUnknown: "状态未知",
+        connect: "开始绑定",
+        reconnect: "重新绑定",
+        unbind: "解绑",
+        binding: "处理中...",
+        pendingTitle: "请使用小红书扫码完成绑定",
+        openLink: "打开绑定链接",
+        codeLabel: "验证码",
+        lastBound: "最近绑定",
+        lastAvailable: "最近可用",
+        boundAs: "绑定账号",
+        bindFailed: "无法开始小红书绑定",
+        statusFailed: "无法获取小红书绑定状态",
+        pollFailed: "无法刷新绑定状态",
+        deleteFailed: "无法解绑小红书账号",
+        waiting: "正在等待扫码确认。",
+        authorized: "绑定成功，后续搜索会复用该登录态。",
+        cancelled: "绑定已取消。",
+        failed: "绑定失败，请重试。",
+        expired: "绑定二维码已过期，请重新发起。"
+      }
+    : {
+        section: "Xiaohongshu Account",
+        hint: "After binding once, TravelMind reuses your own Xiaohongshu session. If the session is missing or expired, search falls back to non-XHS sources.",
+        statusLabel: "Current status",
+        statusBound: "Bound",
+        statusPending: "Waiting for scan",
+        statusExpired: "Session expired",
+        statusUnbound: "Not bound",
+        statusUnknown: "Unknown",
+        connect: "Bind account",
+        reconnect: "Rebind",
+        unbind: "Unbind",
+        binding: "Working...",
+        pendingTitle: "Scan with Xiaohongshu to finish binding",
+        openLink: "Open bind link",
+        codeLabel: "Verification code",
+        lastBound: "Last bound",
+        lastAvailable: "Last available",
+        boundAs: "Bound profile",
+        bindFailed: "Unable to start Xiaohongshu binding",
+        statusFailed: "Unable to load Xiaohongshu binding status",
+        pollFailed: "Unable to refresh binding status",
+        deleteFailed: "Unable to unbind Xiaohongshu account",
+        waiting: "Waiting for QR scan confirmation.",
+        authorized: "Binding succeeded. Future searches will reuse this session.",
+        cancelled: "Binding was cancelled.",
+        failed: "Binding failed. Try again.",
+        expired: "The QR code expired. Start a new binding flow."
+      }
+)
+const agentStoredKeyText = computed(() => settingsStore.settings?.agent.api_key_masked?.trim() || copy.value.noStoredKey)
+const searchStoredKeyText = computed(() => settingsStore.settings?.search.api_key_masked?.trim() || copy.value.noStoredKey)
+const imageStoredKeyText = computed(() => settingsStore.settings?.image.api_key_masked?.trim() || copy.value.noStoredKey)
+const isGrokSearchProvider = computed(() => form.search_provider === "groksearch")
+const isTavilyProvider = computed(() => form.search_provider === "tavily")
+const searchBaseUrlPlaceholder = computed(() =>
+  isGrokSearchProvider.value || form.search_transport === "mcp"
+    ? copy.value.searchBaseUrlMcpPlaceholder
+    : copy.value.searchBaseUrlApiPlaceholder
+)
+const xhsStatusLabel = computed(() => {
+  if (xhsBinding.value?.status === "pending") {
+    return xhsCopy.value.statusPending
+  }
+  if (xhsStatus.value?.xhs_bound) {
+    return xhsCopy.value.statusBound
+  }
+  if (xhsStatus.value?.xhs_session_expired) {
+    return xhsCopy.value.statusExpired
+  }
+  if (xhsStatus.value?.xhs_binding_required) {
+    return xhsCopy.value.statusUnbound
+  }
+  return xhsCopy.value.statusUnknown
+})
+const xhsActionLabel = computed(() => (xhsStatus.value?.xhs_bound || xhsStatus.value?.xhs_session_expired ? xhsCopy.value.reconnect : xhsCopy.value.connect))
+const xhsBindingMessage = computed(() => {
+  switch (xhsBinding.value?.status) {
+    case "authorized":
+      return xhsCopy.value.authorized
+    case "cancelled":
+      return xhsCopy.value.cancelled
+    case "failed":
+      return xhsCopy.value.failed
+    case "expired":
+      return xhsCopy.value.expired
+    case "pending":
+      return xhsCopy.value.waiting
+    default:
+      return xhsBinding.value?.message ?? null
+  }
+})
 
 watch(
   () => settingsStore.settings,
   (settings) => {
-    form.base_url = settings?.base_url ?? ""
-    form.model = settings?.model ?? ""
-    form.api_key = ""
-    form.wire_api = settings?.wire_api ?? "responses"
+    form.agent_base_url = settings?.agent.base_url ?? ""
+    form.agent_model = settings?.agent.model ?? ""
+    form.agent_api_key = ""
+    form.agent_wire_api = settings?.agent.wire_api ?? "responses"
+    form.agent_provider = settings?.agent.agent_provider ?? "standard"
+    form.search_provider = settings?.search.provider ?? "exa"
+    form.search_transport =
+      settings?.search.provider === "groksearch"
+        ? "mcp"
+        : settings?.search.provider === "tavily"
+          ? "api"
+          : (settings?.search.transport ?? "mcp")
+    form.search_base_url = settings?.search.base_url ?? ""
+    form.search_api_key = ""
+    form.search_timeout_seconds = Number(settings?.search.timeout_seconds ?? 30)
+    form.xhs_source_enabled = Boolean(settings?.search.xhs_source_enabled)
+    form.image_base_url = settings?.image.base_url ?? ""
+    form.image_api_key = ""
+    form.image_model = settings?.image.model ?? ""
+    form.image_provider = settings?.image.provider ?? "openai_compatible"
   },
   { immediate: true }
 )
 
+watch(
+  () => form.search_provider,
+  (provider) => {
+    if (provider === "groksearch") {
+      form.search_transport = "mcp"
+    } else if (provider === "tavily") {
+      form.search_transport = "api"
+    }
+  }
+)
+
+function stopXhsPolling() {
+  if (xhsPollTimer !== null) {
+    window.clearTimeout(xhsPollTimer)
+    xhsPollTimer = null
+  }
+}
+
+function scheduleXhsPoll(bindId: string) {
+  stopXhsPolling()
+  xhsPollTimer = window.setTimeout(() => {
+    void pollXhsBinding(bindId)
+  }, 2000)
+}
+
+function formatStamp(value?: string | null): string | null {
+  if (!value) {
+    return null
+  }
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
+
+async function refreshXhsStatus() {
+  try {
+    const status = await api.getXhsStatus()
+    xhsStatus.value = status
+    if (status.active_binding) {
+      xhsBinding.value = status.active_binding
+      if (status.active_binding.status === "pending") {
+        scheduleXhsPoll(status.active_binding.bind_id)
+      } else {
+        stopXhsPolling()
+      }
+    } else if (!xhsBinding.value || xhsBinding.value.status === "pending") {
+      xhsBinding.value = null
+      stopXhsPolling()
+    }
+    xhsError.value = null
+  } catch (error) {
+    xhsError.value = getErrorMessage(error, xhsCopy.value.statusFailed)
+  }
+}
+
+async function startXhsBinding() {
+  xhsPending.value = true
+  xhsError.value = null
+  try {
+    const binding = await api.startXhsBind()
+    xhsBinding.value = binding
+    await refreshXhsStatus()
+    if (binding.status === "pending") {
+      scheduleXhsPoll(binding.bind_id)
+    }
+  } catch (error) {
+    xhsError.value = getErrorMessage(error, xhsCopy.value.bindFailed)
+  } finally {
+    xhsPending.value = false
+  }
+}
+
+async function pollXhsBinding(bindId: string) {
+  try {
+    const binding = await api.getXhsBind(bindId)
+    xhsBinding.value = binding
+    if (binding.status === "pending") {
+      scheduleXhsPoll(bindId)
+      return
+    }
+    stopXhsPolling()
+    await refreshXhsStatus()
+  } catch (error) {
+    stopXhsPolling()
+    xhsError.value = getErrorMessage(error, xhsCopy.value.pollFailed)
+  }
+}
+
+async function deleteXhsBinding() {
+  xhsPending.value = true
+  xhsError.value = null
+  stopXhsPolling()
+  try {
+    xhsStatus.value = await api.deleteXhsBind()
+    xhsBinding.value = null
+  } catch (error) {
+    xhsError.value = getErrorMessage(error, xhsCopy.value.deleteFailed)
+  } finally {
+    xhsPending.value = false
+  }
+}
+
 async function refresh() {
   saveSuccess.value = null
   await settingsStore.fetch(true)
+  await refreshXhsStatus()
 }
 
 async function save() {
   saveSuccess.value = null
 
   const payload: LlmSettingsInput = {
-    base_url: form.base_url.trim(),
-    model: form.model.trim(),
-    wire_api: form.wire_api
+    agent: {
+      base_url: form.agent_base_url.trim(),
+      model: form.agent_model.trim(),
+      wire_api: form.agent_wire_api,
+      agent_provider: form.agent_provider
+    },
+    search: {
+      provider: form.search_provider,
+      transport: form.search_provider === "groksearch" ? "mcp" : form.search_provider === "tavily" ? "api" : form.search_transport,
+      base_url: form.search_base_url.trim(),
+      timeout_seconds: Number.isFinite(form.search_timeout_seconds) && form.search_timeout_seconds > 0 ? form.search_timeout_seconds : 30,
+      xhs_source_enabled: form.xhs_source_enabled
+    },
+    image: {
+      base_url: form.image_base_url.trim(),
+      model: form.image_model.trim(),
+      provider: form.image_provider
+    }
   }
 
-  const nextApiKey = form.api_key.trim()
-  if (nextApiKey) {
-    payload.api_key = nextApiKey
+  const nextAgentApiKey = form.agent_api_key.trim()
+  if (nextAgentApiKey) {
+    payload.agent = {
+      ...payload.agent,
+      api_key: nextAgentApiKey
+    }
+  }
+
+  const nextSearchApiKey = form.search_api_key.trim()
+  if (nextSearchApiKey) {
+    payload.search = {
+      ...payload.search,
+      api_key: nextSearchApiKey
+    }
+  }
+
+  const nextImageApiKey = form.image_api_key.trim()
+  if (nextImageApiKey) {
+    payload.image = {
+      ...payload.image,
+      api_key: nextImageApiKey
+    }
   }
 
   try {
     await settingsStore.save(payload)
-    form.api_key = ""
+    form.agent_api_key = ""
+    form.search_api_key = ""
+    form.image_api_key = ""
     saveSuccess.value = copy.value.saveSuccessMessage
   } catch {
     // The store already exposes a user-facing save error state.
   }
 }
+
+onBeforeUnmount(() => {
+  stopXhsPolling()
+})
+
+void refreshXhsStatus()
 </script>
 
 <template>
-  <section class="page-grid" style="max-width: 960px; margin: 0 auto;">
+  <section class="page-grid" style="max-width: 1040px; margin: 0 auto;">
     <article class="panel panel-stack">
       <div class="form-toolbar">
         <div>
@@ -159,32 +517,184 @@ async function save() {
       />
 
       <form class="form-grid" @submit.prevent="save">
+        <div class="field field--full panel-subsection">
+          <p class="kicker">{{ copy.agentSection }}</p>
+          <p class="muted">{{ copy.agentSectionHint }}</p>
+        </div>
+
         <div class="field field--full">
-          <label for="base-url">{{ copy.baseUrlLabel }}</label>
-          <input id="base-url" v-model="form.base_url" :placeholder="copy.baseUrlPlaceholder" />
+          <label for="agent-provider">{{ copy.providerLabel }}</label>
+          <select id="agent-provider" v-model="form.agent_provider">
+            <option value="standard">{{ copy.providerStandard }}</option>
+            <option value="helloagents">{{ copy.providerHelloAgents }}</option>
+          </select>
+        </div>
+
+        <div class="field field--full">
+          <label for="agent-base-url">{{ copy.baseUrlLabel }}</label>
+          <input id="agent-base-url" v-model="form.agent_base_url" :placeholder="copy.baseUrlPlaceholder" />
         </div>
 
         <div class="field">
-          <label for="model">{{ copy.modelLabel }}</label>
-          <input id="model" v-model="form.model" :placeholder="copy.modelPlaceholder" />
+          <label for="agent-model">{{ copy.modelLabel }}</label>
+          <input id="agent-model" v-model="form.agent_model" :placeholder="copy.modelPlaceholder" />
         </div>
 
         <div class="field">
-          <label for="wire-api">{{ copy.wireApiLabel }}</label>
-          <select id="wire-api" v-model="form.wire_api">
+          <label for="agent-wire-api">{{ copy.wireApiLabel }}</label>
+          <select id="agent-wire-api" v-model="form.agent_wire_api">
             <option value="responses">{{ copy.wireApiResponses }}</option>
             <option value="chat_completions">{{ copy.wireApiChat }}</option>
           </select>
         </div>
 
         <div class="field field--full">
-          <label for="api-key">{{ copy.apiKeyLabel }}</label>
-          <input id="api-key" v-model="form.api_key" type="password" autocomplete="new-password" :placeholder="copy.apiKeyPlaceholder" />
+          <label for="agent-api-key">{{ copy.apiKeyLabel }}</label>
+          <input id="agent-api-key" v-model="form.agent_api_key" type="password" autocomplete="new-password" :placeholder="copy.apiKeyPlaceholder" />
         </div>
 
         <div class="field field--full">
-          <p class="muted"><strong>{{ copy.savedKeyLabel }}:</strong> {{ storedKeyText }}</p>
+          <p class="muted"><strong>{{ copy.storedKeyLabel }}:</strong> {{ agentStoredKeyText }}</p>
           <p class="muted">{{ copy.keyHelp }}</p>
+        </div>
+
+        <div class="field field--full panel-subsection">
+          <p class="kicker">{{ copy.searchSection }}</p>
+          <p class="muted">{{ copy.searchSectionHint }}</p>
+        </div>
+
+        <div class="field">
+          <label for="search-provider">{{ copy.searchProviderLabel }}</label>
+          <select id="search-provider" v-model="form.search_provider">
+            <option value="exa">{{ copy.searchProviderExa }}</option>
+            <option value="groksearch">{{ copy.searchProviderGrokSearch }}</option>
+            <option value="tavily">{{ copy.searchProviderTavily }}</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="search-transport">{{ copy.searchTransportLabel }}</label>
+          <select id="search-transport" v-model="form.search_transport" :disabled="isGrokSearchProvider || isTavilyProvider">
+            <option value="mcp">{{ copy.searchTransportMcp }}</option>
+            <option value="api" :disabled="isGrokSearchProvider">{{ copy.searchTransportApi }}</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="search-timeout">{{ copy.searchTimeoutLabel }}</label>
+          <input id="search-timeout" v-model.number="form.search_timeout_seconds" type="number" min="1" step="1" />
+        </div>
+
+        <div class="field field--full" v-if="isGrokSearchProvider || isTavilyProvider">
+          <p class="muted">{{ copy.searchProviderHint }}</p>
+        </div>
+
+        <div class="field field--full">
+          <label for="search-base-url">{{ copy.searchBaseUrlLabel }}</label>
+          <input id="search-base-url" v-model="form.search_base_url" :placeholder="searchBaseUrlPlaceholder" />
+        </div>
+
+        <div class="field field--full">
+          <label for="search-api-key">{{ copy.apiKeyLabel }}</label>
+          <input id="search-api-key" v-model="form.search_api_key" type="password" autocomplete="new-password" :placeholder="copy.apiKeyPlaceholder" />
+        </div>
+
+        <div class="field field--full">
+          <label class="checkbox-row">
+            <input v-model="form.xhs_source_enabled" type="checkbox" />
+            <span>{{ copy.xhsToggleLabel }}</span>
+          </label>
+          <p class="muted">{{ copy.xhsToggleHint }}</p>
+        </div>
+
+        <div class="field field--full">
+          <p class="muted"><strong>{{ copy.searchStoredKeyLabel }}:</strong> {{ searchStoredKeyText }}</p>
+          <p class="muted">{{ copy.keyHelp }}</p>
+        </div>
+
+        <div class="field field--full panel-subsection">
+          <p class="kicker">{{ copy.imageSection }}</p>
+          <p class="muted">{{ copy.imageSectionHint }}</p>
+        </div>
+
+        <div class="field">
+          <label for="image-provider">{{ copy.imageProviderLabel }}</label>
+          <select id="image-provider" v-model="form.image_provider">
+            <option value="openai_compatible">{{ copy.imageProviderOpenAICompatible }}</option>
+            <option value="huggingface">{{ copy.imageProviderHuggingFace }}</option>
+            <option value="gitee_ai">{{ copy.imageProviderGiteeAI }}</option>
+            <option value="modelscope">{{ copy.imageProviderModelScope }}</option>
+            <option value="a4f">{{ copy.imageProviderA4F }}</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="image-model">{{ copy.modelLabel }}</label>
+          <input id="image-model" v-model="form.image_model" :placeholder="copy.modelPlaceholder" />
+        </div>
+
+        <div class="field field--full">
+          <label for="image-base-url">{{ copy.baseUrlLabel }}</label>
+          <input id="image-base-url" v-model="form.image_base_url" :placeholder="copy.baseUrlPlaceholder" />
+        </div>
+
+        <div class="field field--full">
+          <label for="image-api-key">{{ copy.apiKeyLabel }}</label>
+          <input id="image-api-key" v-model="form.image_api_key" type="password" autocomplete="new-password" :placeholder="copy.apiKeyPlaceholder" />
+        </div>
+
+        <div class="field field--full">
+          <p class="muted"><strong>{{ copy.imageStoredKeyLabel }}:</strong> {{ imageStoredKeyText }}</p>
+          <p class="muted">{{ copy.keyHelp }}</p>
+        </div>
+
+        <div class="field field--full panel-subsection">
+          <p class="kicker">{{ xhsCopy.section }}</p>
+          <p class="muted">{{ xhsCopy.hint }}</p>
+        </div>
+
+        <div class="field field--full">
+          <p class="muted"><strong>{{ xhsCopy.statusLabel }}:</strong> {{ xhsStatusLabel }}</p>
+          <p v-if="xhsStatus?.xhs_message" class="muted">{{ xhsStatus.xhs_message }}</p>
+          <p v-if="xhsBindingMessage" class="muted">{{ xhsBindingMessage }}</p>
+          <p v-if="xhsStatus?.xhs_display_name" class="muted"><strong>{{ xhsCopy.boundAs }}:</strong> {{ xhsStatus.xhs_display_name }}</p>
+          <p v-if="formatStamp(xhsStatus?.xhs_last_bound_at)" class="muted"><strong>{{ xhsCopy.lastBound }}:</strong> {{ formatStamp(xhsStatus?.xhs_last_bound_at) }}</p>
+          <p v-if="formatStamp(xhsStatus?.xhs_last_available_at)" class="muted"><strong>{{ xhsCopy.lastAvailable }}:</strong> {{ formatStamp(xhsStatus?.xhs_last_available_at) }}</p>
+        </div>
+
+        <StatePanel
+          v-if="xhsError"
+          class="field field--full"
+          kind="error"
+          :title="xhsCopy.section"
+          :message="xhsError"
+          compact
+        />
+
+        <div class="field field--full inline-actions">
+          <button type="button" :disabled="xhsPending" @click="startXhsBinding">
+            {{ xhsPending ? xhsCopy.binding : xhsActionLabel }}
+          </button>
+          <button
+            v-if="xhsStatus?.xhs_bound || xhsBinding"
+            type="button"
+            class="ghost-button"
+            :disabled="xhsPending"
+            @click="deleteXhsBinding"
+          >
+            {{ xhsCopy.unbind }}
+          </button>
+        </div>
+
+        <div v-if="xhsBinding?.status === 'pending'" class="field field--full">
+          <p><strong>{{ xhsCopy.pendingTitle }}</strong></p>
+          <div v-if="xhsBinding.qr_image_data_url" style="margin: 0.75rem 0;">
+            <img :src="xhsBinding.qr_image_data_url" alt="Xiaohongshu bind QR" style="max-width: 240px; border-radius: 16px;" />
+          </div>
+          <p v-if="xhsBinding.verification_url" class="muted">
+            <a :href="xhsBinding.verification_url" target="_blank" rel="noreferrer">{{ xhsCopy.openLink }}</a>
+          </p>
+          <p v-if="xhsBinding.verification_code" class="muted"><strong>{{ xhsCopy.codeLabel }}:</strong> {{ xhsBinding.verification_code }}</p>
         </div>
 
         <div class="field field--full inline-actions">

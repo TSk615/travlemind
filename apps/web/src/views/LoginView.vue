@@ -8,12 +8,18 @@ import { useAuthStore } from "@/stores/auth"
 const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
-const { t } = useI18n()
+const { locale, t } = useI18n()
 
 const mode = ref<"login" | "register">("login")
 const name = ref("Traveler")
 const email = ref("demo@travelmind.ai")
 const password = ref("changeme123")
+const sessionExpiredTitle = computed(() => (locale.value === "zh-CN" ? "登录已失效" : "Session expired"))
+const sessionExpiredMessage = computed(() =>
+  locale.value === "zh-CN"
+    ? "登录状态已失效，请重新登录后继续操作。"
+    : "Your session has expired. Sign in again to continue."
+)
 
 const submitLabel = computed(() => {
   if (auth.pending) {
@@ -73,6 +79,14 @@ async function submit() {
       />
 
       <template v-else>
+        <StatePanel
+          v-if="route.query.reason === 'expired'"
+          kind="info"
+          :title="sessionExpiredTitle"
+          :message="sessionExpiredMessage"
+          compact
+        />
+
         <StatePanel
           v-if="auth.error"
           kind="error"

@@ -38,4 +38,14 @@ apps/api/.pytest_tmp/
 apps/api/.tmp/
 apps/api/pytest-cache-files-*/
 apps/api/storage/pytest-cache-files-*/
+apps/api/storage/
+apps/groksearch-bridge/.local-venv/
 apps/worker/.venv/
+apps/xhs-crawler/vendor/MediaCrawler/*
+!apps/xhs-crawler/vendor/MediaCrawler/.gitkeep
+logs/
+memory/
+storage/images/
+storage/xhs-crawler/
+__debug_trip.py
+__trip_test.txt

@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue"
-import type { JobTimelineEntry } from "@travelmind/shared-types"
+import type { ExportArtifact, JobTimelineEntry } from "@travelmind/shared-types"
 import { useRoute } from "vue-router"
 import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
@@ -23,6 +23,7 @@ const enCopy = {
   timelineTitle: "Timeline",
   timelineEmptyTitle: "Timeline waiting for updates",
   timelineEmptyMessage: "The backend will append stage updates here while the export job runs.",
+  artifactsTitle: "Artifacts",
   jobStages: {
     queued: "Queued",
     brief_parsing: "Brief parsing",
@@ -35,7 +36,12 @@ const enCopy = {
   jobTypes: {
     "trip.generate": "Itinerary generation",
     "trip.refine": "Trip refinement",
-    "export.pdf": "PDF export"
+    "export.pdf": "Guide export"
+  } as Record<string, string>,
+  artifactTypes: {
+    md: "Markdown",
+    pdf: "PDF",
+    json: "JSON"
   } as Record<string, string>
 }
 
@@ -46,6 +52,7 @@ const zhCopy = {
   timelineTitle: "时间线",
   timelineEmptyTitle: "时间线等待更新",
   timelineEmptyMessage: "导出任务运行时，后端会把阶段更新追加到这里。",
+  artifactsTitle: "导出产物",
   jobStages: {
     queued: "已排队",
     brief_parsing: "解析需求",
@@ -58,7 +65,12 @@ const zhCopy = {
   jobTypes: {
     "trip.generate": "生成行程",
     "trip.refine": "微调行程",
-    "export.pdf": "导出 PDF"
+    "export.pdf": "攻略导出"
+  } as Record<string, string>,
+  artifactTypes: {
+    md: "Markdown",
+    pdf: "PDF",
+    json: "JSON"
   } as Record<string, string>
 }
 
@@ -67,6 +79,15 @@ const copy = computed(() => (locale.value === "zh-CN" ? zhCopy : enCopy))
 const jobId = computed(() => String(route.params.id ?? ""))
 const jobTimeline = computed<JobTimelineEntry[]>(() => (Array.isArray(job.value?.timeline_json) ? job.value.timeline_json : []))
 const jobProgress = computed(() => clampProgress(job.value?.progress_percent, job.value?.status))
+const resultArtifacts = computed<ExportArtifact[]>(() => extractArtifacts(job.value?.result))
+const resultMetadataEntries = computed(() => {
+  const result = job.value?.result
+  if (!isRecord(result)) {
+    return []
+  }
+
+  return Object.entries(result).filter(([key]) => !["artifacts", "file_name", "file_path", "file_url", "content_type", "size_bytes"].includes(key))
+})
 
 function stopPolling() {
   if (timer !== null) {
@@ -133,6 +154,70 @@ function formatResultValue(value: unknown): string {
   } catch {
     return String(value)
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function normalizeArtifact(value: unknown): ExportArtifact | null {
+  if (!isRecord(value) || typeof value.type !== "string" || typeof value.file_name !== "string" || typeof value.file_url !== "string") {
+    return null
+  }
+
+  return {
+    type: value.type,
+    file_name: value.file_name,
+    file_url: value.file_url,
+    file_path: typeof value.file_path === "string" ? value.file_path : null,
+    content_type: typeof value.content_type === "string" ? value.content_type : null,
+    size_bytes: typeof value.size_bytes === "number" ? value.size_bytes : null
+  }
+}
+
+function extractArtifacts(result: unknown): ExportArtifact[] {
+  if (!isRecord(result)) {
+    return []
+  }
+
+  const directArtifacts = Array.isArray(result.artifacts)
+    ? result.artifacts
+      .map((artifact) => normalizeArtifact(artifact))
+      .filter((artifact): artifact is ExportArtifact => artifact !== null)
+    : []
+
+  if (directArtifacts.length > 0) {
+    return directArtifacts
+  }
+
+  const fallbackArtifact = normalizeArtifact({
+    type: "pdf",
+    file_name: result.file_name,
+    file_url: result.file_url,
+    file_path: result.file_path,
+    content_type: result.content_type,
+    size_bytes: result.size_bytes
+  })
+
+  return fallbackArtifact ? [fallbackArtifact] : []
+}
+
+function formatArtifactType(value: string): string {
+  return copy.value.artifactTypes[value] ?? humanizeToken(value)
+}
+
+function formatBytes(value?: number | null): string {
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0) {
+    return copy.value.notAvailable
+  }
+
+  if (value < 1024) {
+    return `${value} B`
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`
 }
 
 async function load(initial = false) {
@@ -299,19 +384,33 @@ onBeforeUnmount(() => {
 
       <div v-if="job.result" class="panel" style="margin: 0; padding: 18px;">
         <p class="kicker">{{ t('exportView.resultKicker') }}</p>
-        <ul class="result-list">
-          <li v-for="(value, key) in job.result" :key="key">{{ key }}: {{ formatResultValue(value) }}</li>
+        <div v-if="resultArtifacts.length" class="panel-subsection" style="padding-top: 0;">
+          <div class="inline-actions" style="justify-content: space-between; align-items: center;">
+            <h2>{{ copy.artifactsTitle }}</h2>
+            <span class="muted">{{ resultArtifacts.length }}</span>
+          </div>
+          <ul class="result-list">
+            <li v-for="artifact in resultArtifacts" :key="`${artifact.type}-${artifact.file_name}`">
+              {{ formatArtifactType(artifact.type) }}: {{ artifact.file_name }} <span class="muted">· {{ formatBytes(artifact.size_bytes) }}</span>
+            </li>
+          </ul>
+          <div class="inline-actions" style="margin-top: 18px; flex-wrap: wrap;">
+            <a
+              v-for="artifact in resultArtifacts"
+              :key="artifact.file_url"
+              class="button-link primary"
+              :href="artifact.file_url"
+              target="_blank"
+              rel="noreferrer"
+            >
+              {{ t('common.openGeneratedFile') }} · {{ formatArtifactType(artifact.type) }}
+            </a>
+          </div>
+        </div>
+        <ul v-if="resultMetadataEntries.length" class="result-list">
+          <li v-for="[key, value] in resultMetadataEntries" :key="key">{{ key }}: {{ formatResultValue(value) }}</li>
         </ul>
         <div class="inline-actions" style="margin-top: 18px;">
-          <a
-            v-if="typeof job.result.file_url === 'string'"
-            class="button-link primary"
-            :href="job.result.file_url"
-            target="_blank"
-            rel="noreferrer"
-          >
-            {{ t('common.openGeneratedFile') }}
-          </a>
           <RouterLink v-if="job.trip_id" class="button-link" :to="`/trips/${job.trip_id}`">{{ t('common.backToTrip') }}</RouterLink>
         </div>
       </div>

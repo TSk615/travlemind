@@ -1,0 +1,20 @@
+[project]
+name = "travelmind-groksearch-bridge"
+version = "0.1.0"
+description = "TravelMind GrokSearch MCP HTTP bridge"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "uvicorn>=0.34.0,<1.0.0",
+  "pytest>=8.3.5,<9.0.0"
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

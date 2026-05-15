@@ -5,6 +5,7 @@ TravelMind AI is the MVP monorepo for trip planning, itinerary generation, compl
 - `apps/web`: Vue 3 + Vite SPA
 - `apps/api`: FastAPI backend
 - `apps/worker`: ARQ worker
+- `apps/groksearch-bridge`: HTTP MCP bridge for upstream GrokSearch
 - `packages/*`: shared frontend contracts, UI tokens, and config helpers
 - `docs`: architecture and product notes
 - `infra`: Docker, Compose, nginx, and environment templates
@@ -94,6 +95,20 @@ uv sync --project apps/worker
 uv run --project apps/worker python -m travelmind_worker.worker
 ```
 
+### GrokSearch Bridge Local Setup
+
+To prepare a non-Docker local GrokSearch bridge environment:
+
+```powershell
+.\scripts\setup-groksearch-local.ps1 -PrintEnvTemplate
+```
+
+To re-check the current local setup without reinstalling upstream GrokSearch:
+
+```powershell
+.\scripts\setup-groksearch-local.ps1 -CheckOnly
+```
+
 ## Docker and Compose
 
 ### Build individual images
@@ -104,6 +119,7 @@ Run these from `E:\travel`.
 docker build --build-arg VITE_API_BASE_URL=http://localhost:8000 -f apps/web/Dockerfile -t travelmind-web .
 docker build -f apps/api/Dockerfile -t travelmind-api .
 docker build -f apps/worker/Dockerfile -t travelmind-worker .
+docker build -f apps/groksearch-bridge/Dockerfile -t travelmind-groksearch-bridge .
 ```
 
 ### Run the full container stack
@@ -119,6 +135,7 @@ Then open:
 - Web: `http://localhost:3000`
 - API: `http://localhost:8000`
 - API health: `http://localhost:8000/health`
+- GrokSearch bridge: `http://localhost:8085/mcp`
 
 To stop and remove containers:
 
@@ -156,6 +173,11 @@ See [ci.yml](E:/travel/.github/workflows/ci.yml).
 - `TRAVELMIND_QUEUE_MODE=arq` requires Redis and the worker
 - `VITE_API_BASE_URL` is baked into the web image at build time
 - `TRAVELMIND_CORS_ORIGINS` must include the browser origin you use locally
+- `TRAVELMIND_SEARCH_SERVICE_PROVIDER=groksearch` switches backend search defaults to the bundled GrokSearch bridge
+- `TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY` protects the bridge MCP endpoint
+
+For GrokSearch deployment details, see [groksearch-bridge-deploy.md](E:/travel/docs/groksearch-bridge-deploy.md).
+For non-Docker local setup, see [groksearch-local-setup.md](E:/travel/docs/groksearch-local-setup.md).
 
 ## HelloAgents PoC Notice
 

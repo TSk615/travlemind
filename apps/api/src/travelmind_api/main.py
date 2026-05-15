@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -7,15 +7,19 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from travelmind_api.api.router import router
+from travelmind_api.api.routes import mcp as mcp_route
 from travelmind_api.api.schemas.common import Envelope, ErrorPayload
 from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import init_db
+from travelmind_api.core.logging_utils import configure_application_logging, log_job_event
+from travelmind_api.services.image_storage import IMAGE_FILES_ROUTE
 
 
 settings = get_settings()
 
 
 def create_app() -> FastAPI:
+    configure_application_logging(settings)
     app = FastAPI(title=settings.app_name)
     app.add_middleware(
         CORSMiddleware,
@@ -26,10 +30,20 @@ def create_app() -> FastAPI:
     )
 
     app.mount("/exports/files", StaticFiles(directory=settings.resolved_export_root), name="exports-files")
+    app.mount(IMAGE_FILES_ROUTE, StaticFiles(directory=settings.resolved_image_root), name="image-files")
+    app.include_router(mcp_route.router)
     app.include_router(router, prefix=settings.api_prefix)
 
     @app.on_event("startup")
     def on_startup() -> None:
+        configure_application_logging(settings)
+        log_job_event(
+            "api_startup",
+            logger_name="travelmind_api.main",
+            message="TravelMind API startup initialized.",
+            queue_mode=settings.queue_mode,
+            agent_provider=settings.agent_provider,
+        )
         init_db()
 
     @app.get("/health")
@@ -58,6 +72,13 @@ def create_app() -> FastAPI:
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
         del request
+        log_job_event(
+            "api_unhandled_exception",
+            logger_name="travelmind_api.main",
+            level="ERROR",
+            message=str(exc),
+            exception_type=exc.__class__.__name__,
+        )
         envelope = Envelope(
             data=None,
             error=ErrorPayload(code="internal_error", message=str(exc)),

@@ -1,5 +1,6 @@
-﻿import json
+import json
 import time
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -31,12 +32,20 @@ def _login(client: TestClient, *, email: str = "planner@example.com", password: 
 
 
 
+def _future_trip_dates(*, start_offset_days: int = 1, duration_days: int = 2) -> tuple[str, str]:
+    start_date = date.today() + timedelta(days=start_offset_days)
+    end_date = start_date + timedelta(days=duration_days)
+    return start_date.isoformat(), end_date.isoformat()
+
+
 def _create_trip(client: TestClient, **overrides):
+    start_date, end_date = _future_trip_dates()
     payload = {
         "title": "Kyoto calm days",
+        "origin": "Shanghai",
         "destination": "Kyoto",
-        "start_date": "2026-04-14",
-        "end_date": "2026-04-16",
+        "start_date": start_date,
+        "end_date": end_date,
         "budget": 4800,
         "travelers": 2,
         "interests": ["temples", "coffee"],
@@ -91,6 +100,96 @@ def test_auth_register_login_me_and_logout(client: TestClient):
     assert refreshed_user_response.json()["data"]["email"] == "planner@example.com"
 
 
+def test_auth_refresh_issues_new_access_cookie_after_access_token_expires(client: TestClient):
+    register_response = _register(client)
+    user = register_response.json()["data"]
+
+    from travelmind_api.core.config import get_settings
+    from travelmind_api.core.security import create_access_token
+
+    settings = get_settings()
+    original_minutes = settings.access_token_minutes
+    settings.access_token_minutes = -1
+    try:
+        expired_access_token = create_access_token({"sub": user["id"], "email": user["email"]}, settings)
+    finally:
+        settings.access_token_minutes = original_minutes
+
+    client.cookies.set(settings.access_cookie_name, expired_access_token, domain="testserver.local", path="/")
+
+    expired_response = client.get("/api/v1/me")
+    assert expired_response.status_code == 401
+    assert expired_response.json()["error"]["code"] == "invalid_token"
+
+    refresh_response = client.post("/api/v1/auth/refresh")
+    assert refresh_response.status_code == 200, refresh_response.text
+    assert refresh_response.json()["data"] == {"success": True}
+    assert settings.access_cookie_name in refresh_response.headers.get("set-cookie", "")
+
+    recovered_response = client.get("/api/v1/me")
+    assert recovered_response.status_code == 200
+    assert recovered_response.json()["data"]["id"] == user["id"]
+
+
+def test_account_xhs_bind_status_and_unbind(client: TestClient, monkeypatch):
+    _register(client)
+    monkeypatch.setenv("TRAVELMIND_XHS_CRAWLER_ENABLED", "true")
+    monkeypatch.setenv("TRAVELMIND_XHS_CRAWLER_BASE_URL", "https://crawler.example.test")
+
+    import travelmind_api.services.xhs_crawler as crawler_service
+
+    monkeypatch.setattr(
+        crawler_service.XhsCrawlerClient,
+        "start_binding",
+        lambda self, *, user_id: crawler_service.XhsCrawlerBindingState(
+            bind_id="xhb_test",
+            status="pending",
+            verification_url="https://example.test/xhs/bind",
+            verification_code="123456",
+            qr_image_data_url="data:image/png;base64,abcd",
+            expires_at="2026-04-20T10:00:00Z",
+        ),
+    )
+    monkeypatch.setattr(
+        crawler_service.XhsCrawlerClient,
+        "get_binding",
+        lambda self, *, bind_id: crawler_service.XhsCrawlerBindingState(
+            bind_id=bind_id,
+            status="authorized",
+            completed_at="2026-04-20T09:05:00Z",
+            display_name="Traveler A",
+            xhs_user_id="xhs_user_1",
+            session_payload={"cookies": [{"name": "a", "value": "b"}]},
+            session_expires_at="2099-04-30T10:00:00Z",
+        ),
+    )
+    monkeypatch.setattr(crawler_service.XhsCrawlerClient, "delete_session", lambda self, *, user_id: None)
+
+    start_response = client.post("/api/v1/account/xhs/bind")
+    assert start_response.status_code == 200, start_response.text
+    assert start_response.json()["data"]["status"] == "pending"
+    assert start_response.json()["data"]["bind_id"] == "xhb_test"
+
+    status_response = client.get("/api/v1/account/xhs/status")
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["data"]["xhs_bound"] is False
+    assert status_response.json()["data"]["active_binding"]["bind_id"] == "xhb_test"
+
+    poll_response = client.get("/api/v1/account/xhs/bind/xhb_test")
+    assert poll_response.status_code == 200, poll_response.text
+    assert poll_response.json()["data"]["status"] == "authorized"
+
+    bound_status_response = client.get("/api/v1/account/xhs/status")
+    assert bound_status_response.status_code == 200, bound_status_response.text
+    assert bound_status_response.json()["data"]["xhs_bound"] is True
+    assert bound_status_response.json()["data"]["xhs_display_name"] == "Traveler A"
+
+    delete_response = client.delete("/api/v1/account/xhs/bind")
+    assert delete_response.status_code == 200, delete_response.text
+    assert delete_response.json()["data"]["xhs_bound"] is False
+    assert delete_response.json()["data"]["xhs_binding_required"] is True
+
+
 
 def test_trip_create_list_get_and_update(client: TestClient):
     _register(client)
@@ -98,6 +197,7 @@ def test_trip_create_list_get_and_update(client: TestClient):
     create_response = _create_trip(client)
     trip = create_response.json()["data"]
     assert trip["title"] == "Kyoto calm days"
+    assert trip["origin"] == "Shanghai"
     assert trip["destination"] == "Kyoto"
 
     list_response = client.get("/api/v1/trips")
@@ -126,6 +226,34 @@ def test_trip_create_list_get_and_update(client: TestClient):
 
 
 
+def test_trip_create_auto_generates_title_when_missing(client: TestClient):
+    _register(client)
+
+    response = client.post(
+        "/api/v1/trips",
+        json={
+            "title": "",
+            "origin": "Shanghai",
+            "destination": "Kyoto",
+            "start_date": (date.today() + timedelta(days=1)).isoformat(),
+            "end_date": (date.today() + timedelta(days=3)).isoformat(),
+            "budget": 4800,
+            "travelers": 2,
+            "interests": ["temples", "coffee"],
+            "accommodation_preference": "Quiet boutique hotel",
+            "pace": "balanced",
+            "transport_mode": "rail",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    trip = response.json()["data"]
+    assert trip["title"]
+    assert "Kyoto" in trip["title"] or "??" in trip["title"]
+
+
+
+
 def test_trip_create_requires_explicit_generate_step(client: TestClient):
     _register(client)
 
@@ -150,14 +278,17 @@ def test_trip_create_requires_explicit_generate_step(client: TestClient):
 
 def test_trip_create_rejects_invalid_date_range(client: TestClient):
     _register(client)
+    future_start = (date.today() + timedelta(days=5)).isoformat()
+    future_end = (date.today() + timedelta(days=3)).isoformat()
 
     response = client.post(
         "/api/v1/trips",
         json={
             "title": "Broken trip",
+            "origin": "Shanghai",
             "destination": "Kyoto",
-            "start_date": "2026-04-16",
-            "end_date": "2026-04-14",
+            "start_date": future_start,
+            "end_date": future_end,
             "budget": 3000,
             "travelers": 1,
             "interests": [],
@@ -168,6 +299,34 @@ def test_trip_create_rejects_invalid_date_range(client: TestClient):
     )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_trip_dates"
+
+
+def test_trip_create_rejects_start_date_before_today(client: TestClient):
+    _register(client)
+
+    today = date.today()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    tomorrow = (today + timedelta(days=1)).isoformat()
+
+    response = client.post(
+        "/api/v1/trips",
+        json={
+            "title": "Past start date",
+            "origin": "Shanghai",
+            "destination": "Kyoto",
+            "start_date": yesterday,
+            "end_date": tomorrow,
+            "budget": 3000,
+            "travelers": 1,
+            "interests": [],
+            "accommodation_preference": "",
+            "pace": "balanced",
+            "transport_mode": "rail",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_trip_start_date"
 
 
 
@@ -208,6 +367,63 @@ def test_search_endpoint_returns_expected_structure(client: TestClient):
     manual_documents = [document for document in documents if document["platform"] == "manual-link"]
     assert len(manual_documents) == 1
     assert manual_documents[0]["url"] == "https://example.com/custom-guide"
+
+
+
+def test_search_endpoint_passes_user_xhs_toggle_to_search_service(client: TestClient, monkeypatch):
+    _register(client)
+    settings_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "base_url": "https://api.example.com/v1",
+            "model": "gpt-5.4",
+            "wire_api": "responses",
+            "agent_provider": "standard",
+            "xhs_source_enabled": True,
+        },
+    )
+    assert settings_response.status_code == 200, settings_response.text
+
+    import travelmind_api.api.routes.search as search_route
+
+    captured: dict[str, object] = {}
+
+    def fake_search_documents(
+        query,
+        destination,
+        manual_links,
+        *,
+        interests=None,
+        social_context="general",
+        search_service_config=None,
+        xhs_source_enabled=True,
+        xhs_user_id=None,
+    ):
+        captured["query"] = query
+        captured["destination"] = destination
+        captured["manual_links"] = manual_links
+        captured["interests"] = interests
+        captured["social_context"] = social_context
+        captured["search_service_config"] = search_service_config
+        captured["xhs_source_enabled"] = xhs_source_enabled
+        captured["xhs_user_id"] = xhs_user_id
+        return []
+
+    monkeypatch.setattr(search_route, "search_documents", fake_search_documents)
+
+    response = client.post(
+        "/api/v1/search",
+        json={
+            "query": "quiet coffee",
+            "destination": "Kyoto",
+            "manual_links": [],
+            "interests": ["coffee"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert captured["xhs_source_enabled"] is True
+    assert captured["xhs_user_id"]
+
 
 
 
@@ -292,3 +508,103 @@ def test_refine_endpoint_updates_trip_and_trace(client: TestClient):
     assert "Refined day 2" in detail_payload["itinerary"]["summary"]
     assert any(note == "Refine scope: day_plan." for note in detail_payload["latest_agent_trace"]["notes"])
 
+
+def test_image_enrich_endpoint_queues_followup_job(client: TestClient):
+    _register(client)
+    trip = _create_trip(client).json()["data"]
+
+    generate_response = client.post(f"/api/v1/trips/{trip['id']}/generate")
+    assert generate_response.status_code == 200
+    _wait_for_terminal_job(client, generate_response.json()["data"]["job_id"])
+
+    enrich_response = client.post(f"/api/v1/trips/{trip['id']}/images/enrich")
+    assert enrich_response.status_code == 200, enrich_response.text
+    enrich_job = enrich_response.json()["data"]
+    assert enrich_job["type"] == "trip.image_enrich"
+    assert enrich_job["stage"] == "queued"
+    assert enrich_job["progress_percent"] == 0
+    assert enrich_job["timeline_json"][0]["status"] == "queued"
+
+
+
+
+
+
+def test_trip_intake_chat_returns_backend_guidance(client: TestClient, monkeypatch):
+    _register(client)
+
+    import travelmind_api.api.routes.trips as trips_route
+
+    monkeypatch.setattr(
+        trips_route,
+        "run_trip_intake_chat",
+        lambda **kwargs: {
+            "assistant_message": "What is the destination?",
+            "draft": {
+                "title": "",
+                "origin": "Shanghai",
+                "destination": "",
+                "start_date": "",
+                "end_date": "",
+                "budget": 0,
+                "travelers": 0,
+                "interests": [],
+                "accommodation_preference": "",
+                "pace": "",
+                "transport_mode": "",
+            },
+            "missing_required_fields": ["destination", "start_date"],
+            "ready_to_create": False,
+        },
+    )
+
+    response = client.post(
+        "/api/v1/trips/intake/chat",
+        json={
+            "draft": {
+                "title": "",
+                "origin": "Shanghai",
+                "destination": "",
+                "start_date": "",
+                "end_date": "",
+                "budget": 0,
+                "travelers": 0,
+                "interests": [],
+                "accommodation_preference": "",
+                "pace": "",
+                "transport_mode": "",
+            },
+            "messages": [{"role": "assistant", "text": "Where are you departing from?"}],
+            "user_message": "I will depart from Shanghai.",
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["assistant_message"] == "What is the destination?"
+    assert payload["draft"]["origin"] == "Shanghai"
+    assert payload["missing_required_fields"] == ["destination", "start_date"]
+    assert payload["ready_to_create"] is False
+
+def test_trip_delete_removes_trip_and_related_jobs(client: TestClient):
+    _register(client)
+    trip = _create_trip(client).json()["data"]
+
+    generate_response = client.post(f"/api/v1/trips/{trip['id']}/generate")
+    assert generate_response.status_code == 200, generate_response.text
+    job_id = generate_response.json()["data"]["job_id"]
+
+    delete_response = client.delete(f"/api/v1/trips/{trip['id']}")
+    assert delete_response.status_code == 200, delete_response.text
+    assert delete_response.json()["data"] == {"success": True, "trip_id": trip["id"]}
+
+    detail_response = client.get(f"/api/v1/trips/{trip['id']}")
+    assert detail_response.status_code == 404
+    assert detail_response.json()["error"]["code"] == "trip_not_found"
+
+    list_response = client.get("/api/v1/trips")
+    assert list_response.status_code == 200
+    assert list_response.json()["data"] == []
+
+    job_response = client.get(f"/api/v1/jobs/{job_id}")
+    assert job_response.status_code == 404
+    assert job_response.json()["error"]["code"] == "job_not_found"
