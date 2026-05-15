@@ -152,7 +152,7 @@ function createStarterTrip(): TripPreferenceInput {
   const today = new Date()
   const endDate = addDays(today, 4)
   return {
-    title: "京都春日慢游",
+    title: "汕头海边慢游",
     origin: "广州",
     destination: "汕头",
     start_date: formatDateInputValue(today),

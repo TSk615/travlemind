@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
@@ -22,15 +23,22 @@ def _register(client: TestClient):
 
 
 
+def _future_trip_dates(*, start_offset_days: int = 1, duration_days: int = 2) -> tuple[str, str]:
+    start_date = date.today() + timedelta(days=start_offset_days)
+    end_date = start_date + timedelta(days=duration_days)
+    return start_date.isoformat(), end_date.isoformat()
+
+
 def _create_trip(client: TestClient) -> dict:
+    start_date, end_date = _future_trip_dates()
     trip_response = client.post(
         "/api/v1/trips",
         json={
             "title": "Kyoto calm days",
             "origin": "Shanghai",
             "destination": "Kyoto",
-            "start_date": "2026-05-14",
-            "end_date": "2026-05-16",
+            "start_date": start_date,
+            "end_date": end_date,
             "budget": 4800,
             "travelers": 2,
             "interests": ["temples", "coffee"],

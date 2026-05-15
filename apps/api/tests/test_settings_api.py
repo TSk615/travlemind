@@ -2,6 +2,9 @@
 
 
 
+from datetime import date, timedelta
+
+
 def _register(client: TestClient):
     response = client.post(
         "/api/v1/auth/register",
@@ -16,15 +19,22 @@ def _register(client: TestClient):
 
 
 
+def _future_trip_dates(*, start_offset_days: int = 1, duration_days: int = 2) -> tuple[str, str]:
+    start_date = date.today() + timedelta(days=start_offset_days)
+    end_date = start_date + timedelta(days=duration_days)
+    return start_date.isoformat(), end_date.isoformat()
+
+
 def _create_trip(client: TestClient):
+    start_date, end_date = _future_trip_dates()
     response = client.post(
         "/api/v1/trips",
         json={
             "title": "Kyoto calm days",
             "origin": "Shanghai",
             "destination": "Kyoto",
-            "start_date": "2026-05-14",
-            "end_date": "2026-05-16",
+            "start_date": start_date,
+            "end_date": end_date,
             "budget": 4800,
             "travelers": 2,
             "interests": ["temples", "coffee"],
