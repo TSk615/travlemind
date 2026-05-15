@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field, field_validator
 
-from travelmind_api.api.schemas.trips import GeneratedItinerary
+from travelmind_api.api.schemas.trips import AgentRunTrace, GeneratedItinerary
 
 
 def _normalize_share_note(value: str | None) -> str | None:
@@ -26,6 +26,7 @@ class CommunityTripSnapshot(BaseModel):
     pace: str
     transport_mode: str
     itinerary: GeneratedItinerary
+    latest_agent_trace: AgentRunTrace | None = None
 
 
 class CommunityPostSummary(BaseModel):

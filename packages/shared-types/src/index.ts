@@ -222,6 +222,7 @@ export interface Trip extends TripPreferenceInput {
 
 export interface CommunityTripSnapshot extends TripPreferenceInput {
   itinerary: GeneratedItinerary
+  latest_agent_trace?: AgentRunTrace | null
 }
 
 export interface CommunityPostSummary {

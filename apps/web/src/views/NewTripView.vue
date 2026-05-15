@@ -528,3 +528,4 @@ async function submitAndGenerate() {
     </article>
   </section>
 </template>
+ 
