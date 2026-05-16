@@ -1,0 +1,127 @@
+/* ============================================================
+   TravelMind Design Tokens v4
+   Single source of truth for all visual decisions.
+   ============================================================ */
+
+:root {
+  /* === 基础色（日系清新底色 70%）=== */
+  --tm-paper: #F0F0ED;
+  --tm-mist: #E8EAED;
+  --tm-snow: #FAFBFC;
+  --tm-moss: #5D7A63;
+  --tm-tea: #2B2A28;
+  --tm-clay: #C98F6B;
+  --tm-stone: #8A8580;
+
+  /* === AI 虹彩点缀（仅 10% 面积）=== */
+  --tm-aurora-cyan: #7FE4E3;
+  --tm-aurora-lilac: #C6B7FF;
+  --tm-aurora-rose: #F4C2D7;
+
+  /* === 语义色 === */
+  --tm-success: #5D7A63;
+  --tm-warning: #D4A054;
+  --tm-error: #C75B4A;
+  --tm-info: #6B9DAD;
+
+  /* === 语义色透明变体（StatusPill / Banner 背景）=== */
+  --tm-success-bg: rgba(93, 122, 99, 0.08);
+  --tm-success-border: rgba(93, 122, 99, 0.12);
+  --tm-warning-bg: rgba(212, 160, 84, 0.08);
+  --tm-warning-border: rgba(212, 160, 84, 0.12);
+  --tm-error-bg: rgba(199, 91, 74, 0.08);
+  --tm-error-border: rgba(199, 91, 74, 0.12);
+  --tm-info-bg: rgba(107, 157, 173, 0.08);
+  --tm-info-border: rgba(107, 157, 173, 0.12);
+
+  /* === 圆角 === */
+  --tm-radius-sm: 8px;
+  --tm-radius-md: 12px;
+  --tm-radius-lg: 16px;
+  --tm-radius-xl: 24px;
+  --tm-radius-2xl: 32px;
+  --tm-radius-full: 999px;
+
+  /* === 边框 === */
+  --tm-border-hairline: 1px solid rgba(43, 42, 40, 0.04);
+  --tm-border-subtle: 1px solid rgba(43, 42, 40, 0.06);
+  --tm-border-visible: 1px solid rgba(43, 42, 40, 0.16);
+
+  /* === 阴影 — Soft UI Raised（按钮）=== */
+  --tm-shadow-raised-sm: 5px 5px 12px rgba(166, 158, 146, 0.25),
+                         -3px -3px 8px rgba(255, 255, 255, 0.85);
+  --tm-shadow-raised-md: 8px 8px 20px rgba(166, 158, 146, 0.3),
+                         -5px -5px 14px rgba(255, 255, 255, 0.9);
+
+  /* === 阴影 — Soft UI Inset（输入框、进度槽）=== */
+  --tm-shadow-inset-sm: inset 3px 3px 6px rgba(166, 158, 146, 0.2),
+                        inset -2px -2px 4px rgba(255, 255, 255, 0.7);
+  --tm-shadow-inset-md: inset 4px 4px 10px rgba(166, 158, 146, 0.25),
+                        inset -3px -3px 8px rgba(255, 255, 255, 0.8);
+
+  /* === 阴影 — Float（浮层）=== */
+  --tm-shadow-float: 10px 10px 30px rgba(166, 158, 146, 0.22),
+                     -6px -6px 20px rgba(255, 255, 255, 0.85);
+
+  /* === 阴影 — Card（卡片轻投影）=== */
+  --tm-shadow-card: 6px 6px 16px rgba(166, 158, 146, 0.18),
+                    -4px -4px 12px rgba(255, 255, 255, 0.75);
+
+  /* === 字体 === */
+  --tm-font-display: "Noto Serif SC", "Songti SC", "Source Han Serif CN", serif;
+  --tm-font-body: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --tm-font-mono: "JetBrains Mono", "Fira Code", "SF Mono", monospace;
+
+  /* === 字号 === */
+  --tm-text-xs: 0.75rem;
+  --tm-text-sm: 0.875rem;
+  --tm-text-base: 1rem;
+  --tm-text-lg: 1.125rem;
+  --tm-text-xl: 1.5rem;
+  --tm-text-2xl: 2rem;
+  --tm-text-3xl: 2.75rem;
+  --tm-text-4xl: 3.5rem;
+
+  /* === 行高 === */
+  --tm-leading-tight: 1.2;
+  --tm-leading-normal: 1.6;
+  --tm-leading-relaxed: 1.8;
+
+  /* === 间距（4px 基准）=== */
+  --tm-space-1: 4px;
+  --tm-space-2: 8px;
+  --tm-space-3: 12px;
+  --tm-space-4: 16px;
+  --tm-space-6: 24px;
+  --tm-space-8: 32px;
+  --tm-space-10: 40px;
+  --tm-space-12: 48px;
+  --tm-space-16: 64px;
+  --tm-space-20: 80px;
+
+  /* === 动效 === */
+  --tm-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --tm-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --tm-duration-fast: 150ms;
+  --tm-duration-normal: 250ms;
+  --tm-duration-slow: 400ms;
+
+  /* === 布局 === */
+  --tm-content-max-width: 1280px;
+  --tm-topbar-height: 72px;
+
+  /* === 断点（仅作文档参考，实际用 @media）=== */
+  /* --breakpoint-sm: 640px; */
+  /* --breakpoint-md: 768px; */
+  /* --breakpoint-lg: 1024px; */
+  /* --breakpoint-xl: 1280px; */
+}
+
+/* === Reduced motion === */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --tm-duration-fast: 0ms;
+    --tm-duration-normal: 0ms;
+    --tm-duration-slow: 0ms;
+  }
+}

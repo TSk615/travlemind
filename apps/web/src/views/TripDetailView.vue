@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue"
-import { useRouter } from "vue-router"
+import { useRoute, useRouter } from "vue-router"
 import type { AgentRunStep, ItineraryItem, JobTimelineEntry, SearchDocument, TransportBookingSummary, Trip, TripRefineInput } from "@travelmind/shared-types"
 import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
+import TmButton from "@/components/ui/TmButton.vue"
+import TmMetricCard from "@/components/ui/TmMetricCard.vue"
+import TmAuroraPanel from "@/components/ui/TmAuroraPanel.vue"
+import TmProgressTrack from "@/components/ui/TmProgressTrack.vue"
+import TmField from "@/components/ui/TmField.vue"
+import TmTextarea from "@/components/ui/TmTextarea.vue"
+import TmAnchorNav from "@/components/ui/TmAnchorNav.vue"
 import { api, getErrorMessage, type JobRecord } from "@/lib/api"
 import { enrichGeneratedItineraryWithBudget } from "@/lib/budgeting"
 import { generateTripInBrowser, refineTripInBrowser } from "@/lib/browserPlanner"
@@ -33,9 +40,36 @@ const props = withDefaults(
   }
 )
 const router = useRouter()
+const route = useRoute()
 const settingsStore = useLlmSettingsStore()
 const jobGuard = useJobGuardStore()
 void settingsStore.bootstrap()
+
+const isDebug = computed(() => {
+  if (import.meta.env.DEV) {
+    return true
+  }
+  const flag = route.query.debug
+  if (Array.isArray(flag)) {
+    return flag.some((value) => value === "1" || value === "true")
+  }
+  return flag === "1" || flag === "true"
+})
+
+const refineModalOpen = ref(false)
+function openRefineModal() {
+  if (actionLocked.value || !canUseBrowserModel.value) {
+    return
+  }
+  refineError.value = null
+  refineModalOpen.value = true
+}
+function closeRefineModal() {
+  if (refinePending.value) {
+    return
+  }
+  refineModalOpen.value = false
+}
 
 const trip = ref<Trip | null>(null)
 const loading = ref(true)
@@ -324,6 +358,22 @@ const communityPreviewImage = computed(() => {
 })
 const communityPreviewInterestTags = computed(() => (trip.value?.interests ?? []).slice(0, 4))
 const communityPreviewDays = computed(() => trip.value?.itinerary?.days.length ?? 0)
+const anchorSections = computed(() => {
+  const sections = [
+    { id: "overview", label: locale.value === "zh-CN" ? "概览" : "Overview" },
+    { id: "job", label: locale.value === "zh-CN" ? "任务" : "Job" },
+    { id: "brief", label: "Brief" },
+    { id: "itinerary", label: locale.value === "zh-CN" ? "行程" : "Itinerary" }
+  ]
+  if (isDebug.value) {
+    sections.push({ id: "search", label: locale.value === "zh-CN" ? "搜索" : "Search" })
+    if (trip.value?.latest_agent_trace) {
+      sections.push({ id: "agents", label: "Agents" })
+    }
+  }
+  return sections
+})
+
 const shouldLockNavigation = computed(() => {
   if (generatePending.value || refinePending.value) {
     return true
@@ -1694,53 +1744,57 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="page-grid">
+  <div class="tm-detail">
     <StatePanel v-if="loading" kind="loading" :title="t('tripDetail.loadingTitle')" :message="t('tripDetail.loadingMessage')" />
-
     <StatePanel v-else-if="error" kind="error" :title="t('tripDetail.unavailableTitle')" :message="error" :action-label="t('common.retry')" @action="loadTrip(true)" />
 
     <template v-else-if="trip">
-      <article class="panel panel-stack">
-        <div class="inline-actions" style="justify-content: space-between; align-items: flex-start;">
-          <div>
-            <p class="kicker">{{ `${trip.origin} → ${trip.destination}` }}</p>
-            <h1>{{ trip.title }}</h1>
-            <div class="detail-meta">
-              <span>{{ formatDateRange(trip.start_date, trip.end_date) }}</span>
-              <span>{{ t('common.budgetValue', { value: formatCurrency(trip.budget) }) }}</span>
-              <span>{{ t('common.travelersCount', { count: trip.travelers }) }}</span>
-              <span>{{ t('common.paceValue', { value: paceLabel(trip.pace) }) }}</span>
-            </div>
-          </div>
-          <div class="stack-actions">
-            <button class="primary" type="button" :disabled="actionLocked || !canGenerate" @click="generate">
-              {{ generatePending ? t('common.generating') : t('common.generateItinerary') }}
-            </button>
-            <button type="button" :disabled="!hasItinerary || actionLocked" @click="exportPdf">
-              {{ exportPending ? exportActionRunningLabel : exportActionLabel }}
-            </button>
-            <button class="button-danger" type="button" :disabled="actionLocked || deletePending" @click="removeTrip">
-              {{ deletePending ? deletingTripLabel : deleteTripLabel }}
-            </button>
+      <!-- Header -->
+      <header class="tm-detail__header">
+        <div class="tm-detail__header-info">
+          <p class="tm-detail__kicker">{{ `${trip.origin} → ${trip.destination}` }}</p>
+          <h1 class="tm-detail__title">{{ trip.title }}</h1>
+          <div class="tm-detail__meta">
+            <span>{{ formatDateRange(trip.start_date, trip.end_date) }}</span>
+            <span>{{ t('common.budgetValue', { value: formatCurrency(trip.budget) }) }}</span>
+            <span>{{ t('common.travelersCount', { count: trip.travelers }) }}</span>
+            <span>{{ t('common.paceValue', { value: paceLabel(trip.pace) }) }}</span>
           </div>
         </div>
-
-        <div v-if="trip.itinerary" class="panel-subsection">
-          <div>
-            <p class="kicker">{{ copy.overviewKicker }}</p>
-            <h2>{{ trip.itinerary.summary }}</h2>
-          </div>
-          <div class="metric-grid">
-            <article v-for="metric in itineraryMetrics" :key="metric.label" class="metric-card">
-              <p class="kicker">{{ metric.label }}</p>
-              <strong>{{ metric.value }}</strong>
-            </article>
-          </div>
+        <div class="tm-detail__header-actions">
+          <TmButton variant="primary" :disabled="actionLocked || !canGenerate" :loading="generatePending" @click="generate">
+            {{ generatePending ? t('common.generating') : t('common.generateItinerary') }}
+          </TmButton>
+          <TmButton variant="secondary" :disabled="!hasItinerary || actionLocked || !canUseBrowserModel" @click="openRefineModal">
+            {{ copy.quickRefineTitle }}
+          </TmButton>
+          <TmButton variant="secondary" :disabled="!hasItinerary || communityActionLocked" :loading="communityPending" @click="openCommunityEditor(communityPublication ? 'edit' : 'create')">
+            {{ communityPublication ? communityCopy.editAction : communityCopy.publishAction }}
+          </TmButton>
+          <TmButton variant="secondary" :disabled="!hasItinerary || actionLocked" :loading="exportPending" @click="exportPdf">
+            {{ exportPending ? exportActionRunningLabel : exportActionLabel }}
+          </TmButton>
+          <TmButton variant="danger" :disabled="actionLocked || deletePending" :loading="deletePending" @click="removeTrip">
+            {{ deletePending ? deletingTripLabel : deleteTripLabel }}
+          </TmButton>
         </div>
-      </article>
+      </header>
 
+      <!-- Overview metrics -->
+      <section v-if="trip.itinerary" id="overview" class="tm-detail__overview">
+        <p class="tm-detail__section-kicker">{{ copy.overviewKicker }}</p>
+        <h2 class="tm-detail__section-title">{{ trip.itinerary.summary }}</h2>
+        <div class="tm-detail__metrics">
+          <TmMetricCard v-for="metric in itineraryMetrics" :key="metric.label" :label="metric.label" :value="metric.value" />
+        </div>
+      </section>
+
+      <!-- Anchor nav -->
+      <TmAnchorNav :items="anchorSections" />
+
+      <!-- Status notices -->
       <LlmStatusNotice compact />
-      <StatePanel :kind="actualExecutionKind" :title="currentModeTitle" :message="currentModeMessage" compact />
+      <StatePanel v-if="isDebug" :kind="actualExecutionKind" :title="currentModeTitle" :message="currentModeMessage" compact />
       <StatePanel v-if="generateError" kind="error" :title="t('tripDetail.generationFailedTitle')" :message="generateError" compact />
       <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="refineError" compact />
       <StatePanel v-if="exportError" kind="error" :title="t('tripDetail.exportFailedTitle')" :message="exportError" compact />
@@ -1749,335 +1803,262 @@ onBeforeUnmount(() => {
       <StatePanel v-if="communityError" kind="error" :title="communityCopy.title" :message="communityError" compact />
       <StatePanel v-if="communityNotice" kind="info" :title="communityCopy.title" :message="communityNotice" compact />
 
-      <div class="workspace-layout">
-        <div class="workspace-column">
-          <article class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ copy.currentJob }}</p>
-              <h2>{{ activeJob ? formatJobType(activeJob.type) : copy.noActiveJob }}</h2>
-              <p class="muted">{{ activeJob ? activeJob.job_id : noActiveJobMessage }}</p>
+      <!-- Main body: single column -->
+      <div class="tm-detail__body">
+        <div class="tm-detail__main">
+
+          <!-- Job status -->
+          <section id="job" class="tm-detail__section">
+            <TmAuroraPanel :active="isJobRunning" :completed="activeJob?.status === 'completed'">
+              <div class="tm-detail__section-header">
+                <p class="tm-detail__section-kicker">{{ copy.currentJob }}</p>
+                <h2 class="tm-detail__section-title">{{ activeJob ? formatJobType(activeJob.type) : copy.noActiveJob }}</h2>
+                <p class="tm-detail__section-desc">{{ activeJob ? activeJob.job_id : noActiveJobMessage }}</p>
+              </div>
+              <div class="tm-detail__section-actions">
+                <TmButton variant="ghost" size="sm" :disabled="!canRetryImageEnrichment" :loading="imageEnrichPending" @click="retryImageEnrichment">
+                  {{ imageEnrichPending ? copy.enrichImagesActionRunningLabel : copy.enrichImagesActionLabel }}
+                </TmButton>
+              </div>
+
+              <StatePanel v-if="!activeJob" kind="info" :title="copy.noActiveJob" :message="noActiveJobMessage" compact />
+
+              <template v-else>
+                <div class="tm-detail__metrics">
+                  <TmMetricCard :label="copy.stageLabel" :value="formatStage(activeJob.stage)" />
+                  <TmMetricCard :label="copy.progressLabel" :value="formatProgress(activeJob.progress_percent, activeJob.status)" />
+                  <TmMetricCard :label="copy.updatedLabel" :value="formatDateTime(activeJob.updated_at)" />
+                </div>
+
+                <TmProgressTrack :value="jobProgress" :label="copy.progressLabel" :variant="isJobRunning ? 'aurora' : 'default'" />
+
+                <p class="tm-detail__muted">{{ fieldValue(activeJob.stage_message) }}</p>
+                <p v-if="imageJobBackendHint" class="tm-detail__muted">{{ imageJobBackendHint }}</p>
+                <p v-if="imageEnrichmentStatusSummary" class="tm-detail__muted">{{ imageEnrichmentStatusSummary }}</p>
+
+                <!-- Image debug -->
+                <div
+                  v-if="activeJob.type === 'trip.image_enrich' && (imageEnrichmentDebugRows.length || imageQueryNotes.length || imageCandidateDebugNotes.length || imageReviewerDebugNotes.length)"
+                  class="tm-detail__subsection"
+                >
+                  <div class="tm-detail__subsection-header">
+                    <h3>{{ imageDebugTitle }}</h3>
+                    <span class="tm-detail__muted">{{ imageEnrichmentDebugRows.length }}</span>
+                  </div>
+
+                  <div v-if="imageEnrichmentDebugRows.length" class="tm-detail__debug-grid">
+                    <article v-for="row in imageEnrichmentDebugRows" :key="row.item_id" class="tm-detail__debug-card">
+                      <div class="tm-detail__debug-card-header">
+                        <strong>{{ row.name || row.item_id }}</strong>
+                        <StatusPill :status="row.status" />
+                      </div>
+                      <p class="tm-detail__muted">{{ imageDebugSummaryTitle }}: {{ row.priority_tier || copy.notAvailable }}</p>
+                      <p class="tm-detail__muted">{{ locale === 'zh-CN' ? `图片 ${row.image_count ?? 0} 张，来源 ${row.source_count ?? 0} 条。` : `${row.image_count ?? 0} images, ${row.source_count ?? 0} sources.` }}</p>
+                      <p v-if="row.failure_reason" class="tm-detail__muted">{{ row.failure_reason }}</p>
+                    </article>
+                  </div>
+
+                  <div v-if="imageQueryNotes.length" class="tm-detail__subsection">
+                    <p class="tm-detail__kicker">{{ imageDebugQueriesTitle }}</p>
+                    <ul class="tm-detail__list">
+                      <li v-for="note in imageQueryNotes" :key="note">{{ note }}</li>
+                    </ul>
+                  </div>
+                  <div v-if="imageCandidateDebugNotes.length" class="tm-detail__subsection">
+                    <p class="tm-detail__kicker">{{ imageDebugCandidatesTitle }}</p>
+                    <ul class="tm-detail__list">
+                      <li v-for="note in imageCandidateDebugNotes" :key="note">{{ note }}</li>
+                    </ul>
+                  </div>
+                  <div v-if="imageReviewerDebugNotes.length" class="tm-detail__subsection">
+                    <p class="tm-detail__kicker">{{ imageDebugReviewerTitle }}</p>
+                    <ul class="tm-detail__list">
+                      <li v-for="note in imageReviewerDebugNotes" :key="note">{{ note }}</li>
+                    </ul>
+                  </div>
+                  <p v-if="!imageEnrichmentDebugRows.length && !imageQueryNotes.length && !imageCandidateDebugNotes.length && !imageReviewerDebugNotes.length" class="tm-detail__muted">
+                    {{ imageDebugEmptyMessage }}
+                  </p>
+                </div>
+
+                <!-- Timeline -->
+                <div class="tm-detail__subsection">
+                  <div class="tm-detail__subsection-header">
+                    <h3>{{ copy.timelineTitle }}</h3>
+                    <span class="tm-detail__muted">{{ jobTimeline.length }}</span>
+                  </div>
+                  <StatePanel v-if="jobTimeline.length === 0" kind="info" :title="copy.timelineEmptyTitle" :message="copy.timelineEmptyMessage" compact />
+                  <ol v-else class="tm-detail__timeline">
+                    <li v-for="entry in jobTimeline" :key="`${entry.recorded_at}-${entry.status}-${entry.stage ?? 'none'}`" class="tm-detail__timeline-item">
+                      <div class="tm-detail__timeline-meta">
+                        <StatusPill :status="entry.status" />
+                        <span class="tm-detail__muted">{{ formatStage(entry.stage) }}</span>
+                        <span class="tm-detail__muted">{{ formatDateTime(entry.recorded_at) }}</span>
+                      </div>
+                      <p>{{ fieldValue(entry.stage_message) }}</p>
+                    </li>
+                  </ol>
+                </div>
+              </template>
+            </TmAuroraPanel>
+          </section>
+
+          <!-- Planning brief -->
+          <section id="brief" class="tm-detail__section">
+            <div class="tm-detail__section-header">
+              <p class="tm-detail__section-kicker">{{ copy.briefKicker }}</p>
+              <h2 class="tm-detail__section-title">{{ copy.briefTitle }}</h2>
+              <p class="tm-detail__section-desc">{{ copy.briefDescription }}</p>
             </div>
-            <div class="inline-actions">
-              <button
-                type="button"
-                :disabled="!canRetryImageEnrichment"
-                @click="retryImageEnrichment"
-              >
-                {{ imageEnrichPending ? copy.enrichImagesActionRunningLabel : copy.enrichImagesActionLabel }}
-              </button>
-            </div>
-
-            <StatePanel v-if="!activeJob" kind="info" :title="copy.noActiveJob" :message="noActiveJobMessage" compact />
-
-            <template v-else>
-              <div class="metric-grid">
-                <article class="metric-card">
-                  <p class="kicker">{{ copy.stageLabel }}</p>
-                  <strong>{{ formatStage(activeJob.stage) }}</strong>
-                </article>
-                <article class="metric-card">
-                  <p class="kicker">{{ copy.progressLabel }}</p>
-                  <strong>{{ formatProgress(activeJob.progress_percent, activeJob.status) }}</strong>
-                </article>
-                <article class="metric-card">
-                  <p class="kicker">{{ copy.updatedLabel }}</p>
-                  <p>{{ formatDateTime(activeJob.updated_at) }}</p>
-                </article>
-              </div>
-
-              <div class="progress-block">
-                <div class="progress-inline">
-                  <span>{{ copy.progressLabel }}</span>
-                  <strong>{{ formatProgress(activeJob.progress_percent, activeJob.status) }}</strong>
-                </div>
-                <div class="progress-track" aria-hidden="true">
-                  <div class="progress-fill" :style="{ width: `${jobProgress}%` }"></div>
-                </div>
-              </div>
-
-              <p class="muted">{{ fieldValue(activeJob.stage_message) }}</p>
-              <p v-if="imageJobBackendHint" class="muted">{{ imageJobBackendHint }}</p>
-              <p v-if="imageEnrichmentStatusSummary" class="muted">{{ imageEnrichmentStatusSummary }}</p>
-
-              <div
-                v-if="activeJob.type === 'trip.image_enrich' && (imageEnrichmentDebugRows.length || imageQueryNotes.length || imageCandidateDebugNotes.length || imageReviewerDebugNotes.length)"
-                class="panel-subsection"
-              >
-                <div class="inline-actions" style="justify-content: space-between; align-items: center;">
-                  <h3>{{ imageDebugTitle }}</h3>
-                  <span class="muted">{{ imageEnrichmentDebugRows.length }}</span>
-                </div>
-
-                <div v-if="imageEnrichmentDebugRows.length" class="page-grid">
-                  <article v-for="row in imageEnrichmentDebugRows" :key="row.item_id" class="panel-subsection">
-                    <div class="inline-actions" style="justify-content: space-between; align-items: center;">
-                      <strong>{{ row.name || row.item_id }}</strong>
-                      <span class="score-chip">{{ row.status }}</span>
-                    </div>
-                    <p class="muted">{{ imageDebugSummaryTitle }}: {{ row.priority_tier || copy.notAvailable }}</p>
-                    <p class="muted">{{ locale === 'zh-CN' ? `图片 ${row.image_count ?? 0} 张，来源 ${row.source_count ?? 0} 条。` : `${row.image_count ?? 0} images, ${row.source_count ?? 0} sources.` }}</p>
-                    <p v-if="row.failure_reason" class="muted">{{ row.failure_reason }}</p>
-                  </article>
-                </div>
-
-                <div v-if="imageQueryNotes.length" class="panel-subsection">
-                  <p class="kicker">{{ imageDebugQueriesTitle }}</p>
-                  <ul class="summary-list">
-                    <li v-for="note in imageQueryNotes" :key="note">{{ note }}</li>
-                  </ul>
-                </div>
-
-                <div v-if="imageCandidateDebugNotes.length" class="panel-subsection">
-                  <p class="kicker">{{ imageDebugCandidatesTitle }}</p>
-                  <ul class="summary-list">
-                    <li v-for="note in imageCandidateDebugNotes" :key="note">{{ note }}</li>
-                  </ul>
-                </div>
-
-                <div v-if="imageReviewerDebugNotes.length" class="panel-subsection">
-                  <p class="kicker">{{ imageDebugReviewerTitle }}</p>
-                  <ul class="summary-list">
-                    <li v-for="note in imageReviewerDebugNotes" :key="note">{{ note }}</li>
-                  </ul>
-                </div>
-
-                <p v-if="!imageEnrichmentDebugRows.length && !imageQueryNotes.length && !imageCandidateDebugNotes.length && !imageReviewerDebugNotes.length" class="muted">
-                  {{ imageDebugEmptyMessage }}
-                </p>
-              </div>
-
-              <div class="panel-subsection">
-                <div class="inline-actions" style="justify-content: space-between; align-items: center;">
-                  <h3>{{ copy.timelineTitle }}</h3>
-                  <span class="muted">{{ jobTimeline.length }}</span>
-                </div>
-
-                <StatePanel
-                  v-if="jobTimeline.length === 0"
-                  kind="info"
-                  :title="copy.timelineEmptyTitle"
-                  :message="copy.timelineEmptyMessage"
-                  compact
-                />
-
-                <ol v-else class="timeline-list">
-                  <li v-for="entry in jobTimeline" :key="`${entry.recorded_at}-${entry.status}-${entry.stage ?? 'none'}`" class="timeline-item">
-                    <div class="timeline-meta">
-                      <StatusPill :status="entry.status" />
-                      <span class="muted">{{ formatStage(entry.stage) }}</span>
-                      <span class="muted">{{ formatDateTime(entry.recorded_at) }}</span>
-                    </div>
-                    <p>{{ fieldValue(entry.stage_message) }}</p>
-                    <div class="progress-inline">
-                      <span>{{ copy.progressLabel }}</span>
-                      <strong>{{ formatProgress(entry.progress_percent, entry.status) }}</strong>
-                    </div>
-                  </li>
-                </ol>
-              </div>
-            </template>
-          </article>
-
-          <article class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ copy.briefKicker }}</p>
-              <h2>{{ copy.briefTitle }}</h2>
-              <p class="muted">{{ copy.briefDescription }}</p>
-            </div>
-
-            <dl class="data-grid">
-              <div v-for="field in planningBriefFields" :key="field.label" class="data-pair">
+            <dl class="tm-detail__data-grid">
+              <div v-for="field in planningBriefFields" :key="field.label" class="tm-detail__data-pair">
                 <dt>{{ field.label }}</dt>
                 <dd>{{ field.value }}</dd>
               </div>
             </dl>
-
-            <div class="panel-subsection">
-              <p class="kicker">{{ copy.interestsLabel }}</p>
-              <div class="chip-list">
-                <span v-if="tripInterests.length === 0" class="detail-chip detail-chip--soft">{{ copy.noInterests }}</span>
-                <span v-for="interest in tripInterests" :key="interest" class="detail-chip detail-chip--soft">{{ interest }}</span>
+            <div class="tm-detail__subsection">
+              <p class="tm-detail__kicker">{{ copy.interestsLabel }}</p>
+              <div class="tm-detail__chips">
+                <span v-if="tripInterests.length === 0" class="tm-detail__chip">{{ copy.noInterests }}</span>
+                <span v-for="interest in tripInterests" :key="interest" class="tm-detail__chip">{{ interest }}</span>
               </div>
             </div>
-          </article>
+          </section>
 
-          <article v-if="budgetSummary" class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ budgetPanelTitle }}</p>
-              <h2>{{ budgetPanelTitle }}</h2>
-              <p class="muted">{{ budgetPanelDescription }}</p>
+          <!-- Budget -->
+          <section v-if="budgetSummary" id="budget" class="tm-detail__section">
+            <div class="tm-detail__section-header">
+              <p class="tm-detail__section-kicker">{{ budgetPanelTitle }}</p>
+              <h2 class="tm-detail__section-title">{{ budgetPanelTitle }}</h2>
+              <p class="tm-detail__section-desc">{{ budgetPanelDescription }}</p>
             </div>
-
-            <div class="metric-grid">
-              <article v-for="metric in budgetMetrics" :key="metric.label" class="metric-card">
-                <p class="kicker">{{ metric.label }}</p>
-                <strong>{{ metric.value }}</strong>
-              </article>
+            <div class="tm-detail__metrics">
+              <TmMetricCard v-for="metric in budgetMetrics" :key="metric.label" :label="metric.label" :value="metric.value" />
             </div>
-
-            <div class="metric-grid">
-              <article v-for="category in budgetBreakdownCards" :key="category.key" class="metric-card">
-                <p class="kicker">{{ category.label }}</p>
-                <strong>{{ category.value }}</strong>
-              </article>
+            <div class="tm-detail__metrics">
+              <TmMetricCard v-for="category in budgetBreakdownCards" :key="category.key" :label="category.label" :value="category.value" />
             </div>
-
-            <div class="panel-subsection">
+            <div class="tm-detail__subsection">
               <h3>{{ budgetLineItemsTitle }}</h3>
-              <ul class="detail-list">
+              <ul class="tm-detail__list">
                 <li v-for="item in budgetLineItems" :key="item.key">
-                  {{ formatBudgetLineItemTitle(item.title, item.note) }} 路 {{ formatCurrency(item.amount) }}
+                  {{ formatBudgetLineItemTitle(item.title, item.note) }} · {{ formatCurrency(item.amount) }}
                 </li>
               </ul>
             </div>
-          </article>
+          </section>
 
-          <article v-if="transportBookingSummary || reservationEntries.length" class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ bookingPanelTitle }}</p>
-              <h2>{{ bookingPanelTitle }}</h2>
-              <p class="muted">{{ bookingPanelDescription }}</p>
+          <!-- Transport & Booking -->
+          <section v-if="transportBookingSummary || reservationEntries.length" id="booking" class="tm-detail__section">
+            <div class="tm-detail__section-header">
+              <p class="tm-detail__section-kicker">{{ bookingPanelTitle }}</p>
+              <h2 class="tm-detail__section-title">{{ bookingPanelTitle }}</h2>
+              <p class="tm-detail__section-desc">{{ bookingPanelDescription }}</p>
             </div>
-
-            <div v-if="transportBookingSummary" class="panel-subsection">
+            <div v-if="transportBookingSummary" class="tm-detail__subsection">
               <h3>{{ transportBookingTitle }}</h3>
-              <dl class="data-grid">
-                <div v-for="field in transportBookingFields" :key="field.label" class="data-pair">
+              <dl class="tm-detail__data-grid">
+                <div v-for="field in transportBookingFields" :key="field.label" class="tm-detail__data-pair">
                   <dt>{{ field.label }}</dt>
                   <dd>{{ field.value }}</dd>
                 </div>
               </dl>
-              <div v-if="transportBookingHighlights.length" class="chip-list">
-                <span
-                  v-for="note in transportBookingHighlights"
-                  :key="note"
-                  class="detail-chip detail-chip--soft"
-                >
-                  {{ note }}
-                </span>
+              <div v-if="transportBookingHighlights.length" class="tm-detail__chips">
+                <span v-for="note in transportBookingHighlights" :key="note" class="tm-detail__chip">{{ note }}</span>
               </div>
-              <a
-                v-if="transportBookingSummary.official_booking_url"
-                class="button-link"
-                :href="transportBookingSummary.official_booking_url"
-                target="_blank"
-                rel="noreferrer"
-              >
-                {{ copy.sourceOpen }}
-              </a>
+              <a v-if="transportBookingSummary.official_booking_url" class="tm-detail__link" :href="transportBookingSummary.official_booking_url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
             </div>
-
-            <div v-if="reservationEntries.length" class="panel-subsection">
+            <div v-if="reservationEntries.length" class="tm-detail__subsection">
               <h3>{{ reservationChecklistTitle }}</h3>
-              <ul class="detail-list">
+              <ul class="tm-detail__list">
                 <li v-for="entry in reservationEntries" :key="entry.key">
                   <strong>{{ entry.title }}</strong>
-                  <ul class="summary-list">
+                  <ul class="tm-detail__list--nested">
                     <li v-for="line in entry.lines" :key="`${entry.key}-${line}`">{{ line }}</li>
                   </ul>
-                  <a v-if="entry.officialUrl" class="button-link" :href="entry.officialUrl" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+                  <a v-if="entry.officialUrl" class="tm-detail__link" :href="entry.officialUrl" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
                 </li>
               </ul>
             </div>
-          </article>
+          </section>
 
-
-          <article class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ t('tripDetail.itineraryKicker') }}</p>
-              <h2>{{ copy.itineraryPanelTitle }}</h2>
-              <p class="muted">{{ copy.itineraryPanelDescription }}</p>
+          <!-- Itinerary -->
+          <section id="itinerary" class="tm-detail__section">
+            <div class="tm-detail__section-header">
+              <p class="tm-detail__section-kicker">{{ t('tripDetail.itineraryKicker') }}</p>
+              <h2 class="tm-detail__section-title">{{ copy.itineraryPanelTitle }}</h2>
+              <p class="tm-detail__section-desc">{{ copy.itineraryPanelDescription }}</p>
             </div>
 
-            <ul v-if="trip.itinerary?.risks?.length" class="risk-list">
+            <ul v-if="trip.itinerary?.risks?.length" class="tm-detail__risk-list">
               <li v-for="risk in trip.itinerary.risks" :key="risk">{{ risk }}</li>
             </ul>
 
-            <section v-if="citedXhsVisualDocs.length" class="day-weather itinerary-visuals">
-              <div class="day-weather__header">
-                <span class="item-badge">{{ locale === "zh-CN" ? "参考风景图" : "Referenced visuals" }}</span>
-              </div>
-              <div class="visual-doc-grid">
-                <article v-for="doc in citedXhsVisualDocs" :key="doc.id" class="visual-doc-card">
-                  <div class="visual-doc-card__header">
+            <!-- Referenced visuals -->
+            <section v-if="citedXhsVisualDocs.length" class="tm-detail__visuals">
+              <span class="tm-detail__badge">{{ locale === "zh-CN" ? "参考风景图" : "Referenced visuals" }}</span>
+              <div class="tm-detail__visual-grid">
+                <article v-for="doc in citedXhsVisualDocs" :key="doc.id" class="tm-detail__visual-card">
+                  <div class="tm-detail__visual-card-header">
                     <strong>{{ doc.place_name || doc.title }}</strong>
-                    <a class="button-link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+                    <a class="tm-detail__link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
                   </div>
-                  <p v-if="doc.author || doc.published_at" class="muted">
+                  <p v-if="doc.author || doc.published_at" class="tm-detail__muted">
                     {{ [doc.author, doc.published_at ? formatDateTime(doc.published_at) : null].filter(Boolean).join(" · ") }}
                   </p>
-                  <div class="visual-doc-images">
+                  <div class="tm-detail__visual-images">
                     <img v-for="imageUrl in (doc.image_urls ?? []).slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="doc.title" loading="lazy" />
                   </div>
                 </article>
               </div>
             </section>
 
-            <div v-if="trip.itinerary" class="page-grid">
-              <article v-for="day in trip.itinerary.days" :key="day.day_index" class="day-card itinerary-day-card">
-                <div class="day-card__header">
+            <!-- Day cards -->
+            <div v-if="trip.itinerary" class="tm-detail__days">
+              <article v-for="day in trip.itinerary.days" :key="day.day_index" class="tm-detail__day-card">
+                <div class="tm-detail__day-header">
                   <div>
-                    <p class="kicker">{{ t('common.daysLabel', { day: day.day_index, title: day.title }) }}</p>
-                    <h3>{{ day.title }}</h3>
+                    <p class="tm-detail__kicker">{{ t('common.daysLabel', { day: day.day_index, title: day.title }) }}</p>
+                    <h3 class="tm-detail__day-title">{{ day.title }}</h3>
                   </div>
-                  <strong class="day-card__cost">{{ formatCurrency(day.total_cost) }}</strong>
+                  <strong class="tm-detail__day-cost">{{ formatCurrency(day.total_cost) }}</strong>
                 </div>
+                <p class="tm-detail__day-summary">{{ day.summary }}</p>
 
-                <p>{{ day.summary }}</p>
-
-                <section v-if="day.weather" class="day-weather">
-                  <div class="day-weather__header">
-                    <span class="item-badge">{{ locale === "zh-CN" ? "天气" : "Weather" }}</span>
-                  </div>
-                  <p class="day-weather__summary">{{ day.weather.summary }}</p>
-                  <ul v-if="day.weather.notes.length" class="summary-list day-weather__notes">
+                <section v-if="day.weather" class="tm-detail__weather">
+                  <span class="tm-detail__badge">{{ locale === "zh-CN" ? "天气" : "Weather" }}</span>
+                  <p>{{ day.weather.summary }}</p>
+                  <ul v-if="day.weather.notes.length" class="tm-detail__list--nested">
                     <li v-for="note in day.weather.notes" :key="note">{{ note }}</li>
                   </ul>
                 </section>
 
-                <ol class="itinerary-items">
-                  <li v-for="item in day.items" :key="item.id" class="itinerary-item">
-                    <div class="item-time">{{ item.start_time }} - {{ item.end_time }}</div>
-                    <div class="item-main">
-                      <div class="item-topline">
+                <ol class="tm-detail__items">
+                  <li v-for="item in day.items" :key="item.id" class="tm-detail__item">
+                    <div class="tm-detail__item-time">{{ item.start_time }} - {{ item.end_time }}</div>
+                    <div class="tm-detail__item-body">
+                      <div class="tm-detail__item-topline">
                         <strong>{{ item.name }}</strong>
-                        <div class="item-badges">
-                          <span class="item-badge">{{ formatItemType(item.type) }}</span>
-                          <span v-if="formatImagePriorityTier(item.image_priority_tier)" class="item-badge">{{ formatImagePriorityTier(item.image_priority_tier) }}</span>
-                          <span class="score-chip">{{ formatScore(item.score) }}</span>
+                        <div class="tm-detail__item-badges">
+                          <span class="tm-detail__badge">{{ formatItemType(item.type) }}</span>
+                          <span v-if="formatImagePriorityTier(item.image_priority_tier)" class="tm-detail__badge">{{ formatImagePriorityTier(item.image_priority_tier) }}</span>
+                          <StatusPill :status="formatScore(item.score)" />
                         </div>
                       </div>
-                      <p class="muted">{{ copy.locationLabel }} 路 {{ item.location }}</p>
-                      <p class="item-note">{{ item.note }}</p>
-                      <ul v-if="itemBookingLines(item).length" class="summary-list">
+                      <p class="tm-detail__muted">{{ copy.locationLabel }} · {{ item.location }}</p>
+                      <p class="tm-detail__item-note">{{ item.note }}</p>
+                      <ul v-if="itemBookingLines(item).length" class="tm-detail__list--nested">
                         <li v-for="line in itemBookingLines(item)" :key="`${item.id}-${line}`">{{ line }}</li>
                       </ul>
-                      <a
-                        v-if="item.booking_info?.official_booking_url"
-                        class="button-link"
-                        :href="item.booking_info.official_booking_url"
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {{ copy.sourceOpen }}
-                      </a>
-                      <p v-if="item.image_priority_reason" class="muted">{{ item.image_priority_reason }}</p>
-                      <p v-if="formatImageStatus(item.image_status)" class="muted">{{ formatImageStatus(item.image_status) }}</p>
-                      <p v-if="item.image_status === 'failed' && item.image_failure_reason" class="muted">{{ item.image_failure_reason }}</p>
-                      <div v-if="item.image_urls?.length" class="visual-doc-images itinerary-item-images">
+                      <a v-if="item.booking_info?.official_booking_url" class="tm-detail__link" :href="item.booking_info.official_booking_url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+                      <p v-if="item.image_priority_reason" class="tm-detail__muted">{{ item.image_priority_reason }}</p>
+                      <p v-if="formatImageStatus(item.image_status)" class="tm-detail__muted">{{ formatImageStatus(item.image_status) }}</p>
+                      <p v-if="item.image_status === 'failed' && item.image_failure_reason" class="tm-detail__muted">{{ item.image_failure_reason }}</p>
+                      <div v-if="item.image_urls?.length" class="tm-detail__visual-images">
                         <img v-for="imageUrl in item.image_urls.slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="item.name" loading="lazy" />
                       </div>
-                      <div v-if="item.image_source_urls?.length" class="chip-list">
-                        <a
-                          v-for="sourceUrl in item.image_source_urls.slice(0, 3)"
-                          :key="`${item.id}-${sourceUrl}`"
-                          class="button-link"
-                          :href="sourceUrl"
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {{ copy.imageSourcesLabel ?? "Source" }}
-                        </a>
+                      <div v-if="item.image_source_urls?.length" class="tm-detail__chips">
+                        <a v-for="sourceUrl in item.image_source_urls.slice(0, 3)" :key="`${item.id}-${sourceUrl}`" class="tm-detail__link" :href="sourceUrl" target="_blank" rel="noreferrer">{{ copy.imageSourcesLabel ?? "Source" }}</a>
                       </div>
                     </div>
                   </li>
@@ -2085,346 +2066,413 @@ onBeforeUnmount(() => {
               </article>
             </div>
 
-            <StatePanel
-              v-else
-              kind="empty"
-              :title="t('tripDetail.itineraryEmptyTitle')"
-              :message="t('tripDetail.itineraryEmptyMessage')"
-              compact
-            >
+            <StatePanel v-else kind="empty" :title="t('tripDetail.itineraryEmptyTitle')" :message="t('tripDetail.itineraryEmptyMessage')" compact>
               <template #actions>
-                <button class="primary" type="button" :disabled="actionLocked || !canGenerate" @click="generate">{{ t('common.generateItinerary') }}</button>
+                <TmButton variant="primary" :disabled="actionLocked || !canGenerate" @click="generate">{{ t('common.generateItinerary') }}</TmButton>
               </template>
             </StatePanel>
-          </article>
-        </div>
+          </section>
 
-        <div class="workspace-column">
-          <article class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ communityCopy.kicker }}</p>
-              <h2>{{ communityCopy.title }}</h2>
-              <p class="muted">{{ communityCopy.description }}</p>
-            </div>
-
-            <div v-if="trip.itinerary" class="panel-subsection">
-              <img v-if="communityPreviewImage" class="community-cover" :src="communityPreviewImage" :alt="trip.title" />
-              <div>
-                <h3>{{ trip.title }}</h3>
-                <p class="muted">{{ trip.itinerary.summary }}</p>
+          <!-- Debug-only panels: search grounding, grounding references, agent pipeline -->
+          <template v-if="isDebug">
+            <!-- Search grounding -->
+            <section id="search" class="tm-detail__section">
+              <div class="tm-detail__section-header">
+                <p class="tm-detail__section-kicker">{{ copy.searchPanelTitle }}</p>
+                <h2 class="tm-detail__section-title">{{ copy.searchPanelTitle }}</h2>
+                <p class="tm-detail__section-desc">{{ copy.searchPanelMessage }}</p>
               </div>
-              <div class="chip-list">
-                <span class="subtle-chip">{{ communityCopy.previewDays }}: {{ communityPreviewDays }}</span>
-                <span class="subtle-chip">{{ communityCopy.previewBudget }}: {{ formatCurrency(trip.budget) }}</span>
-                <span v-for="interest in communityPreviewInterestTags" :key="interest" class="detail-chip detail-chip--soft">{{ interest }}</span>
+              <TmField id="query" :model-value="searchQuery" :label="copy.queryLabel" @update:model-value="(v: string | number) => searchQuery = String(v)" />
+              <TmTextarea id="links" :model-value="manualLinks" :label="copy.linksLabel" :rows="2" @update:model-value="(v: string) => manualLinks = v" />
+              <div class="tm-detail__section-actions">
+                <TmButton variant="primary" :disabled="searchPending" :loading="searchPending" @click="runSearch">
+                  {{ searchPending ? copy.searching : copy.runSearch }}
+                </TmButton>
               </div>
-            </div>
 
-            <div :class="['panel-banner', { 'panel-banner--warn': communityPublication?.is_stale }]">
-              <strong>
-                {{
-                  communityPublication
-                    ? communityPublication.is_stale
-                      ? communityCopy.staleTitle
-                      : communityCopy.publishedTitle
-                    : communityCopy.unpublishedTitle
-                }}
-              </strong>
-              <p class="muted">
-                {{
-                  communityPublication
-                    ? communityPublication.is_stale
-                      ? communityCopy.staleMessage
-                      : communityCopy.publishedMessage
-                    : hasItinerary
-                      ? communityCopy.unpublishedMessage
-                      : communityCopy.needsItineraryMessage
-                }}
-              </p>
-            </div>
+              <StatePanel v-if="searchError" kind="error" :title="t('tripDetail.searchFailedTitle')" :message="searchError" compact />
+              <StatePanel v-else-if="hasSearched && searchResults.length === 0" kind="empty" :title="copy.searchEmptyTitle" :message="copy.searchEmptyMessage" compact />
 
-            <div class="inline-actions">
-              <button
-                v-if="!communityPublication"
-                class="primary"
-                type="button"
-                :disabled="!hasItinerary || communityActionLocked"
-                @click="openCommunityEditor('create')"
-              >
-                {{ communityPending ? communityCopy.publishingAction : communityCopy.publishAction }}
-              </button>
-              <template v-else>
-                <RouterLink class="button-link primary" :to="`/community/${communityPublication.post_id}`">{{ communityCopy.viewAction }}</RouterLink>
-                <button type="button" :disabled="communityActionLocked" @click="refreshCommunityPost">
-                  {{ communityPending ? communityCopy.refreshingAction : communityCopy.refreshAction }}
-                </button>
-                <button type="button" :disabled="communityActionLocked" @click="openCommunityEditor('edit')">{{ communityCopy.editAction }}</button>
-                <button class="button-danger" type="button" :disabled="communityActionLocked" @click="removeCommunityPost">
-                  {{ communityPending ? communityCopy.removingAction : communityCopy.removeAction }}
-                </button>
-              </template>
-            </div>
-          </article>
-
-          <article class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ copy.quickRefineTitle }}</p>
-              <h2>{{ copy.quickRefineTitle }}</h2>
-              <p class="muted">{{ copy.quickRefineSubtitle }}</p>
-            </div>
-
-            <div class="quick-actions-grid">
-              <button v-for="action in quickRefineActions" :key="action.label" type="button" :disabled="actionLocked || !canUseBrowserModel" @click="runPresetRefine(action)">
-                {{ action.label }}
-              </button>
-            </div>
-
-            <div class="field">
-              <label for="custom-refine">{{ copy.customRefineLabel }}</label>
-              <textarea id="custom-refine" v-model="customRefineInstruction" :placeholder="copy.customRefinePlaceholder"></textarea>
-            </div>
-
-            <div class="inline-actions">
-              <button class="primary" type="button" :disabled="actionLocked || !canUseBrowserModel" @click="submitCustomRefine">
-                {{ refinePending ? copy.refining : copy.customRefineSubmit }}
-              </button>
-            </div>
-          </article>
-
-          <article class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ copy.searchPanelTitle }}</p>
-              <h2>{{ copy.searchPanelTitle }}</h2>
-              <p class="muted">{{ copy.searchPanelMessage }}</p>
-            </div>
-
-            <div class="field">
-              <label for="query">{{ copy.queryLabel }}</label>
-              <input id="query" v-model="searchQuery" />
-            </div>
-
-            <div class="field">
-              <label for="links">{{ copy.linksLabel }}</label>
-              <textarea id="links" v-model="manualLinks"></textarea>
-            </div>
-
-            <div class="inline-actions">
-              <button class="primary" type="button" :disabled="searchPending" @click="runSearch">
-                {{ searchPending ? copy.searching : copy.runSearch }}
-              </button>
-            </div>
-
-            <StatePanel v-if="searchError" kind="error" :title="t('tripDetail.searchFailedTitle')" :message="searchError" compact />
-            <StatePanel v-else-if="hasSearched && searchResults.length === 0" kind="empty" :title="copy.searchEmptyTitle" :message="copy.searchEmptyMessage" compact />
-
-            <div v-if="searchResults.length" class="page-grid">
-              <article v-for="doc in searchResults" :key="doc.id" class="search-card panel-stack">
-                <div class="search-card__header">
-                  <div>
-                    <p class="kicker">{{ fieldValue(doc.source_type) }}</p>
-                    <h3>{{ doc.place_name || doc.title }}</h3>
+              <div v-if="searchResults.length" class="tm-detail__search-results">
+                <article v-for="doc in searchResults" :key="doc.id" class="tm-detail__search-card">
+                  <div class="tm-detail__search-card-header">
+                    <div>
+                      <p class="tm-detail__kicker">{{ fieldValue(doc.source_type) }}</p>
+                      <h3>{{ doc.place_name || doc.title }}</h3>
+                    </div>
+                    <StatusPill :status="t('common.finalScore', { value: doc.scores.final_score })" />
                   </div>
-                  <span class="score-chip">{{ t('common.finalScore', { value: doc.scores.final_score }) }}</span>
-                </div>
-
-                <p>{{ doc.summary }}</p>
-
-                <div class="panel-subsection">
-                  <p class="kicker">{{ copy.structuredFieldsTitle }}</p>
-                  <dl class="data-grid">
-                    <div class="data-pair">
-                      <dt>{{ copy.placeNameLabel }}</dt>
-                      <dd>{{ fieldValue(doc.place_name || doc.title) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ copy.categoryLabel }}</dt>
-                      <dd>{{ fieldValue(doc.category) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ copy.openingHoursLabel }}</dt>
-                      <dd>{{ fieldValue(doc.opening_hours) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ copy.priceHintLabel }}</dt>
-                      <dd>{{ fieldValue(doc.price_hint) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ copy.addressLabel }}</dt>
-                      <dd>{{ fieldValue(doc.address) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ copy.geoLabel }}</dt>
-                      <dd>{{ formatGeo(doc) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ copy.sourceTypeLabel }}</dt>
-                      <dd>{{ fieldValue(doc.source_type) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ copy.platformLabel }}</dt>
-                      <dd>{{ fieldValue(doc.platform) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ locale === "zh-CN" ? "作者" : "Author" }}</dt>
-                      <dd>{{ fieldValue(doc.author) }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ locale === "zh-CN" ? "发布时间" : "Published" }}</dt>
-                      <dd>{{ doc.published_at ? formatDateTime(doc.published_at) : copy.notAvailable }}</dd>
-                    </div>
-                    <div class="data-pair">
-                      <dt>{{ locale === "zh-CN" ? "互动数据" : "Engagement" }}</dt>
-                      <dd>{{ fieldValue(doc.engagement_hint) }}</dd>
-                    </div>
+                  <p class="tm-detail__muted">{{ doc.summary }}</p>
+                  <dl class="tm-detail__data-grid">
+                    <div class="tm-detail__data-pair"><dt>{{ copy.placeNameLabel }}</dt><dd>{{ fieldValue(doc.place_name || doc.title) }}</dd></div>
+                    <div class="tm-detail__data-pair"><dt>{{ copy.categoryLabel }}</dt><dd>{{ fieldValue(doc.category) }}</dd></div>
+                    <div class="tm-detail__data-pair"><dt>{{ copy.openingHoursLabel }}</dt><dd>{{ fieldValue(doc.opening_hours) }}</dd></div>
+                    <div class="tm-detail__data-pair"><dt>{{ copy.priceHintLabel }}</dt><dd>{{ fieldValue(doc.price_hint) }}</dd></div>
+                    <div class="tm-detail__data-pair"><dt>{{ copy.addressLabel }}</dt><dd>{{ fieldValue(doc.address) }}</dd></div>
+                    <div class="tm-detail__data-pair"><dt>{{ copy.geoLabel }}</dt><dd>{{ formatGeo(doc) }}</dd></div>
+                    <div class="tm-detail__data-pair"><dt>{{ copy.platformLabel }}</dt><dd>{{ fieldValue(doc.platform) }}</dd></div>
                   </dl>
-                </div>
-
-                <div v-if="doc.source_tags?.length" class="chip-list">
-                  <span v-for="tag in doc.source_tags" :key="tag" class="detail-chip detail-chip--soft">{{ tag }}</span>
-                </div>
-
-                <ul class="summary-list" v-if="doc.scores.reasons.length">
-                  <li v-for="reason in doc.scores.reasons" :key="reason">{{ reason }}</li>
-                </ul>
-
-                <a class="button-link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
-              </article>
-            </div>
-          </article>
-
-          <article v-if="groundingReferenceDocs.length" class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ locale === "zh-CN" ? "参考来源" : "Grounding references" }}</p>
-              <h2>{{ locale === "zh-CN" ? "本次规划使用的参考来源" : "Grounding sources used" }}</h2>
-              <p class="muted">{{ locale === "zh-CN" ? "以下是本次规划实际带入模型上下文的参考来源。" : "These are the grounding sources actually carried into this planning run." }}</p>
-            </div>
-
-            <div class="reference-doc-grid">
-              <article v-for="doc in groundingReferenceDocs" :key="doc.id" class="reference-doc-card panel-subsection">
-                <div class="visual-doc-card__header">
-                  <div>
-                    <p class="kicker">{{ fieldValue(doc.platform) }}</p>
-                    <h3>{{ doc.place_name || doc.title }}</h3>
+                  <div v-if="doc.source_tags?.length" class="tm-detail__chips">
+                    <span v-for="tag in doc.source_tags" :key="tag" class="tm-detail__chip">{{ tag }}</span>
                   </div>
-                  <a class="button-link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
-                </div>
-                <p>{{ doc.summary }}</p>
-                <p v-if="doc.author || doc.published_at" class="muted">
-                  {{ [doc.author, doc.published_at ? formatDateTime(doc.published_at) : null].filter(Boolean).join(" · ") }}
-                </p>
-                <div v-if="doc.source_tags?.length" class="chip-list">
-                  <span v-for="tag in doc.source_tags" :key="tag" class="detail-chip detail-chip--soft">{{ tag }}</span>
-                </div>
-                <div v-if="doc.image_urls?.length" class="visual-doc-images">
-                  <img v-for="imageUrl in doc.image_urls.slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="doc.title" loading="lazy" />
-                </div>
-              </article>
-            </div>
-          </article>
+                  <a class="tm-detail__link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+                </article>
+              </div>
+            </section>
 
-          <article v-if="trip.latest_agent_trace" class="panel panel-stack">
-            <div>
-              <p class="kicker">{{ latestSuccessfulExecutionKicker }}</p>
-              <h2>{{ formatTraceProvider(trip.latest_agent_trace.provider) }}</h2>
-              <p class="muted">{{ latestSuccessfulExecutionDescription }}</p>
-            </div>
-
-            <div class="metric-grid">
-              <article v-for="metric in executionMetrics" :key="metric.label" class="metric-card">
-                <p class="kicker">{{ metric.label }}</p>
-                <strong>{{ metric.value }}</strong>
-              </article>
-            </div>
-
-            <div v-if="agentRuns.length" class="agent-run-grid">
-              <article v-for="agent in agentRuns" :key="agent.key" class="agent-run-card panel-subsection">
-                <div class="agent-run-card__header">
-                  <div>
-                    <p class="kicker">{{ agent.title }}</p>
-                    <h3>{{ agent.description }}</h3>
+            <!-- Grounding references -->
+            <section v-if="groundingReferenceDocs.length" id="grounding" class="tm-detail__section">
+              <div class="tm-detail__section-header">
+                <p class="tm-detail__section-kicker">{{ locale === "zh-CN" ? "参考来源" : "Grounding references" }}</p>
+                <h2 class="tm-detail__section-title">{{ locale === "zh-CN" ? "本次规划使用的参考来源" : "Grounding sources used" }}</h2>
+                <p class="tm-detail__section-desc">{{ locale === "zh-CN" ? "以下是本次规划实际带入模型上下文的参考来源。" : "These are the grounding sources actually carried into this planning run." }}</p>
+              </div>
+              <div class="tm-detail__reference-grid">
+                <article v-for="doc in groundingReferenceDocs" :key="doc.id" class="tm-detail__reference-card">
+                  <div class="tm-detail__reference-card-header">
+                    <div>
+                      <p class="tm-detail__kicker">{{ fieldValue(doc.platform) }}</p>
+                      <h3>{{ doc.place_name || doc.title }}</h3>
+                    </div>
+                    <a class="tm-detail__link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
                   </div>
-                  <span class="score-chip">{{ formatAgentRunStatus(agent.status) }}</span>
-                </div>
-                <p v-if="agent.prompt_focus" class="muted"><strong>{{ copy.agentPromptLabel }}:</strong> {{ agent.prompt_focus }}</p>
-                <p v-if="agent.output_summary" class="muted"><strong>{{ copy.agentOutputLabel }}:</strong> {{ agent.output_summary }}</p>
-                <p v-if="agent.model" class="muted"><strong>{{ copy.agentModelLabel }}:</strong> {{ agent.model }}</p>
-                <p v-if="agent.prompt_version" class="muted"><strong>{{ copy.agentPromptVersionLabel }}:</strong> {{ agent.prompt_version }}</p>
-                <p v-if="agentEndpoint(agent)" class="muted"><strong>{{ "Endpoint" }}:</strong> {{ agentEndpoint(agent) }}</p>
-                <p v-if="agentWireApi(agent)" class="muted"><strong>{{ "Wire API" }}:</strong> {{ agentWireApi(agent) }}</p>
-                <div v-if="agentDisplayCitations(agent).length" class="panel-subsection">
-                  <p class="kicker">{{ copy.agentCitationsLabel }}</p>
-                  <ul class="summary-list">
-                    <li v-for="citation in agentDisplayCitations(agent)" :key="`${agent.key}-${citation.href}`">
-                      <a class="button-link" :href="citation.href" target="_blank" rel="noreferrer">{{ citation.label }}</a>
-                    </li>
+                  <p class="tm-detail__muted">{{ doc.summary }}</p>
+                  <p v-if="doc.author || doc.published_at" class="tm-detail__muted">
+                    {{ [doc.author, doc.published_at ? formatDateTime(doc.published_at) : null].filter(Boolean).join(" · ") }}
+                  </p>
+                  <div v-if="doc.source_tags?.length" class="tm-detail__chips">
+                    <span v-for="tag in doc.source_tags" :key="tag" class="tm-detail__chip">{{ tag }}</span>
+                  </div>
+                  <div v-if="doc.image_urls?.length" class="tm-detail__visual-images">
+                    <img v-for="imageUrl in doc.image_urls.slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="doc.title" loading="lazy" />
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <!-- Agent pipeline -->
+            <section v-if="trip.latest_agent_trace" id="agents" class="tm-detail__section">
+              <div class="tm-detail__section-header">
+                <p class="tm-detail__section-kicker">{{ latestSuccessfulExecutionKicker }}</p>
+                <h2 class="tm-detail__section-title">{{ formatTraceProvider(trip.latest_agent_trace.provider) }}</h2>
+                <p class="tm-detail__section-desc">{{ latestSuccessfulExecutionDescription }}</p>
+              </div>
+              <div class="tm-detail__metrics">
+                <TmMetricCard v-for="metric in executionMetrics" :key="metric.label" :label="metric.label" :value="metric.value" />
+              </div>
+              <div v-if="agentRuns.length" class="tm-detail__agent-grid">
+                <article v-for="agent in agentRuns" :key="agent.key" class="tm-detail__agent-card">
+                  <div class="tm-detail__agent-card-header">
+                    <div>
+                      <p class="tm-detail__kicker">{{ agent.title }}</p>
+                      <h3>{{ agent.description }}</h3>
+                    </div>
+                    <StatusPill :status="formatAgentRunStatus(agent.status)" />
+                  </div>
+                  <p v-if="agent.prompt_focus" class="tm-detail__muted"><strong>{{ copy.agentPromptLabel }}:</strong> {{ agent.prompt_focus }}</p>
+                  <p v-if="agent.output_summary" class="tm-detail__muted"><strong>{{ copy.agentOutputLabel }}:</strong> {{ agent.output_summary }}</p>
+                  <p v-if="agent.model" class="tm-detail__muted"><strong>{{ copy.agentModelLabel }}:</strong> {{ agent.model }}</p>
+                  <p v-if="agent.prompt_version" class="tm-detail__muted"><strong>{{ copy.agentPromptVersionLabel }}:</strong> {{ agent.prompt_version }}</p>
+                  <p v-if="agentEndpoint(agent)" class="tm-detail__muted"><strong>Endpoint:</strong> {{ agentEndpoint(agent) }}</p>
+                  <p v-if="agentWireApi(agent)" class="tm-detail__muted"><strong>Wire API:</strong> {{ agentWireApi(agent) }}</p>
+                  <div v-if="agentDisplayCitations(agent).length" class="tm-detail__subsection">
+                    <p class="tm-detail__kicker">{{ copy.agentCitationsLabel }}</p>
+                    <ul class="tm-detail__list--nested">
+                      <li v-for="citation in agentDisplayCitations(agent)" :key="`${agent.key}-${citation.href}`">
+                        <a class="tm-detail__link" :href="citation.href" target="_blank" rel="noreferrer">{{ citation.label }}</a>
+                      </li>
+                    </ul>
+                  </div>
+                  <ul v-if="agentVisibleNotes(agent).length" class="tm-detail__list--nested">
+                    <li v-for="note in agentVisibleNotes(agent)" :key="`${agent.key}-${note}`">{{ note }}</li>
                   </ul>
-                </div>
-                <ul v-if="agentVisibleNotes(agent).length" class="summary-list">
-                  <li v-for="note in agentVisibleNotes(agent)" :key="`${agent.key}-${note}`">{{ note }}</li>
+                </article>
+              </div>
+              <div class="tm-detail__subsection">
+                <p class="tm-detail__kicker">{{ copy.agentNotesLabel }}</p>
+                <ul class="tm-detail__list">
+                  <li v-for="note in trip.latest_agent_trace.notes" :key="note">{{ note }}</li>
                 </ul>
-              </article>
-            </div>
-
-            <div>
-              <p class="kicker">{{ copy.agentNotesLabel }}</p>
-              <ul class="detail-list">
-                <li v-for="note in trip.latest_agent_trace.notes" :key="note">{{ note }}</li>
-              </ul>
-            </div>
-            <p v-if="trip.latest_agent_trace.license_notice" class="muted">{{ trip.latest_agent_trace.license_notice }}</p>
-          </article>
+              </div>
+              <p v-if="trip.latest_agent_trace.license_notice" class="tm-detail__muted">{{ trip.latest_agent_trace.license_notice }}</p>
+            </section>
+          </template>
         </div>
       </div>
     </template>
 
-    <div v-if="communityEditorOpen && trip" class="modal-backdrop" @click.self="closeCommunityEditor">
-      <article class="panel panel-stack modal-card">
-        <div>
-          <p class="kicker">{{ communityCopy.kicker }}</p>
-          <h2>{{ communityEditorMode === 'create' ? communityCopy.modalCreateTitle : communityCopy.modalEditTitle }}</h2>
-          <p class="muted">{{ communityCopy.noteHint }}</p>
+    <!-- Refine modal -->
+    <div v-if="refineModalOpen && trip" class="tm-detail__modal-backdrop" @click.self="closeRefineModal">
+      <article class="tm-detail__modal-card">
+        <div class="tm-detail__section-header">
+          <p class="tm-detail__section-kicker">{{ copy.quickRefineTitle }}</p>
+          <h2 class="tm-detail__section-title">{{ copy.quickRefineTitle }}</h2>
+          <p class="tm-detail__section-desc">{{ copy.quickRefineSubtitle }}</p>
         </div>
-
-        <div class="panel-subsection">
-          <img v-if="communityPreviewImage" class="community-cover" :src="communityPreviewImage" :alt="trip.title" />
-          <div>
-            <p class="kicker">{{ communityCopy.previewTitle }}</p>
-            <h3>{{ trip.title }}</h3>
-            <p class="muted">{{ trip.itinerary?.summary }}</p>
-          </div>
-          <div class="chip-list">
-            <span class="subtle-chip">{{ communityCopy.previewDays }}: {{ communityPreviewDays }}</span>
-            <span class="subtle-chip">{{ communityCopy.previewBudget }}: {{ formatCurrency(trip.budget) }}</span>
-            <span v-for="interest in communityPreviewInterestTags" :key="interest" class="detail-chip detail-chip--soft">{{ interest }}</span>
-          </div>
+        <div class="tm-detail__quick-actions">
+          <TmButton v-for="action in quickRefineActions" :key="action.label" variant="ghost" size="sm" :disabled="actionLocked || !canUseBrowserModel" @click="runPresetRefine(action)">
+            {{ action.label }}
+          </TmButton>
         </div>
-
-        <div class="field">
-          <label for="community-note">{{ communityCopy.noteLabel }}</label>
-          <textarea
-            id="community-note"
-            v-model="communityNoteDraft"
-            :placeholder="communityCopy.notePlaceholder"
-            maxlength="280"
-          />
-          <p class="muted">{{ communityNoteDraft.length }}/280</p>
-        </div>
-
-        <div class="inline-actions">
-          <button class="primary" type="button" :disabled="communityPending" @click="submitCommunityEditor">
-            {{
-              communityPending
-                ? communityEditorMode === "create"
-                  ? communityCopy.publishingAction
-                  : communityCopy.savingAction
-                : communityEditorMode === "create"
-                  ? communityCopy.submitCreate
-                  : communityCopy.submitEdit
-            }}
-          </button>
-          <button type="button" :disabled="communityPending" @click="closeCommunityEditor">{{ communityCopy.cancelAction }}</button>
+        <TmTextarea
+          id="custom-refine"
+          :model-value="customRefineInstruction"
+          :label="copy.customRefineLabel"
+          :placeholder="copy.customRefinePlaceholder"
+          :rows="4"
+          @update:model-value="(v: string) => customRefineInstruction = v"
+        />
+        <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="refineError" compact />
+        <div class="tm-detail__section-actions">
+          <TmButton variant="primary" :disabled="actionLocked || !canUseBrowserModel" :loading="refinePending" @click="submitCustomRefine">
+            {{ refinePending ? copy.refining : copy.customRefineSubmit }}
+          </TmButton>
+          <TmButton variant="ghost" :disabled="refinePending" @click="closeRefineModal">{{ communityCopy.cancelAction }}</TmButton>
         </div>
       </article>
     </div>
-  </section>
+
+    <!-- Community editor modal -->
+    <div v-if="communityEditorOpen && trip" class="tm-detail__modal-backdrop" @click.self="closeCommunityEditor">
+      <article class="tm-detail__modal-card">
+        <div class="tm-detail__section-header">
+          <p class="tm-detail__section-kicker">{{ communityCopy.kicker }}</p>
+          <h2 class="tm-detail__section-title">{{ communityEditorMode === 'create' ? communityCopy.modalCreateTitle : communityCopy.modalEditTitle }}</h2>
+          <p class="tm-detail__section-desc">{{ communityCopy.noteHint }}</p>
+        </div>
+
+        <div class="tm-detail__community-preview">
+          <img v-if="communityPreviewImage" class="tm-detail__community-cover" :src="communityPreviewImage" :alt="trip.title" />
+          <p class="tm-detail__kicker">{{ communityCopy.previewTitle }}</p>
+          <h3>{{ trip.title }}</h3>
+          <p class="tm-detail__muted">{{ trip.itinerary?.summary }}</p>
+          <div class="tm-detail__chips">
+            <span class="tm-detail__chip--subtle">{{ communityCopy.previewDays }}: {{ communityPreviewDays }}</span>
+            <span class="tm-detail__chip--subtle">{{ communityCopy.previewBudget }}: {{ formatCurrency(trip.budget) }}</span>
+            <span v-for="interest in communityPreviewInterestTags" :key="interest" class="tm-detail__chip">{{ interest }}</span>
+          </div>
+        </div>
+
+        <TmTextarea
+          id="community-note"
+          :model-value="communityNoteDraft"
+          :label="communityCopy.noteLabel"
+          :placeholder="communityCopy.notePlaceholder"
+          :rows="4"
+          @update:model-value="(v: string) => communityNoteDraft = v"
+        />
+        <p class="tm-detail__muted">{{ communityNoteDraft.length }}/280</p>
+
+        <div class="tm-detail__section-actions">
+          <TmButton variant="primary" :disabled="communityPending" :loading="communityPending" @click="submitCommunityEditor">
+            {{ communityPending ? (communityEditorMode === "create" ? communityCopy.publishingAction : communityCopy.savingAction) : (communityEditorMode === "create" ? communityCopy.submitCreate : communityCopy.submitEdit) }}
+          </TmButton>
+          <TmButton variant="ghost" :disabled="communityPending" @click="closeCommunityEditor">{{ communityCopy.cancelAction }}</TmButton>
+        </div>
+      </article>
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.tm-detail {
+  max-width: var(--tm-content-max-width);
+  margin: 0 auto;
+}
+
+.tm-detail__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--tm-space-6);
+  margin-bottom: var(--tm-space-6);
+  flex-wrap: wrap;
+}
+
+.tm-detail__header-actions {
+  display: flex;
+  gap: var(--tm-space-3);
+  flex-wrap: wrap;
+}
+
+.tm-detail__kicker {
+  font-size: var(--tm-text-xs);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--tm-clay);
+  margin: 0;
+}
+
+.tm-detail__title {
+  font-family: var(--tm-font-display);
+  font-size: var(--tm-text-2xl);
+  color: var(--tm-moss);
+  margin: 0 0 var(--tm-space-2) 0;
+}
+
+.tm-detail__meta {
+  display: flex;
+  gap: var(--tm-space-4);
+  flex-wrap: wrap;
+  font-size: var(--tm-text-sm);
+  color: var(--tm-stone);
+}
+
+.tm-detail__overview {
+  margin-bottom: var(--tm-space-6);
+}
+
+.tm-detail__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--tm-space-4);
+  margin-top: var(--tm-space-4);
+}
+/* Body layout */
+.tm-detail__body {
+  display: block;
+}
+
+.tm-detail__main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tm-space-10, 40px);
+}
+
+.tm-detail__section {
+  padding: var(--tm-space-8, 32px);
+  border-radius: var(--tm-radius-2xl, 28px);
+  background-color: var(--tm-snow);
+  border: none;
+  box-shadow: var(--tm-shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tm-space-6);
+}
+
+.tm-detail__section-header { display: flex; flex-direction: column; gap: var(--tm-space-2); }
+.tm-detail__section-kicker { font-size: var(--tm-text-xs); font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; color: var(--tm-clay); margin: 0; }
+.tm-detail__section-title { font-size: var(--tm-text-lg); font-weight: 700; color: var(--tm-tea); margin: 0; }
+.tm-detail__section-desc { font-size: var(--tm-text-sm); color: var(--tm-stone); margin: 0; }
+.tm-detail__section-actions { display: flex; gap: var(--tm-space-3); flex-wrap: wrap; }
+.tm-detail__muted { font-size: var(--tm-text-sm); color: var(--tm-stone); margin: 0; }
+
+.tm-detail__subsection { display: flex; flex-direction: column; gap: var(--tm-space-3); padding-top: var(--tm-space-3); border-top: var(--tm-border-hairline); }
+.tm-detail__subsection-header { display: flex; justify-content: space-between; align-items: center; }
+
+.tm-detail__data-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--tm-space-3); }
+.tm-detail__data-pair dt { font-size: var(--tm-text-xs); font-weight: 700; color: var(--tm-stone); text-transform: uppercase; letter-spacing: 0.05em; }
+.tm-detail__data-pair dd { font-size: var(--tm-text-sm); color: var(--tm-tea); margin: 0; }
+
+.tm-detail__chips { display: flex; flex-wrap: wrap; gap: var(--tm-space-2); }
+.tm-detail__chip { padding: 4px 10px; border-radius: var(--tm-radius-sm); background-color: rgba(93, 122, 99, 0.06); font-size: var(--tm-text-xs); font-weight: 600; color: var(--tm-moss); }
+.tm-detail__chip--subtle { padding: 4px 10px; border-radius: var(--tm-radius-sm); background-color: var(--tm-mist); font-size: var(--tm-text-xs); color: var(--tm-stone); }
+
+.tm-detail__link { font-size: var(--tm-text-sm); font-weight: 600; color: var(--tm-moss); text-decoration: none; }
+.tm-detail__link:hover { text-decoration: underline; }
+
+.tm-detail__list { list-style: none; padding: 0; margin: 0; font-size: var(--tm-text-sm); color: var(--tm-tea); }
+.tm-detail__list--nested { list-style: disc; padding-left: var(--tm-space-4); font-size: var(--tm-text-sm); color: var(--tm-stone); }
+
+.tm-detail__badge { display: inline-block; padding: 3px 8px; border-radius: var(--tm-radius-sm); background-color: var(--tm-mist); font-size: var(--tm-text-xs); font-weight: 700; color: var(--tm-stone); }
+
+.tm-detail__timeline { list-style: none; padding: 0; margin: 0; }
+.tm-detail__timeline-item { padding-left: var(--tm-space-4); border-left: 2px solid var(--tm-mist); margin-bottom: var(--tm-space-3); }
+.tm-detail__timeline-meta { display: flex; align-items: center; gap: var(--tm-space-2); }
+
+.tm-detail__days { display: flex; flex-direction: column; gap: var(--tm-space-8, 32px); }
+.tm-detail__day-card {
+  padding: var(--tm-space-8, 32px);
+  border-radius: var(--tm-radius-2xl, 28px);
+  background-color: var(--tm-snow);
+  border: none;
+  box-shadow: var(--tm-shadow-raised-md);
+}
+.tm-detail__day-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: var(--tm-space-3); }
+.tm-detail__day-title { font-size: var(--tm-text-xl, 1.25rem); font-weight: 700; color: var(--tm-tea); margin: 0; }
+.tm-detail__day-cost { font-family: var(--tm-font-mono); font-size: var(--tm-text-base); font-weight: 700; color: var(--tm-moss); padding: var(--tm-space-1) var(--tm-space-3); background: rgba(93, 122, 99, 0.08); border-radius: var(--tm-radius-sm); }
+.tm-detail__day-summary { font-size: var(--tm-text-sm); color: var(--tm-stone); margin: 0 0 var(--tm-space-4) 0; }
+
+.tm-detail__items { list-style: none; padding: 0; margin: 0; }
+.tm-detail__item {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: var(--tm-space-4);
+  padding: var(--tm-space-4) 0 var(--tm-space-4) var(--tm-space-4);
+  border-top: none;
+  border-left: 3px solid var(--tm-mist);
+  margin-left: var(--tm-space-2);
+  transition: border-color var(--tm-duration-fast) var(--tm-ease-out);
+}
+.tm-detail__item:hover {
+  border-left-color: var(--tm-moss);
+}
+.tm-detail__item-time { font-family: var(--tm-font-mono); font-size: var(--tm-text-xs); color: var(--tm-stone); }
+.tm-detail__item-body { display: flex; flex-direction: column; gap: var(--tm-space-2); }
+.tm-detail__item-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--tm-space-2); }
+.tm-detail__item-badges { display: flex; gap: var(--tm-space-1); flex-wrap: wrap; }
+.tm-detail__item-note { font-size: var(--tm-text-sm); color: var(--tm-tea); margin: 0; }
+
+.tm-detail__visual-images { display: flex; gap: var(--tm-space-3); overflow-x: auto; }
+.tm-detail__visual-images img { width: 120px; height: 80px; object-fit: cover; border-radius: var(--tm-radius-md); }
+
+.tm-detail__visual-card,
+.tm-detail__reference-card,
+.tm-detail__search-card,
+.tm-detail__agent-card,
+.tm-detail__debug-card {
+  padding: var(--tm-space-4);
+  border-radius: var(--tm-radius-lg);
+  background-color: var(--tm-mist);
+  border: var(--tm-border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tm-space-2);
+}
+
+.tm-detail__visual-card-header,
+.tm-detail__reference-card-header,
+.tm-detail__search-card-header,
+.tm-detail__agent-card-header,
+.tm-detail__debug-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.tm-detail__reference-grid,
+.tm-detail__search-results,
+.tm-detail__agent-grid,
+.tm-detail__debug-grid,
+.tm-detail__visual-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tm-space-4);
+}
+
+.tm-detail__quick-actions { display: flex; flex-wrap: wrap; gap: var(--tm-space-2); }
+.tm-detail__weather { padding: var(--tm-space-3); border-radius: var(--tm-radius-md); background-color: var(--tm-mist); }
+.tm-detail__risk-list { list-style: none; padding: 0; margin: 0; }
+.tm-detail__risk-list li { padding: var(--tm-space-2) var(--tm-space-3); border-radius: var(--tm-radius-sm); background-color: var(--tm-warning-bg); border: 1px solid var(--tm-warning-border); font-size: var(--tm-text-sm); color: var(--tm-warning); margin-bottom: var(--tm-space-2); }
+
+.tm-detail__banner { padding: var(--tm-space-3) var(--tm-space-4); border-radius: var(--tm-radius-md); background-color: var(--tm-mist); border: var(--tm-border-subtle); }
+.tm-detail__banner--warn { background-color: var(--tm-warning-bg); border-color: var(--tm-warning-border); }
+
+.tm-detail__community-preview { display: flex; flex-direction: column; gap: var(--tm-space-2); }
+.tm-detail__community-cover { width: 100%; height: 140px; object-fit: cover; border-radius: var(--tm-radius-md); }
+
+.tm-detail__modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); display: grid; place-items: center; z-index: 100; padding: var(--tm-space-6); }
+.tm-detail__modal-card { max-width: 560px; width: 100%; padding: var(--tm-space-8); border-radius: var(--tm-radius-2xl); background-color: var(--tm-paper); box-shadow: var(--tm-shadow-float); display: flex; flex-direction: column; gap: var(--tm-space-4); }
+
+@media (max-width: 1024px) {
+  .tm-detail__body { display: block; }
+}
+
+@media (max-width: 768px) {
+  .tm-detail__header { flex-direction: column; }
+  .tm-detail__item { grid-template-columns: 1fr; }
+  .tm-detail__data-grid { grid-template-columns: 1fr; }
+}
+</style>
