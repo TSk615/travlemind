@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     app_name: str = "TravelMind AI API"
     api_prefix: str = "/api/v1"
     database_url: str = "sqlite:///./storage/travelmind.db"
-    jwt_secret: str = "travelmind-dev-secret"
+    jwt_secret: str = "travelmind-dev-secret-change-me-32-bytes-minimum"
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 30
     refresh_token_days: int = 14

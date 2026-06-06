@@ -1,26 +1,23 @@
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Mapping
 from typing import Any, Literal
-from urllib.parse import parse_qsl, urlparse
 
 import httpx
 from pydantic import BaseModel, Field
 
 from travelmind_api.core.env import get_env
-from travelmind_api.services.exa_pool import ExaPoolClient, ExaPoolConfig
 from travelmind_api.services.mcp import McpClientConfig, McpHttpClient
 
-SearchServiceProvider = Literal["exa", "groksearch", "tavily"]
+SearchServiceProvider = Literal["groksearch", "tavily"]
 SearchServiceTransport = Literal["mcp", "api"]
 
 
-def normalize_search_service_provider(value: object | None, *, default: SearchServiceProvider = "exa") -> SearchServiceProvider:
+def normalize_search_service_provider(value: object | None, *, default: SearchServiceProvider = "groksearch") -> SearchServiceProvider:
     candidate = str(value or "").strip().lower()
-    if candidate in {"exa", ""}:
-        return "exa"
+    if candidate == "":
+        return default
     if candidate in {"groksearch", "grok-search", "grok_search", "grok"}:
         return "groksearch"
     if candidate in {"tavily"}:
@@ -38,7 +35,7 @@ def normalize_search_service_transport(value: object | None, *, default: SearchS
 
 
 class SearchServiceConfig(BaseModel):
-    provider: SearchServiceProvider = "exa"
+    provider: SearchServiceProvider = "groksearch"
     transport: SearchServiceTransport = "mcp"
     base_url: str
     api_key: str
@@ -62,9 +59,23 @@ class SearchServiceConfig(BaseModel):
         if timeout_seconds <= 0:
             timeout_seconds = 30.0
 
+        raw_provider = str(payload.get("provider") or "").strip().lower()
+        if raw_provider and raw_provider not in {"groksearch", "grok-search", "grok_search", "grok", "tavily"}:
+            return None
+        raw_transport = str(payload.get("transport") or "").strip().lower()
+        if raw_transport and raw_transport not in {"mcp", "api", "rest", "http"}:
+            return None
+
+        provider = normalize_search_service_provider(payload.get("provider"))
+        transport = normalize_search_service_transport(payload.get("transport"))
+        if provider == "groksearch" and transport != "mcp":
+            return None
+        if provider == "tavily" and transport != "api":
+            return None
+
         return cls(
-            provider=normalize_search_service_provider(payload.get("provider")),
-            transport=normalize_search_service_transport(payload.get("transport")),
+            provider=provider,
+            transport=transport,
             base_url=base_url,
             api_key=api_key,
             timeout_seconds=timeout_seconds,
@@ -72,7 +83,7 @@ class SearchServiceConfig(BaseModel):
 
     @classmethod
     def from_env(cls) -> SearchServiceConfig | None:
-        configured_provider = normalize_search_service_provider(get_env("TRAVELMIND_SEARCH_SERVICE_PROVIDER"), default="exa")
+        configured_provider = normalize_search_service_provider(get_env("TRAVELMIND_SEARCH_SERVICE_PROVIDER"), default="groksearch")
         configured_transport = normalize_search_service_transport(get_env("TRAVELMIND_SEARCH_SERVICE_TRANSPORT"), default="mcp")
         if configured_provider == "groksearch":
             grok_base_url = (
@@ -128,35 +139,7 @@ class SearchServiceConfig(BaseModel):
                 api_key=tavily_api_key,
                 timeout_seconds=tavily_timeout,
             )
-
-        mcp_base_url = (get_env("TRAVELMIND_MCP_BASE_URL") or "").strip()
-        mcp_api_key = (get_env("TRAVELMIND_MCP_API_KEY") or "").strip() or None
-        mcp_timeout_raw = (get_env("TRAVELMIND_MCP_TIMEOUT_SECONDS") or "30").strip()
-        if not mcp_base_url:
-            public_api_url = (get_env("TRAVELMIND_PUBLIC_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
-            local_server_key = (get_env("TRAVELMIND_MCP_SERVER_API_KEY") or "").strip() or None
-            exa_pool_base = (get_env("TRAVELMIND_EXA_POOL_BASE_URL") or "").strip()
-            exa_pool_api_key = (get_env("TRAVELMIND_EXA_POOL_API_KEY") or "").strip()
-            if public_api_url and local_server_key and exa_pool_base and exa_pool_api_key:
-                mcp_base_url = f"{public_api_url}/mcp/"
-                mcp_api_key = local_server_key
-        if mcp_base_url and mcp_api_key:
-            try:
-                mcp_timeout = float(mcp_timeout_raw)
-            except ValueError:
-                mcp_timeout = 30.0
-            return cls(provider="exa", transport="mcp", base_url=mcp_base_url.rstrip("/"), api_key=mcp_api_key, timeout_seconds=mcp_timeout)
-
-        api_base_url = (get_env("TRAVELMIND_EXA_POOL_BASE_URL") or "").strip().rstrip("/")
-        api_key = (get_env("TRAVELMIND_EXA_POOL_API_KEY") or "").strip()
-        api_timeout_raw = (get_env("TRAVELMIND_EXA_POOL_TIMEOUT_SECONDS") or "30").strip()
-        if not api_base_url or not api_key:
-            return None
-        try:
-            api_timeout = float(api_timeout_raw)
-        except ValueError:
-            api_timeout = 30.0
-        return cls(provider="exa", transport="api", base_url=api_base_url, api_key=api_key, timeout_seconds=api_timeout)
+        return None
 
 
 def search_service_config_from_user(user: object | None) -> SearchServiceConfig | None:
@@ -189,34 +172,13 @@ class ConfiguredSearchGateway:
                 McpClientConfig(
                     base_url=config.base_url,
                     api_key=config.api_key,
-                    query_api_key_name=self._resolve_query_api_key_name(config),
                     timeout_seconds=config.timeout_seconds,
                 )
             )
             if config.transport == "mcp"
             else None
         )
-        self._api_client = (
-            ExaPoolClient(
-                ExaPoolConfig(
-                    base_url=config.base_url,
-                    api_key=config.api_key,
-                    timeout_seconds=config.timeout_seconds,
-                )
-            )
-            if config.transport == "api" and config.provider == "exa"
-            else None
-        )
         self._available_tools: set[str] | None = None
-
-    def _resolve_query_api_key_name(self, config: SearchServiceConfig) -> str | None:
-        parsed = urlparse(config.base_url)
-        query_keys = {key for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
-        if "exaApiKey" in query_keys:
-            return "exaApiKey"
-        if config.provider == "exa" and parsed.netloc.endswith("exa.ai"):
-            return "exaApiKey"
-        return None
 
     @property
     def config(self) -> SearchServiceConfig:
@@ -227,9 +189,6 @@ class ConfiguredSearchGateway:
             return self._available_tools
         if self._config.transport == "api" and self._config.provider == "tavily":
             self._available_tools = {"search"}
-            return self._available_tools
-        if self._api_client is not None:
-            self._available_tools = {"search", "answer", "research", "contents"}
             return self._available_tools
         if self._mcp_client is None:
             self._available_tools = set()
@@ -282,37 +241,7 @@ class ConfiguredSearchGateway:
                 include_images=include_images,
                 include_image_descriptions=include_image_descriptions,
             )
-        assert self._api_client is not None
-        if self._config.provider == "groksearch":
-            raise SearchServiceGatewayError("GrokSearch currently only supports MCP transport")
-        if name in {"search", "web_search_exa", "deep_search_exa"}:
-            query = str(arguments.get("query") or arguments.get("objective") or "").strip()
-            num_results = int(arguments.get("num_results", arguments.get("numResults", 10)))
-            search_type = str(arguments.get("search_type") or arguments.get("type") or "auto")
-            include_text = bool(arguments.get("include_text", True))
-            return self._api_client.search(query=query, num_results=num_results, search_type=search_type, include_text=include_text)
-        if name == "answer":
-            return self._api_client.answer(
-                query=str(arguments.get("query") or "").strip(),
-                include_text=bool(arguments.get("include_text", False)),
-            )
-        if name in {"contents", "crawling_exa"}:
-            raw_urls = arguments.get("urls")
-            urls = [str(item).strip() for item in raw_urls if str(item).strip()] if isinstance(raw_urls, list) else []
-            return self._api_client.contents(
-                urls=urls,
-                include_text=bool(arguments.get("include_text", True) or arguments.get("text", True)),
-                include_html=bool(arguments.get("include_html", False) or arguments.get("htmlContent", False)),
-            )
-        if name in {"research", "deep_researcher_start"}:
-            return self._api_client.research(
-                instructions=str(arguments.get("instructions") or "").strip(),
-                model=str(arguments.get("model") or "exa-research"),
-                wait_for_completion=bool(arguments.get("wait_for_completion", True)),
-                poll_interval_seconds=float(arguments.get("poll_interval_seconds", 2.0)),
-                max_wait_seconds=float(arguments.get("max_wait_seconds", 45.0)),
-            )
-        raise SearchServiceGatewayError(f"Configured API transport does not support operation {name}")
+        raise SearchServiceGatewayError("GrokSearch currently only supports MCP transport")
 
     def _call_tavily_search(
         self,
@@ -390,46 +319,3 @@ class ConfiguredSearchGateway:
             payload["sources"] = [item for item in sources if isinstance(item, dict)]
             payload["sources_count"] = payload.get("sources_count") or len(payload["sources"])
         return payload
-
-    def run_research_with_fallback(self, instructions: str) -> tuple[str, dict[str, Any]]:
-        available_tools = self.available_tools()
-        if "deep_researcher_start" in available_tools:
-            start_result = self.call_operation(
-                "deep_researcher_start",
-                {"instructions": instructions, "model": "exa-research-fast"},
-            )
-            research_id = str(start_result.get("researchId") or start_result.get("id") or "").strip()
-            latest_result = start_result
-            if research_id and "deep_researcher_check" in available_tools:
-                for attempt in range(3):
-                    latest_result = self.call_operation("deep_researcher_check", {"researchId": research_id})
-                    status = self.research_status(latest_result)
-                    if status in {"completed", "complete", "done", "failed", "error"}:
-                        break
-                    if attempt < 2:
-                        time.sleep(2.0)
-            return (
-                "deep_researcher_start",
-                {
-                    "tool_name": "deep_researcher_start",
-                    "research_id": research_id,
-                    "status": self.research_status(latest_result) or self.research_status(start_result),
-                    "start": start_result,
-                    "result": latest_result,
-                },
-            )
-
-        if "research" in available_tools:
-            result = self.call_operation(
-                "research",
-                {
-                    "instructions": instructions,
-                    "model": "exa-research",
-                    "wait_for_completion": True,
-                    "poll_interval_seconds": 2.0,
-                    "max_wait_seconds": 30.0,
-                },
-            )
-            return ("research", {"tool_name": "research", "status": self.research_status(result), "result": result})
-
-        raise SearchServiceGatewayError("Configured search service does not expose a research operation")

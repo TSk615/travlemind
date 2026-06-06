@@ -47,9 +47,9 @@ const kindLabel = computed(() => t(`state.kind.${props.kind}`))
   gap: var(--tm-space-3, 12px);
   padding: var(--tm-space-6, 22px);
   border-radius: var(--tm-radius-xl, 24px);
-  background-color: var(--tm-snow, rgba(255, 255, 255, 0.4));
+  background-color: var(--tm-paper, rgba(228, 231, 235, 0.9));
   border: var(--tm-border-subtle, 1px solid rgba(43, 42, 40, 0.10));
-  box-shadow: var(--tm-shadow-card, none);
+  box-shadow: var(--tm-shadow-inset-md, none);
 }
 
 .state-panel--compact {
@@ -81,7 +81,7 @@ const kindLabel = computed(() => t(`state.kind.${props.kind}`))
   height: 12px;
   border-radius: 999px;
   border: 2px solid var(--tm-info-border, rgba(107, 157, 173, 0.18));
-  border-top-color: var(--tm-moss, #5D7A63);
+  border-top-color: var(--tm-moss, #4285f4);
   animation: tm-spin 0.9s linear infinite;
 }
 
@@ -121,7 +121,7 @@ const kindLabel = computed(() => t(`state.kind.${props.kind}`))
 @media (prefers-reduced-motion: reduce) {
   .state-panel__spinner {
     animation: none;
-    border-top-color: var(--tm-moss, #5D7A63);
+    border-top-color: var(--tm-moss, #4285f4);
     opacity: 0.6;
   }
 }

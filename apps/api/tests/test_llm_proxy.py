@@ -109,19 +109,7 @@ def test_llm_proxy_uses_saved_user_settings_when_request_omits_provider_fields(c
         captured["url"] = str(request.url)
         captured["authorization"] = request.headers.get("Authorization")
         captured["payload"] = json.loads(request.content.decode("utf-8"))
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "hello from saved settings",
-                        }
-                    }
-                ]
-            },
-        )
+        return httpx.Response(200, json={"output_text": "hello from saved settings"})
 
     _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
 
@@ -137,11 +125,44 @@ def test_llm_proxy_uses_saved_user_settings_when_request_omits_provider_fields(c
     )
 
     assert relay_response.status_code == 200
-    assert relay_response.json()["choices"][0]["message"]["content"] == "hello from saved settings"
-    assert captured["url"] == "https://saved.example.test/v1/chat/completions"
+    assert relay_response.json()["output_text"] == "hello from saved settings"
+    assert captured["url"] == "https://saved.example.test/v1/responses"
     assert captured["authorization"] == "Bearer saved-key"
     assert captured["payload"]["model"] == "saved-model"
     assert captured["payload"]["stream"] is False
+    assert captured["payload"]["input"][0]["content"][0]["text"] == "hello"
+
+
+def test_llm_connection_test_supports_newapi_chat_completions(client, monkeypatch):
+    _register(client)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
+
+    response = client.post(
+        "/api/v1/llm/test",
+        json={
+            "provider_protocol": "newapi",
+            "base_url": "http://localhost:3000/v1",
+            "api_key": "newapi-key",
+            "model": "gpt-test",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["provider_protocol"] == "newapi"
+    assert payload["wire_api"] == "chat_completions"
+    assert payload["reply"] == "ok"
+    assert captured["url"] == "http://localhost:3000/v1/chat/completions"
+    assert captured["authorization"] == "Bearer newapi-key"
+    assert captured["payload"]["messages"][0]["content"] == "Reply with exactly: ok"
 
 
 
@@ -264,6 +285,186 @@ def test_llm_proxy_streams_sse_payload_through_without_buffering(client, monkeyp
     assert captured["url"] == "https://llm.example.test/v1/responses"
     assert captured["payload"]["stream"] is True
 
+def test_llm_proxy_supports_gemini_native_protocol(client, monkeypatch):
+    _register(client)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["api_key"] = request.headers.get("x-goog-api-key")
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "hello from gemini"}],
+                        }
+                    }
+                ]
+            },
+        )
+
+    _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
+
+    response = client.post(
+        "/api/v1/llm/proxy",
+        json={
+            "provider_protocol": "gemini",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": "gemini-key",
+            "wire_api": "chat_completions",
+            "payload": {
+                "model": "gemini-2.5-flash",
+                "messages": [
+                    {"role": "system", "content": "Be concise."},
+                    {"role": "user", "content": "hello"},
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["choices"][0]["message"]["content"] == "hello from gemini"
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    assert captured["api_key"] == "gemini-key"
+    assert captured["payload"]["systemInstruction"]["parts"][0]["text"] == "Be concise."
+    assert captured["payload"]["contents"][0]["role"] == "user"
+
+
+def test_llm_proxy_supports_claude_native_protocol(client, monkeypatch):
+    _register(client)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["api_key"] = request.headers.get("x-api-key")
+        captured["version"] = request.headers.get("anthropic-version")
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {"type": "text", "text": "hello from claude"},
+                ]
+            },
+        )
+
+    _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
+
+    response = client.post(
+        "/api/v1/llm/proxy",
+        json={
+            "provider_protocol": "claude",
+            "base_url": "https://api.anthropic.com/v1",
+            "api_key": "claude-key",
+            "wire_api": "responses",
+            "payload": {
+                "model": "claude-sonnet-4-5",
+                "max_output_tokens": 512,
+                "input": [
+                    {"role": "system", "content": [{"type": "input_text", "text": "Be concise."}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["output_text"] == "hello from claude"
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+    assert captured["api_key"] == "claude-key"
+    assert captured["version"] == "2023-06-01"
+    assert captured["payload"]["system"] == "Be concise."
+    assert captured["payload"]["max_tokens"] == 512
+
+
+def test_llm_models_endpoint_normalizes_gemini_models(client, monkeypatch):
+    _register(client)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["api_key"] = request.headers.get("x-goog-api-key")
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "name": "models/gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "description": "Fast model",
+                        "supportedGenerationMethods": ["generateContent"],
+                        "inputTokenLimit": 1000,
+                        "outputTokenLimit": 2000,
+                    },
+                    {
+                        "name": "models/embedding-001",
+                        "supportedGenerationMethods": ["embedContent"],
+                    },
+                ]
+            },
+        )
+
+    _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
+
+    response = client.post(
+        "/api/v1/llm/models",
+        json={
+            "provider_protocol": "gemini",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": "gemini-key",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models"
+    assert captured["api_key"] == "gemini-key"
+    assert payload["provider_protocol"] == "gemini"
+    assert payload["models"] == [
+        {
+            "id": "gemini-2.5-flash",
+            "name": "Gemini 2.5 Flash",
+            "description": "Fast model",
+            "owned_by": None,
+            "created_at": None,
+            "input_token_limit": 1000,
+            "output_token_limit": 2000,
+        }
+    ]
+
+
+def test_llm_models_endpoint_normalizes_openai_and_claude_models(client, monkeypatch):
+    _register(client)
+    calls: list[tuple[str, str | None, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((str(request.url), request.headers.get("Authorization"), request.headers.get("x-api-key")))
+        if str(request.url).endswith("/openai/v1/models"):
+            return httpx.Response(200, json={"data": [{"id": "gpt-5.4-mini", "owned_by": "openai"}]})
+        return httpx.Response(200, json={"data": [{"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5"}]})
+
+    _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
+
+    openai_response = client.post(
+        "/api/v1/llm/models",
+        json={"provider_protocol": "openai", "base_url": "https://models.example.test/openai/v1", "api_key": "openai-key"},
+    )
+    claude_response = client.post(
+        "/api/v1/llm/models",
+        json={"provider_protocol": "claude", "base_url": "https://api.anthropic.com/v1", "api_key": "claude-key"},
+    )
+
+    assert openai_response.status_code == 200, openai_response.text
+    assert claude_response.status_code == 200, claude_response.text
+    assert openai_response.json()["data"]["models"][0]["id"] == "gpt-5.4-mini"
+    assert claude_response.json()["data"]["models"][0]["id"] == "claude-sonnet-4-5"
+    assert calls == [
+        ("https://models.example.test/openai/v1/models", "Bearer openai-key", None),
+        ("https://api.anthropic.com/v1/models", None, "claude-key"),
+    ]
 
 
 def test_search_proxy_runs_groksearch_web_search_and_returns_hits(client, monkeypatch):

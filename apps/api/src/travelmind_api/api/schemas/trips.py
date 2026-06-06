@@ -293,7 +293,7 @@ class TripRefineRequest(BaseModel):
 
 class TripItinerarySaveRequest(BaseModel):
     itinerary: dict[str, Any]
-    latest_agent_trace: dict[str, Any]
+    latest_agent_trace: dict[str, Any] | None = None
 
 
 class CommunityTripPublicationState(BaseModel):

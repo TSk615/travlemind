@@ -102,8 +102,8 @@ function onInput(event: Event) {
   padding: var(--tm-space-3) var(--tm-space-4);
   border: none;
   border-radius: var(--tm-radius-md);
-  background-color: var(--tm-snow);
-  box-shadow: var(--tm-shadow-inset-sm);
+  background-color: var(--tm-paper);
+  box-shadow: var(--tm-shadow-inset-md);
   font-family: var(--tm-font-body);
   font-size: var(--tm-text-base);
   color: var(--tm-tea);
@@ -118,20 +118,20 @@ function onInput(event: Event) {
 }
 
 .tm-field__input:hover:not(:disabled) {
-  background-color: #ffffff;
+  background-color: #e9edf2;
 }
 
 .tm-field__input:focus {
   outline: none;
   box-shadow:
-    var(--tm-shadow-inset-sm),
-    0 0 0 3px rgba(93, 122, 99, 0.12);
+    var(--tm-shadow-inset-lg),
+    var(--tm-focus-ring);
 }
 
 .tm-field--error .tm-field__input {
   box-shadow:
-    var(--tm-shadow-inset-sm),
-    0 0 0 3px rgba(199, 91, 74, 0.12);
+    var(--tm-shadow-inset-md),
+    0 0 0 3px rgba(234, 67, 53, 0.16);
 }
 
 .tm-field--disabled .tm-field__label {

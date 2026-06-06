@@ -154,15 +154,15 @@ def test_search_documents_include_configured_remote_search_results(monkeypatch):
         "Kyoto",
         [],
         search_service_config=SearchServiceConfig(
-            provider="exa",
+            provider="tavily",
             transport="api",
-            base_url="https://search.example.test",
+            base_url="https://api.tavily.com/search",
             api_key="test-key",
         ),
         xhs_source_enabled=False,
     )
 
-    remote_doc = next(doc for doc in docs if doc.platform == "exa")
+    remote_doc = next(doc for doc in docs if doc.platform == "tavily")
     assert remote_doc.url == "https://search.example.test/kyoto-guide"
     assert remote_doc.source_type == "search-service-api"
 

@@ -1,78 +1,98 @@
 /* ============================================================
    TravelMind Design Tokens v4
-   Single source of truth for all visual decisions.
+   Soft UI Light theme tokens.
    ============================================================ */
 
 :root {
-  /* === 基础色（日系清新底色 70%）=== */
-  --tm-paper: #F0F0ED;
-  --tm-mist: #E8EAED;
-  --tm-snow: #FAFBFC;
-  --tm-moss: #5D7A63;
-  --tm-tea: #2B2A28;
-  --tm-clay: #C98F6B;
-  --tm-stone: #8A8580;
+  color-scheme: light;
 
-  /* === AI 虹彩点缀（仅 10% 面积）=== */
-  --tm-aurora-cyan: #7FE4E3;
-  --tm-aurora-lilac: #C6B7FF;
-  --tm-aurora-rose: #F4C2D7;
+  /* Core palette */
+  --tm-paper: #e4e7eb;
+  --tm-mist: #d8dce3;
+  --tm-snow: #e8eaed;
+  --tm-frost: #f2f5f9;
+  --tm-tea: #3c4043;
+  --tm-stone: #5f6368;
+  --tm-disabled: #9aa0a6;
+  --tm-moss: #4285f4;
+  --tm-clay: #a142f4;
 
-  /* === 语义色 === */
-  --tm-success: #5D7A63;
-  --tm-warning: #D4A054;
-  --tm-error: #C75B4A;
-  --tm-info: #6B9DAD;
+  /* Soft accent system */
+  --tm-aurora-cyan: #5a9bff;
+  --tm-aurora-lilac: #a142f4;
+  --tm-aurora-rose: #ea4335;
+  --tm-success: #34a853;
+  --tm-warning: #fbbc04;
+  --tm-error: #ea4335;
+  --tm-info: #4285f4;
 
-  /* === 语义色透明变体（StatusPill / Banner 背景）=== */
-  --tm-success-bg: rgba(93, 122, 99, 0.08);
-  --tm-success-border: rgba(93, 122, 99, 0.12);
-  --tm-warning-bg: rgba(212, 160, 84, 0.08);
-  --tm-warning-border: rgba(212, 160, 84, 0.12);
-  --tm-error-bg: rgba(199, 91, 74, 0.08);
-  --tm-error-border: rgba(199, 91, 74, 0.12);
-  --tm-info-bg: rgba(107, 157, 173, 0.08);
-  --tm-info-border: rgba(107, 157, 173, 0.12);
+  --tm-success-bg: rgba(52, 168, 83, 0.12);
+  --tm-success-border: rgba(52, 168, 83, 0.22);
+  --tm-warning-bg: rgba(251, 188, 4, 0.16);
+  --tm-warning-border: rgba(251, 188, 4, 0.28);
+  --tm-error-bg: rgba(234, 67, 53, 0.12);
+  --tm-error-border: rgba(234, 67, 53, 0.24);
+  --tm-info-bg: rgba(66, 133, 244, 0.12);
+  --tm-info-border: rgba(66, 133, 244, 0.24);
 
-  /* === 圆角 === */
-  --tm-radius-sm: 8px;
-  --tm-radius-md: 12px;
-  --tm-radius-lg: 16px;
-  --tm-radius-xl: 24px;
+  /* Legacy aliases used by older views */
+  --tm-bg: var(--tm-paper);
+  --tm-bg-strong: var(--tm-mist);
+  --tm-surface: var(--tm-snow);
+  --tm-surface-strong: var(--tm-frost);
+  --tm-surface-inset: var(--tm-mist);
+  --tm-ink: var(--tm-tea);
+  --tm-muted: var(--tm-stone);
+  --tm-accent: var(--tm-moss);
+  --tm-accent-strong: #2f6fd6;
+  --tm-accent-soft: rgba(66, 133, 244, 0.18);
+  --tm-secondary: var(--tm-clay);
+  --tm-warm: var(--tm-clay);
+  --tm-border: rgba(255, 255, 255, 0.48);
+  --tm-border-shadow: rgba(163, 177, 198, 0.22);
+
+  /* Radii */
+  --tm-radius-sm: 12px;
+  --tm-radius-md: 16px;
+  --tm-radius-lg: 20px;
+  --tm-radius-xl: 28px;
   --tm-radius-2xl: 32px;
   --tm-radius-full: 999px;
 
-  /* === 边框 === */
-  --tm-border-hairline: 1px solid rgba(43, 42, 40, 0.04);
-  --tm-border-subtle: 1px solid rgba(43, 42, 40, 0.06);
-  --tm-border-visible: 1px solid rgba(43, 42, 40, 0.16);
+  /* Borders */
+  --tm-border-hairline: 1px solid rgba(255, 255, 255, 0.42);
+  --tm-border-subtle: 1px solid rgba(255, 255, 255, 0.52);
+  --tm-border-visible: 1px solid rgba(95, 99, 104, 0.18);
 
-  /* === 阴影 — Soft UI Raised（按钮）=== */
-  --tm-shadow-raised-sm: 5px 5px 12px rgba(166, 158, 146, 0.25),
-                         -3px -3px 8px rgba(255, 255, 255, 0.85);
-  --tm-shadow-raised-md: 8px 8px 20px rgba(166, 158, 146, 0.3),
-                         -5px -5px 14px rgba(255, 255, 255, 0.9);
+  /* Soft UI shadows */
+  --tm-shadow-raised-sm: -4px -4px 8px rgba(255, 255, 255, 0.82),
+                         4px 4px 8px rgba(163, 177, 198, 0.28);
+  --tm-shadow-raised-md: -8px -8px 16px rgba(255, 255, 255, 0.8),
+                         8px 8px 16px rgba(163, 177, 198, 0.3);
+  --tm-shadow-raised-lg: -10px -10px 20px rgba(255, 255, 255, 0.9),
+                         10px 10px 20px rgba(163, 177, 198, 0.38);
+  --tm-shadow-inset-sm: inset 2px 2px 4px rgba(163, 177, 198, 0.28),
+                        inset -2px -2px 4px rgba(255, 255, 255, 0.78);
+  --tm-shadow-inset-md: inset 3px 3px 6px rgba(163, 177, 198, 0.3),
+                        inset -3px -3px 6px rgba(255, 255, 255, 0.8);
+  --tm-shadow-inset-lg: inset 4px 4px 8px rgba(163, 177, 198, 0.35),
+                        inset -4px -4px 8px rgba(255, 255, 255, 0.86);
+  --tm-shadow-float: -12px -12px 24px rgba(255, 255, 255, 0.82),
+                     12px 12px 24px rgba(163, 177, 198, 0.36);
+  --tm-shadow-card: var(--tm-shadow-raised-md);
+  --tm-shadow-primary: -4px -4px 8px rgba(90, 155, 255, 0.22),
+                       4px 4px 10px rgba(66, 133, 244, 0.4);
+  --tm-shadow: var(--tm-shadow-raised-md);
+  --tm-shadow-1: var(--tm-shadow-raised-sm);
+  --tm-shadow-2: var(--tm-shadow-raised-md);
+  --tm-shadow-3: var(--tm-shadow-float);
+  --tm-focus-ring: 0 0 0 3px rgba(66, 133, 244, 0.2);
 
-  /* === 阴影 — Soft UI Inset（输入框、进度槽）=== */
-  --tm-shadow-inset-sm: inset 3px 3px 6px rgba(166, 158, 146, 0.2),
-                        inset -2px -2px 4px rgba(255, 255, 255, 0.7);
-  --tm-shadow-inset-md: inset 4px 4px 10px rgba(166, 158, 146, 0.25),
-                        inset -3px -3px 8px rgba(255, 255, 255, 0.8);
-
-  /* === 阴影 — Float（浮层）=== */
-  --tm-shadow-float: 10px 10px 30px rgba(166, 158, 146, 0.22),
-                     -6px -6px 20px rgba(255, 255, 255, 0.85);
-
-  /* === 阴影 — Card（卡片轻投影）=== */
-  --tm-shadow-card: 6px 6px 16px rgba(166, 158, 146, 0.18),
-                    -4px -4px 12px rgba(255, 255, 255, 0.75);
-
-  /* === 字体 === */
-  --tm-font-display: "Noto Serif SC", "Songti SC", "Source Han Serif CN", serif;
-  --tm-font-body: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  /* Typography */
+  --tm-font-display: "Nunito", "Avenir Next", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --tm-font-body: "Nunito", "Avenir Next", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --tm-font-mono: "JetBrains Mono", "Fira Code", "SF Mono", monospace;
 
-  /* === 字号 === */
   --tm-text-xs: 0.75rem;
   --tm-text-sm: 0.875rem;
   --tm-text-base: 1rem;
@@ -82,12 +102,11 @@
   --tm-text-3xl: 2.75rem;
   --tm-text-4xl: 3.5rem;
 
-  /* === 行高 === */
   --tm-leading-tight: 1.2;
   --tm-leading-normal: 1.6;
   --tm-leading-relaxed: 1.8;
 
-  /* === 间距（4px 基准）=== */
+  /* Spacing */
   --tm-space-1: 4px;
   --tm-space-2: 8px;
   --tm-space-3: 12px;
@@ -99,25 +118,18 @@
   --tm-space-16: 64px;
   --tm-space-20: 80px;
 
-  /* === 动效 === */
+  /* Motion */
   --tm-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --tm-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --tm-duration-fast: 150ms;
   --tm-duration-normal: 250ms;
   --tm-duration-slow: 400ms;
 
-  /* === 布局 === */
+  /* Layout */
   --tm-content-max-width: 1280px;
   --tm-topbar-height: 72px;
-
-  /* === 断点（仅作文档参考，实际用 @media）=== */
-  /* --breakpoint-sm: 640px; */
-  /* --breakpoint-md: 768px; */
-  /* --breakpoint-lg: 1024px; */
-  /* --breakpoint-xl: 1280px; */
 }
 
-/* === Reduced motion === */
 @media (prefers-reduced-motion: reduce) {
   :root {
     --tm-duration-fast: 0ms;

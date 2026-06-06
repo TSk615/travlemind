@@ -85,14 +85,14 @@ function handleClick(event: MouseEvent) {
 
 /* Primary */
 .tm-btn--primary {
-  background-color: var(--tm-moss);
+  background: linear-gradient(135deg, #5a9bff 0%, var(--tm-moss) 100%);
   color: white;
-  box-shadow: var(--tm-shadow-raised-sm);
+  box-shadow: var(--tm-shadow-primary);
 }
 
 .tm-btn--primary:hover:not(:disabled) {
   transform: translateY(-1px);
-  background-color: var(--tm-moss);
+  background: linear-gradient(135deg, #6ca6ff 0%, var(--tm-moss) 100%);
   color: white;
   filter: brightness(1.08);
   box-shadow: var(--tm-shadow-raised-md);
@@ -107,7 +107,7 @@ function handleClick(event: MouseEvent) {
 .tm-btn--secondary {
   background-color: var(--tm-snow);
   color: var(--tm-tea);
-  border: var(--tm-border-hairline);
+  border: var(--tm-border-subtle);
   box-shadow: var(--tm-shadow-raised-sm);
 }
 
@@ -129,16 +129,18 @@ function handleClick(event: MouseEvent) {
 }
 
 .tm-btn--ghost:hover:not(:disabled) {
-  background-color: var(--tm-mist);
+  background-color: var(--tm-snow);
+  box-shadow: var(--tm-shadow-raised-sm);
 }
 
 .tm-btn--ghost:active:not(:disabled) {
-  background-color: rgba(93, 122, 99, 0.08);
+  background-color: var(--tm-paper);
+  box-shadow: var(--tm-shadow-inset-sm);
 }
 
 /* AI CTA */
 .tm-btn--ai {
-  background-color: var(--tm-moss);
+  background: linear-gradient(135deg, #5a9bff 0%, var(--tm-moss) 55%, var(--tm-clay) 100%);
   color: white;
   box-shadow:
     var(--tm-shadow-raised-sm),
@@ -148,7 +150,7 @@ function handleClick(event: MouseEvent) {
 
 .tm-btn--ai:hover:not(:disabled) {
   transform: translateY(-1px);
-  background-color: var(--tm-moss);
+  background: linear-gradient(135deg, #6ca6ff 0%, var(--tm-moss) 55%, var(--tm-clay) 100%);
   color: white;
   filter: brightness(1.08);
   box-shadow:
@@ -192,8 +194,8 @@ function handleClick(event: MouseEvent) {
 
 /* Focus */
 .tm-btn:focus-visible {
-  outline: 2px solid var(--tm-moss);
-  outline-offset: 2px;
+  outline: 0;
+  box-shadow: var(--tm-shadow-primary), var(--tm-focus-ring);
 }
 
 /* Loading */

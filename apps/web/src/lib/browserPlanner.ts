@@ -137,6 +137,7 @@ async function callModel(config: RuntimeLlmConfig, messages: Array<{ role: strin
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
+        provider_protocol: config.provider_protocol,
         wire_api: wireApi,
         payload
       })
@@ -581,10 +582,10 @@ function normalizeText(value: string | null | undefined): string {
 
 function createTrace(config: RuntimeLlmConfig, note: string, groundedDocs: SearchDocument[]): AgentRunTrace {
   return {
-    provider: "openai-compatible-relay",
+    provider: `${config.provider_protocol}-relay`,
     workflow_id: createWorkflowId(),
     notes: [
-      `Browser routed ${config.wire_api} through /api/v1/llm/proxy for ${config.base_url}.`,
+      `Browser routed ${config.provider_protocol}/${config.wire_api} through /api/v1/llm/proxy for ${config.base_url}.`,
       `Model: ${config.model}.`,
       note
     ],

@@ -190,7 +190,8 @@ def delete_trip(session: Session, trip: Trip) -> None:
 
 def save_trip_itinerary(session: Session, trip: Trip, payload: TripItinerarySaveRequest) -> Trip:
     trip.itinerary_json = payload.itinerary
-    trip.latest_agent_trace_json = payload.latest_agent_trace
+    if payload.latest_agent_trace is not None:
+        trip.latest_agent_trace_json = payload.latest_agent_trace
     session.add(trip)
     session.commit()
     session.refresh(trip)

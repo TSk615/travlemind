@@ -68,7 +68,8 @@ function select(value: string) {
 
 .tm-segmented__item:hover:not(.tm-segmented__item--active) {
   color: var(--tm-tea);
-  background-color: rgba(255, 255, 255, 0.5);
+  background-color: var(--tm-snow);
+  box-shadow: var(--tm-shadow-raised-sm);
 }
 
 .tm-segmented__item--active {
@@ -78,8 +79,8 @@ function select(value: string) {
 }
 
 .tm-segmented__item:focus-visible {
-  outline: 2px solid var(--tm-moss);
-  outline-offset: 2px;
+  outline: 0;
+  box-shadow: var(--tm-shadow-raised-sm), var(--tm-focus-ring);
 }
 
 .tm-segmented__icon {

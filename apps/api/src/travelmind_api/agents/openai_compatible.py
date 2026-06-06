@@ -18,7 +18,7 @@ from travelmind_api.agents.stub import StubOrchestrator
 from travelmind_api.core.security import generate_identifier, generate_workflow_id
 from travelmind_api.services.budgeting import enrich_plan_with_budget
 from travelmind_api.services.llm.client import OpenAICompatibleClient
-from travelmind_api.services.llm.config import LlmConfig
+from travelmind_api.services.llm.config import LlmConfig, normalize_provider_protocol
 from travelmind_api.services.llm.localization import infer_output_locale, is_chinese_output, planning_payload_needs_language_repair
 from travelmind_api.services.llm.parser import LlmPlanningPayload, parse_planning_response
 from travelmind_api.services.llm.prompts import build_planning_prompt_bundle, build_refinement_prompt_bundle
@@ -207,12 +207,18 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
             risks=payload.risks,
             transport_booking_summary=self._coerce_transport_booking_summary(getattr(payload, "transport_booking_summary", None)),
             trace=AgentTrace(
-                provider="openai-compatible",
+                provider=self._trace_provider_name(),
                 workflow_id=generate_workflow_id(),
                 notes=trace_notes,
             ),
         )
         return enrich_plan_with_budget(plan, request)
+
+    def _trace_provider_name(self) -> str:
+        protocol = normalize_provider_protocol(self._llm_config.provider_protocol)
+        if protocol in {"openai", "newapi", "neiapi"}:
+            return "openai-compatible"
+        return f"{protocol}-official"
 
     def _coerce_booking_info(self, raw: object | None) -> BookingInfo | None:
         if raw is None:
@@ -352,14 +358,14 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
     def _build_trace_notes(self, host: str, prompt_version: str, mode: str) -> list[str]:
         if mode == "refine":
             return [
-                f"Refined the itinerary with OpenAI-compatible model {self._llm_config.model}.",
-                f"Sent a {self._llm_config.wire_api} request to {host}.",
+                f"Refined the itinerary with {self._llm_config.provider_protocol} model {self._llm_config.model}.",
+                f"Sent a {self._llm_config.provider_protocol}/{self._llm_config.wire_api} request to {host}.",
                 "Passed the current itinerary back into the model as context so unchanged content is preserved whenever possible.",
                 f"Planning prompt version: {prompt_version}.",
             ]
         return [
-            f"Generated the itinerary with OpenAI-compatible model {self._llm_config.model}.",
-            f"Sent a {self._llm_config.wire_api} request to {host}.",
+            f"Generated the itinerary with {self._llm_config.provider_protocol} model {self._llm_config.model}.",
+            f"Sent a {self._llm_config.provider_protocol}/{self._llm_config.wire_api} request to {host}.",
             f"Refined the LLM draft with structured POI and route references via {self._maps_provider.provider_name}.",
             f"Planning prompt version: {prompt_version}.",
         ]

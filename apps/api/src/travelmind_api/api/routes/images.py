@@ -52,6 +52,7 @@ def _resolve_text_llm_config(user: User) -> LlmConfig | None:
             "api_key": user.llm_api_key,
             "model": user.llm_model,
             "wire_api": user.llm_wire_api,
+            "provider_protocol": getattr(user, "llm_provider_protocol", None),
         }
     )
 

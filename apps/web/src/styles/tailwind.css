@@ -21,6 +21,13 @@
   --color-warning: var(--tm-warning);
   --color-error: var(--tm-error);
   --color-info: var(--tm-info);
+  --color-soft-light-bg: var(--tm-paper);
+  --color-soft-light-surface: var(--tm-snow);
+  --color-soft-light-inset: var(--tm-mist);
+  --color-soft-light-text: var(--tm-tea);
+  --color-soft-light-muted: var(--tm-stone);
+  --color-soft-light-primary: var(--tm-moss);
+  --color-soft-light-secondary: var(--tm-clay);
 
   --radius-sm: var(--tm-radius-sm);
   --radius-md: var(--tm-radius-md);
@@ -32,4 +39,7 @@
   --font-display: var(--tm-font-display);
   --font-body: var(--tm-font-body);
   --font-mono: var(--tm-font-mono);
+
+  --shadow-soft-light-raised: -8px -8px 16px rgba(255, 255, 255, 0.8), 8px 8px 16px rgba(163, 177, 198, 0.3);
+  --shadow-soft-light-inset: inset 3px 3px 6px rgba(163, 177, 198, 0.3), inset -3px -3px 6px rgba(255, 255, 255, 0.8);
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
-import type { AgentRunStep, ItineraryItem, JobTimelineEntry, SearchDocument, TransportBookingSummary, Trip, TripRefineInput } from "@travelmind/shared-types"
+import type { AgentRunStep, GeneratedItinerary, ItineraryDay, ItineraryItem, JobTimelineEntry, SearchDocument, TransportBookingSummary, Trip, TripRefineInput } from "@travelmind/shared-types"
 import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
@@ -10,6 +10,7 @@ import TmMetricCard from "@/components/ui/TmMetricCard.vue"
 import TmAuroraPanel from "@/components/ui/TmAuroraPanel.vue"
 import TmProgressTrack from "@/components/ui/TmProgressTrack.vue"
 import TmField from "@/components/ui/TmField.vue"
+import TmSelect from "@/components/ui/TmSelect.vue"
 import TmTextarea from "@/components/ui/TmTextarea.vue"
 import TmAnchorNav from "@/components/ui/TmAnchorNav.vue"
 import { api, getErrorMessage, type JobRecord } from "@/lib/api"
@@ -85,6 +86,11 @@ const deletePending = ref(false)
 const deleteError = ref<string | null>(null)
 const refinePending = ref(false)
 const refineError = ref<string | null>(null)
+const itineraryEditorOpen = ref(false)
+const itineraryDraft = ref<GeneratedItinerary | null>(null)
+const itinerarySavePending = ref(false)
+const itinerarySaveError = ref<string | null>(null)
+const itinerarySaveNotice = ref<string | null>(null)
 const searchPending = ref(false)
 const searchError = ref<string | null>(null)
 const searchResults = ref<SearchDocument[]>([])
@@ -334,7 +340,7 @@ const tripId = computed(() => String(props.id ?? ""))
 const routeJobId = computed(() => String(props.jobId ?? ""))
 const hasItinerary = computed(() => Boolean(trip.value?.itinerary))
 const isJobRunning = computed(() => activeJob.value?.status === "queued" || activeJob.value?.status === "running")
-const actionLocked = computed(() => generatePending.value || refinePending.value || exportPending.value || deletePending.value || isJobRunning.value)
+const actionLocked = computed(() => generatePending.value || refinePending.value || exportPending.value || deletePending.value || itinerarySavePending.value || isJobRunning.value)
 const imageEnrichInProgress = computed(() => activeJob.value?.type === "trip.image_enrich" && isJobRunning.value)
 const canRetryImageEnrichment = computed(() => Boolean(hasItinerary.value && !imageEnrichPending.value && !imageEnrichInProgress.value))
 const canUseBrowserModel = computed(() => settingsStore.loaded && settingsStore.isConfigured)
@@ -469,6 +475,71 @@ const communityCopy = computed(() =>
         previewTitle: "Publish preview",
         previewDays: "Days",
         previewBudget: "Budget"
+      }
+)
+const itineraryEditorCopy = computed(() =>
+  locale.value === "zh-CN"
+    ? {
+        editAction: "编辑行程",
+        saveAction: "保存行程",
+        savingAction: "保存中...",
+        cancelAction: "取消编辑",
+        addDayAction: "添加一天",
+        addStopAction: "添加行程点",
+        removeDayAction: "删除当天",
+        removeStopAction: "删除",
+        summaryLabel: "行程摘要",
+        risksLabel: "风险提醒",
+        risksHint: "每行一条提醒，可留空。",
+        dayTitleLabel: "当天标题",
+        daySummaryLabel: "当天摘要",
+        dayCostLabel: "当天预算",
+        itemNameLabel: "名称",
+        itemTypeLabel: "类型",
+        itemStartLabel: "开始时间",
+        itemEndLabel: "结束时间",
+        itemLocationLabel: "地点",
+        itemScoreLabel: "评分",
+        itemNoteLabel: "备注",
+        stopLabel: "行程点",
+        saveSuccess: "行程已保存。",
+        saveFailedTitle: "保存行程失败",
+        validationSummary: "请填写行程摘要。",
+        validationDayTitle: "请填写每天的标题。",
+        validationItemName: "请填写每个行程点的名称。",
+        validationItemTime: "请填写每个行程点的开始和结束时间。",
+        validationItemType: "请填写每个行程点的类型。"
+      }
+    : {
+        editAction: "Edit itinerary",
+        saveAction: "Save itinerary",
+        savingAction: "Saving...",
+        cancelAction: "Cancel edit",
+        addDayAction: "Add day",
+        addStopAction: "Add stop",
+        removeDayAction: "Remove day",
+        removeStopAction: "Remove",
+        summaryLabel: "Itinerary summary",
+        risksLabel: "Risk notes",
+        risksHint: "One note per line. Optional.",
+        dayTitleLabel: "Day title",
+        daySummaryLabel: "Day summary",
+        dayCostLabel: "Day budget",
+        itemNameLabel: "Name",
+        itemTypeLabel: "Type",
+        itemStartLabel: "Start time",
+        itemEndLabel: "End time",
+        itemLocationLabel: "Location",
+        itemScoreLabel: "Score",
+        itemNoteLabel: "Note",
+        stopLabel: "Stop",
+        saveSuccess: "Itinerary saved.",
+        saveFailedTitle: "Failed to save itinerary",
+        validationSummary: "Add an itinerary summary.",
+        validationDayTitle: "Add a title for each day.",
+        validationItemName: "Add a name for each itinerary stop.",
+        validationItemTime: "Add start and end times for each itinerary stop.",
+        validationItemType: "Add a type for each itinerary stop."
       }
 )
 const jobTimeline = computed<JobTimelineEntry[]>(() => (Array.isArray(activeJob.value?.timeline_json) ? activeJob.value.timeline_json : []))
@@ -718,6 +789,15 @@ const latestSuccessfulExecutionDescription = computed(() =>
       : "This section shows the trace persisted from the latest successful execution."
 )
 const quickRefineActions = computed(() => copy.value.quickRefineActions)
+const itineraryDraftRisksText = computed(() => (itineraryDraft.value?.risks ?? []).join("\n"))
+const itineraryItemTypeOptions = computed(() => {
+  const defaultTypes = ["sight", "meal", "explore", "transit", "hotel", "photo"]
+  const draftTypes = itineraryDraft.value?.days.flatMap((day) => day.items.map((item) => item.type.trim()).filter(Boolean)) ?? []
+  return Array.from(new Set([...defaultTypes, ...draftTypes])).map((value) => ({
+    value,
+    label: formatItemType(value)
+  }))
+})
 const budgetPanelTitle = computed(() => (locale.value === "zh-CN" ? "精准预算明细面板" : "Precise budget panel"))
 const budgetPanelDescription = computed(() =>
   locale.value === "zh-CN"
@@ -874,6 +954,237 @@ const planningBriefFields = computed(() => {
     { label: copy.value.accommodationLabel, value: fieldValue(trip.value.accommodation_preference) }
   ]
 })
+
+function cloneItinerary(itinerary: GeneratedItinerary): GeneratedItinerary {
+  return JSON.parse(JSON.stringify(itinerary)) as GeneratedItinerary
+}
+
+function splitDraftLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function normalizeDraftAmount(value: string | number | null | undefined): number {
+  const amount = typeof value === "number" ? value : Number(value ?? 0)
+  if (!Number.isFinite(amount)) {
+    return 0
+  }
+  return Math.max(0, Math.round((amount + Number.EPSILON) * 100) / 100)
+}
+
+function normalizeDraftScore(value: string | number | null | undefined): number {
+  const score = typeof value === "number" ? value : Number(value ?? 0)
+  if (!Number.isFinite(score)) {
+    return 0
+  }
+  return Math.min(1, Math.max(0, Math.round((score + Number.EPSILON) * 100) / 100))
+}
+
+function createDraftItemId(dayIndex: number): string {
+  return `manual_day_${dayIndex}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+function createManualItineraryItem(dayIndex: number): ItineraryItem {
+  return {
+    id: createDraftItemId(dayIndex),
+    type: "explore",
+    name: locale.value === "zh-CN" ? "新行程点" : "New stop",
+    start_time: "09:00",
+    end_time: "10:00",
+    location: trip.value?.destination ?? "",
+    score: 0.8,
+    note: ""
+  }
+}
+
+function createManualItineraryDay(dayIndex: number): ItineraryDay {
+  return {
+    day_index: dayIndex,
+    title: locale.value === "zh-CN" ? `第 ${dayIndex} 天` : `Day ${dayIndex}`,
+    summary: "",
+    total_cost: 0,
+    items: [createManualItineraryItem(dayIndex)]
+  }
+}
+
+function renumberItineraryDraftDays() {
+  if (!itineraryDraft.value) {
+    return
+  }
+  itineraryDraft.value.days.forEach((day, index) => {
+    day.day_index = index + 1
+  })
+}
+
+function openItineraryEditor() {
+  if (!trip.value?.itinerary || actionLocked.value) {
+    return
+  }
+  itineraryDraft.value = cloneItinerary(trip.value.itinerary)
+  itinerarySaveError.value = null
+  itinerarySaveNotice.value = null
+  itineraryEditorOpen.value = true
+}
+
+function cancelItineraryEditor() {
+  if (itinerarySavePending.value) {
+    return
+  }
+  itineraryDraft.value = null
+  itinerarySaveError.value = null
+  itineraryEditorOpen.value = false
+}
+
+function updateItineraryDraftRisks(value: string) {
+  if (!itineraryDraft.value) {
+    return
+  }
+  itineraryDraft.value.risks = splitDraftLines(value)
+}
+
+function updateItineraryDraftSummary(value: string) {
+  if (!itineraryDraft.value) {
+    return
+  }
+  itineraryDraft.value.summary = value
+}
+
+function addItineraryDraftDay() {
+  if (!itineraryDraft.value || itinerarySavePending.value) {
+    return
+  }
+  itineraryDraft.value.days.push(createManualItineraryDay(itineraryDraft.value.days.length + 1))
+}
+
+function removeItineraryDraftDay(dayIndex: number) {
+  if (!itineraryDraft.value || itinerarySavePending.value || itineraryDraft.value.days.length <= 1) {
+    return
+  }
+  itineraryDraft.value.days.splice(dayIndex, 1)
+  renumberItineraryDraftDays()
+}
+
+function addItineraryDraftItem(day: ItineraryDay) {
+  if (itinerarySavePending.value) {
+    return
+  }
+  day.items.push(createManualItineraryItem(day.day_index))
+}
+
+function removeItineraryDraftItem(day: ItineraryDay, itemIndex: number) {
+  if (itinerarySavePending.value || day.items.length <= 1) {
+    return
+  }
+  day.items.splice(itemIndex, 1)
+}
+
+function normalizeItineraryDraft(): GeneratedItinerary | null {
+  const draft = itineraryDraft.value
+  if (!draft) {
+    return null
+  }
+
+  const summary = draft.summary.trim()
+  if (!summary) {
+    itinerarySaveError.value = itineraryEditorCopy.value.validationSummary
+    return null
+  }
+
+  const days: ItineraryDay[] = []
+  for (const [dayIndex, day] of draft.days.entries()) {
+    const title = day.title.trim()
+    if (!title) {
+      itinerarySaveError.value = itineraryEditorCopy.value.validationDayTitle
+      return null
+    }
+
+    const items: ItineraryItem[] = []
+    for (const [itemIndex, item] of day.items.entries()) {
+      const type = item.type.trim()
+      const name = item.name.trim()
+      const startTime = item.start_time.trim()
+      const endTime = item.end_time.trim()
+
+      if (!type) {
+        itinerarySaveError.value = itineraryEditorCopy.value.validationItemType
+        return null
+      }
+      if (!name) {
+        itinerarySaveError.value = itineraryEditorCopy.value.validationItemName
+        return null
+      }
+      if (!startTime || !endTime) {
+        itinerarySaveError.value = itineraryEditorCopy.value.validationItemTime
+        return null
+      }
+
+      items.push({
+        ...item,
+        id: item.id.trim() || createDraftItemId(dayIndex + 1),
+        type,
+        name,
+        start_time: startTime,
+        end_time: endTime,
+        location: item.location.trim(),
+        score: normalizeDraftScore(item.score),
+        note: item.note.trim()
+      })
+
+      if (!items[itemIndex].location) {
+        items[itemIndex].location = trip.value?.destination ?? ""
+      }
+    }
+
+    days.push({
+      ...day,
+      day_index: dayIndex + 1,
+      title,
+      summary: day.summary.trim(),
+      total_cost: normalizeDraftAmount(day.total_cost),
+      items
+    })
+  }
+
+  const dayCostTotal = days.reduce((sum, day) => sum + normalizeDraftAmount(day.total_cost), 0)
+  return {
+    ...draft,
+    summary,
+    total_budget_estimate: dayCostTotal > 0 ? normalizeDraftAmount(dayCostTotal) : normalizeDraftAmount(draft.total_budget_estimate),
+    days,
+    risks: splitDraftLines((draft.risks ?? []).join("\n"))
+  }
+}
+
+async function saveItineraryEditor() {
+  if (!trip.value || !itineraryDraft.value) {
+    return
+  }
+
+  itinerarySaveNotice.value = null
+  itinerarySaveError.value = null
+  const normalized = normalizeItineraryDraft()
+  if (!normalized) {
+    return
+  }
+
+  itinerarySavePending.value = true
+  try {
+    const enrichedItinerary = enrichGeneratedItineraryWithBudget(trip.value, normalized)
+    trip.value = await api.saveTripItinerary(tripId.value, {
+      itinerary: enrichedItinerary
+    })
+    itineraryDraft.value = trip.value.itinerary ? cloneItinerary(trip.value.itinerary) : null
+    itineraryEditorOpen.value = false
+    itinerarySaveNotice.value = itineraryEditorCopy.value.saveSuccess
+    schedulePendingImageRefresh()
+  } catch (value) {
+    itinerarySaveError.value = getErrorMessage(value, itineraryEditorCopy.value.saveFailedTitle)
+  } finally {
+    itinerarySavePending.value = false
+  }
+}
 
 function estimateTripDays(start?: string, end?: string): number {
   if (!start || !end) {
@@ -1799,6 +2110,8 @@ onBeforeUnmount(() => {
       <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="refineError" compact />
       <StatePanel v-if="exportError" kind="error" :title="t('tripDetail.exportFailedTitle')" :message="exportError" compact />
       <StatePanel v-if="imageEnrichError" kind="error" :title="copy.enrichImagesActionLabel" :message="imageEnrichError" compact />
+      <StatePanel v-if="itinerarySaveError" kind="error" :title="itineraryEditorCopy.saveFailedTitle" :message="itinerarySaveError" compact />
+      <StatePanel v-if="itinerarySaveNotice" kind="info" :title="itineraryEditorCopy.saveAction" :message="itinerarySaveNotice" compact />
       <StatePanel v-if="deleteError" kind="error" :title="deleteTripFailedTitle" :message="deleteError" compact />
       <StatePanel v-if="communityError" kind="error" :title="communityCopy.title" :message="communityError" compact />
       <StatePanel v-if="communityNotice" kind="info" :title="communityCopy.title" :message="communityNotice" compact />
@@ -1990,83 +2303,236 @@ onBeforeUnmount(() => {
               <p class="tm-detail__section-desc">{{ copy.itineraryPanelDescription }}</p>
             </div>
 
-            <ul v-if="trip.itinerary?.risks?.length" class="tm-detail__risk-list">
-              <li v-for="risk in trip.itinerary.risks" :key="risk">{{ risk }}</li>
-            </ul>
-
-            <!-- Referenced visuals -->
-            <section v-if="citedXhsVisualDocs.length" class="tm-detail__visuals">
-              <span class="tm-detail__badge">{{ locale === "zh-CN" ? "参考风景图" : "Referenced visuals" }}</span>
-              <div class="tm-detail__visual-grid">
-                <article v-for="doc in citedXhsVisualDocs" :key="doc.id" class="tm-detail__visual-card">
-                  <div class="tm-detail__visual-card-header">
-                    <strong>{{ doc.place_name || doc.title }}</strong>
-                    <a class="tm-detail__link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
-                  </div>
-                  <p v-if="doc.author || doc.published_at" class="tm-detail__muted">
-                    {{ [doc.author, doc.published_at ? formatDateTime(doc.published_at) : null].filter(Boolean).join(" · ") }}
-                  </p>
-                  <div class="tm-detail__visual-images">
-                    <img v-for="imageUrl in (doc.image_urls ?? []).slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="doc.title" loading="lazy" />
-                  </div>
-                </article>
-              </div>
-            </section>
-
-            <!-- Day cards -->
-            <div v-if="trip.itinerary" class="tm-detail__days">
-              <article v-for="day in trip.itinerary.days" :key="day.day_index" class="tm-detail__day-card">
-                <div class="tm-detail__day-header">
-                  <div>
-                    <p class="tm-detail__kicker">{{ t('common.daysLabel', { day: day.day_index, title: day.title }) }}</p>
-                    <h3 class="tm-detail__day-title">{{ day.title }}</h3>
-                  </div>
-                  <strong class="tm-detail__day-cost">{{ formatCurrency(day.total_cost) }}</strong>
-                </div>
-                <p class="tm-detail__day-summary">{{ day.summary }}</p>
-
-                <section v-if="day.weather" class="tm-detail__weather">
-                  <span class="tm-detail__badge">{{ locale === "zh-CN" ? "天气" : "Weather" }}</span>
-                  <p>{{ day.weather.summary }}</p>
-                  <ul v-if="day.weather.notes.length" class="tm-detail__list--nested">
-                    <li v-for="note in day.weather.notes" :key="note">{{ note }}</li>
-                  </ul>
-                </section>
-
-                <ol class="tm-detail__items">
-                  <li v-for="item in day.items" :key="item.id" class="tm-detail__item">
-                    <div class="tm-detail__item-time">{{ item.start_time }} - {{ item.end_time }}</div>
-                    <div class="tm-detail__item-body">
-                      <div class="tm-detail__item-topline">
-                        <strong>{{ item.name }}</strong>
-                        <div class="tm-detail__item-badges">
-                          <span class="tm-detail__badge">{{ formatItemType(item.type) }}</span>
-                          <span v-if="formatImagePriorityTier(item.image_priority_tier)" class="tm-detail__badge">{{ formatImagePriorityTier(item.image_priority_tier) }}</span>
-                          <StatusPill :status="formatScore(item.score)" />
-                        </div>
-                      </div>
-                      <p class="tm-detail__muted">{{ copy.locationLabel }} · {{ item.location }}</p>
-                      <p class="tm-detail__item-note">{{ item.note }}</p>
-                      <ul v-if="itemBookingLines(item).length" class="tm-detail__list--nested">
-                        <li v-for="line in itemBookingLines(item)" :key="`${item.id}-${line}`">{{ line }}</li>
-                      </ul>
-                      <a v-if="item.booking_info?.official_booking_url" class="tm-detail__link" :href="item.booking_info.official_booking_url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
-                      <p v-if="item.image_priority_reason" class="tm-detail__muted">{{ item.image_priority_reason }}</p>
-                      <p v-if="formatImageStatus(item.image_status)" class="tm-detail__muted">{{ formatImageStatus(item.image_status) }}</p>
-                      <p v-if="item.image_status === 'failed' && item.image_failure_reason" class="tm-detail__muted">{{ item.image_failure_reason }}</p>
-                      <div v-if="item.image_urls?.length" class="tm-detail__visual-images">
-                        <img v-for="imageUrl in item.image_urls.slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="item.name" loading="lazy" />
-                      </div>
-                      <div v-if="item.image_source_urls?.length" class="tm-detail__chips">
-                        <a v-for="sourceUrl in item.image_source_urls.slice(0, 3)" :key="`${item.id}-${sourceUrl}`" class="tm-detail__link" :href="sourceUrl" target="_blank" rel="noreferrer">{{ copy.imageSourcesLabel ?? "Source" }}</a>
-                      </div>
-                    </div>
-                  </li>
-                </ol>
-              </article>
+            <div v-if="trip.itinerary" class="tm-detail__section-actions">
+              <template v-if="itineraryEditorOpen">
+                <TmButton variant="primary" :disabled="itinerarySavePending" :loading="itinerarySavePending" @click="saveItineraryEditor">
+                  {{ itinerarySavePending ? itineraryEditorCopy.savingAction : itineraryEditorCopy.saveAction }}
+                </TmButton>
+                <TmButton variant="ghost" :disabled="itinerarySavePending" @click="cancelItineraryEditor">
+                  {{ itineraryEditorCopy.cancelAction }}
+                </TmButton>
+              </template>
+              <TmButton v-else variant="secondary" :disabled="actionLocked" @click="openItineraryEditor">
+                {{ itineraryEditorCopy.editAction }}
+              </TmButton>
             </div>
 
-            <StatePanel v-else kind="empty" :title="t('tripDetail.itineraryEmptyTitle')" :message="t('tripDetail.itineraryEmptyMessage')" compact>
+            <template v-if="itineraryEditorOpen && itineraryDraft">
+              <div class="tm-detail__editor">
+                <TmTextarea
+                  id="itinerary-summary"
+                  :model-value="itineraryDraft.summary"
+                  :label="itineraryEditorCopy.summaryLabel"
+                  :rows="3"
+                  required
+                  @update:model-value="updateItineraryDraftSummary"
+                />
+                <TmTextarea
+                  id="itinerary-risks"
+                  :model-value="itineraryDraftRisksText"
+                  :label="itineraryEditorCopy.risksLabel"
+                  :hint="itineraryEditorCopy.risksHint"
+                  :rows="3"
+                  @update:model-value="updateItineraryDraftRisks"
+                />
+
+                <div class="tm-detail__days">
+                  <article v-for="(day, dayIndex) in itineraryDraft.days" :key="`edit-day-${day.day_index}`" class="tm-detail__day-card tm-detail__day-card--editing">
+                    <div class="tm-detail__day-header">
+                      <div>
+                        <p class="tm-detail__kicker">{{ t('common.daysLabel', { day: dayIndex + 1, title: day.title }) }}</p>
+                        <h3 class="tm-detail__day-title">{{ day.title }}</h3>
+                      </div>
+                      <div class="tm-detail__section-actions">
+                        <TmButton variant="ghost" size="sm" :disabled="itinerarySavePending" @click="addItineraryDraftItem(day)">
+                          {{ itineraryEditorCopy.addStopAction }}
+                        </TmButton>
+                        <TmButton variant="ghost" size="sm" :disabled="itinerarySavePending || itineraryDraft.days.length <= 1" @click="removeItineraryDraftDay(dayIndex)">
+                          {{ itineraryEditorCopy.removeDayAction }}
+                        </TmButton>
+                      </div>
+                    </div>
+
+                    <div class="tm-detail__editor-grid">
+                      <TmField
+                        :id="`day-${dayIndex}-title`"
+                        :model-value="day.title"
+                        :label="itineraryEditorCopy.dayTitleLabel"
+                        required
+                        @update:model-value="(v: string | number) => day.title = String(v)"
+                      />
+                      <TmField
+                        :id="`day-${dayIndex}-cost`"
+                        type="number"
+                        :min="0"
+                        :model-value="day.total_cost"
+                        :label="itineraryEditorCopy.dayCostLabel"
+                        @update:model-value="(v: string | number) => day.total_cost = normalizeDraftAmount(v)"
+                      />
+                      <TmTextarea
+                        class="tm-detail__editor-wide"
+                        :id="`day-${dayIndex}-summary`"
+                        :model-value="day.summary"
+                        :label="itineraryEditorCopy.daySummaryLabel"
+                        :rows="3"
+                        @update:model-value="(v: string) => day.summary = v"
+                      />
+                    </div>
+
+                    <ol class="tm-detail__editor-items">
+                      <li v-for="(item, itemIndex) in day.items" :key="`${item.id}-${itemIndex}`" class="tm-detail__editor-item">
+                        <div class="tm-detail__editor-item-header">
+                          <p class="tm-detail__kicker">{{ itineraryEditorCopy.stopLabel }} {{ itemIndex + 1 }}</p>
+                          <TmButton variant="ghost" size="sm" :disabled="itinerarySavePending || day.items.length <= 1" @click="removeItineraryDraftItem(day, itemIndex)">
+                            {{ itineraryEditorCopy.removeStopAction }}
+                          </TmButton>
+                        </div>
+                        <div class="tm-detail__editor-grid tm-detail__editor-grid--item">
+                          <TmField
+                            :id="`day-${dayIndex}-item-${itemIndex}-name`"
+                            :model-value="item.name"
+                            :label="itineraryEditorCopy.itemNameLabel"
+                            required
+                            @update:model-value="(v: string | number) => item.name = String(v)"
+                          />
+                          <TmSelect
+                            :id="`day-${dayIndex}-item-${itemIndex}-type`"
+                            :model-value="item.type"
+                            :label="itineraryEditorCopy.itemTypeLabel"
+                            :options="itineraryItemTypeOptions"
+                            required
+                            @update:model-value="(v: string) => item.type = v"
+                          />
+                          <TmField
+                            :id="`day-${dayIndex}-item-${itemIndex}-start`"
+                            :model-value="item.start_time"
+                            :label="itineraryEditorCopy.itemStartLabel"
+                            required
+                            @update:model-value="(v: string | number) => item.start_time = String(v)"
+                          />
+                          <TmField
+                            :id="`day-${dayIndex}-item-${itemIndex}-end`"
+                            :model-value="item.end_time"
+                            :label="itineraryEditorCopy.itemEndLabel"
+                            required
+                            @update:model-value="(v: string | number) => item.end_time = String(v)"
+                          />
+                          <TmField
+                            :id="`day-${dayIndex}-item-${itemIndex}-location`"
+                            :model-value="item.location"
+                            :label="itineraryEditorCopy.itemLocationLabel"
+                            @update:model-value="(v: string | number) => item.location = String(v)"
+                          />
+                          <TmField
+                            :id="`day-${dayIndex}-item-${itemIndex}-score`"
+                            type="number"
+                            :min="0"
+                            :max="1"
+                            :model-value="item.score"
+                            :label="itineraryEditorCopy.itemScoreLabel"
+                            @update:model-value="(v: string | number) => item.score = normalizeDraftScore(v)"
+                          />
+                          <TmTextarea
+                            class="tm-detail__editor-wide"
+                            :id="`day-${dayIndex}-item-${itemIndex}-note`"
+                            :model-value="item.note"
+                            :label="itineraryEditorCopy.itemNoteLabel"
+                            :rows="3"
+                            @update:model-value="(v: string) => item.note = v"
+                          />
+                        </div>
+                      </li>
+                    </ol>
+                  </article>
+                </div>
+
+                <div class="tm-detail__section-actions">
+                  <TmButton variant="secondary" :disabled="itinerarySavePending" @click="addItineraryDraftDay">
+                    {{ itineraryEditorCopy.addDayAction }}
+                  </TmButton>
+                </div>
+              </div>
+            </template>
+
+            <template v-else>
+              <ul v-if="trip.itinerary?.risks?.length" class="tm-detail__risk-list">
+                <li v-for="risk in trip.itinerary.risks" :key="risk">{{ risk }}</li>
+              </ul>
+
+              <!-- Referenced visuals -->
+              <section v-if="citedXhsVisualDocs.length" class="tm-detail__visuals">
+                <span class="tm-detail__badge">{{ locale === "zh-CN" ? "参考风景图" : "Referenced visuals" }}</span>
+                <div class="tm-detail__visual-grid">
+                  <article v-for="doc in citedXhsVisualDocs" :key="doc.id" class="tm-detail__visual-card">
+                    <div class="tm-detail__visual-card-header">
+                      <strong>{{ doc.place_name || doc.title }}</strong>
+                      <a class="tm-detail__link" :href="doc.url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+                    </div>
+                    <p v-if="doc.author || doc.published_at" class="tm-detail__muted">
+                      {{ [doc.author, doc.published_at ? formatDateTime(doc.published_at) : null].filter(Boolean).join(" · ") }}
+                    </p>
+                    <div class="tm-detail__visual-images">
+                      <img v-for="imageUrl in (doc.image_urls ?? []).slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="doc.title" loading="lazy" />
+                    </div>
+                  </article>
+                </div>
+              </section>
+
+              <!-- Day cards -->
+              <div v-if="trip.itinerary" class="tm-detail__days">
+                <article v-for="day in trip.itinerary.days" :key="day.day_index" class="tm-detail__day-card">
+                  <div class="tm-detail__day-header">
+                    <div>
+                      <p class="tm-detail__kicker">{{ t('common.daysLabel', { day: day.day_index, title: day.title }) }}</p>
+                      <h3 class="tm-detail__day-title">{{ day.title }}</h3>
+                    </div>
+                    <strong class="tm-detail__day-cost">{{ formatCurrency(day.total_cost) }}</strong>
+                  </div>
+                  <p class="tm-detail__day-summary">{{ day.summary }}</p>
+
+                  <section v-if="day.weather" class="tm-detail__weather">
+                    <span class="tm-detail__badge">{{ locale === "zh-CN" ? "天气" : "Weather" }}</span>
+                    <p>{{ day.weather.summary }}</p>
+                    <ul v-if="day.weather.notes.length" class="tm-detail__list--nested">
+                      <li v-for="note in day.weather.notes" :key="note">{{ note }}</li>
+                    </ul>
+                  </section>
+
+                  <ol class="tm-detail__items">
+                    <li v-for="item in day.items" :key="item.id" class="tm-detail__item">
+                      <div class="tm-detail__item-time">{{ item.start_time }} - {{ item.end_time }}</div>
+                      <div class="tm-detail__item-body">
+                        <div class="tm-detail__item-topline">
+                          <strong>{{ item.name }}</strong>
+                          <div class="tm-detail__item-badges">
+                            <span class="tm-detail__badge">{{ formatItemType(item.type) }}</span>
+                            <span v-if="formatImagePriorityTier(item.image_priority_tier)" class="tm-detail__badge">{{ formatImagePriorityTier(item.image_priority_tier) }}</span>
+                            <StatusPill :status="formatScore(item.score)" />
+                          </div>
+                        </div>
+                        <p class="tm-detail__muted">{{ copy.locationLabel }} · {{ item.location }}</p>
+                        <p class="tm-detail__item-note">{{ item.note }}</p>
+                        <ul v-if="itemBookingLines(item).length" class="tm-detail__list--nested">
+                          <li v-for="line in itemBookingLines(item)" :key="`${item.id}-${line}`">{{ line }}</li>
+                        </ul>
+                        <a v-if="item.booking_info?.official_booking_url" class="tm-detail__link" :href="item.booking_info.official_booking_url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+                        <p v-if="item.image_priority_reason" class="tm-detail__muted">{{ item.image_priority_reason }}</p>
+                        <p v-if="formatImageStatus(item.image_status)" class="tm-detail__muted">{{ formatImageStatus(item.image_status) }}</p>
+                        <p v-if="item.image_status === 'failed' && item.image_failure_reason" class="tm-detail__muted">{{ item.image_failure_reason }}</p>
+                        <div v-if="item.image_urls?.length" class="tm-detail__visual-images">
+                          <img v-for="imageUrl in item.image_urls.slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="item.name" loading="lazy" />
+                        </div>
+                        <div v-if="item.image_source_urls?.length" class="tm-detail__chips">
+                          <a v-for="sourceUrl in item.image_source_urls.slice(0, 3)" :key="`${item.id}-${sourceUrl}`" class="tm-detail__link" :href="sourceUrl" target="_blank" rel="noreferrer">{{ copy.imageSourcesLabel ?? "Source" }}</a>
+                        </div>
+                      </div>
+                    </li>
+                  </ol>
+                </article>
+              </div>
+            </template>
+
+            <StatePanel v-if="!trip.itinerary" kind="empty" :title="t('tripDetail.itineraryEmptyTitle')" :message="t('tripDetail.itineraryEmptyMessage')" compact>
               <template #actions>
                 <TmButton variant="primary" :disabled="actionLocked || !canGenerate" @click="generate">{{ t('common.generateItinerary') }}</TmButton>
               </template>
@@ -2394,6 +2860,15 @@ onBeforeUnmount(() => {
 .tm-detail__day-title { font-size: var(--tm-text-xl, 1.25rem); font-weight: 700; color: var(--tm-tea); margin: 0; }
 .tm-detail__day-cost { font-family: var(--tm-font-mono); font-size: var(--tm-text-base); font-weight: 700; color: var(--tm-moss); padding: var(--tm-space-1) var(--tm-space-3); background: rgba(93, 122, 99, 0.08); border-radius: var(--tm-radius-sm); }
 .tm-detail__day-summary { font-size: var(--tm-text-sm); color: var(--tm-stone); margin: 0 0 var(--tm-space-4) 0; }
+
+.tm-detail__editor { display: flex; flex-direction: column; gap: var(--tm-space-6); }
+.tm-detail__day-card--editing { display: flex; flex-direction: column; gap: var(--tm-space-5); }
+.tm-detail__editor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--tm-space-4); }
+.tm-detail__editor-grid--item { align-items: start; }
+.tm-detail__editor-wide { grid-column: 1 / -1; }
+.tm-detail__editor-items { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--tm-space-4); }
+.tm-detail__editor-item { padding: var(--tm-space-4); border-radius: var(--tm-radius-lg); background-color: var(--tm-mist); border: var(--tm-border-subtle); }
+.tm-detail__editor-item-header { display: flex; justify-content: space-between; align-items: center; gap: var(--tm-space-3); margin-bottom: var(--tm-space-4); }
 
 .tm-detail__items { list-style: none; padding: 0; margin: 0; }
 .tm-detail__item {

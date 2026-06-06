@@ -276,6 +276,62 @@ def test_trip_create_requires_explicit_generate_step(client: TestClient):
     assert job["progress_percent"] == 0
 
 
+def test_trip_itinerary_save_without_trace_preserves_latest_trace(client: TestClient):
+    _register(client)
+    trip = _create_trip(client).json()["data"]
+
+    base_itinerary = {
+        "summary": "A calm Kyoto route.",
+        "total_budget_estimate": 1200,
+        "days": [
+            {
+                "day_index": 1,
+                "title": "Temple morning",
+                "summary": "Start early and keep the afternoon open.",
+                "total_cost": 1200,
+                "items": [
+                    {
+                        "id": "item_1",
+                        "type": "sight",
+                        "name": "Kiyomizu-dera",
+                        "start_time": "09:00",
+                        "end_time": "11:00",
+                        "location": "Kyoto",
+                        "score": 0.91,
+                        "note": "Arrive before the bus groups.",
+                    }
+                ],
+            }
+        ],
+        "risks": [],
+    }
+    trace = {
+        "provider": "stub",
+        "workflow_id": "wf_manual_edit_test",
+        "notes": ["Generated before manual edit."],
+        "agent_runs": [],
+        "grounding_documents": [],
+        "transport_guidance": None,
+    }
+
+    initial_save = client.put(
+        f"/api/v1/trips/{trip['id']}/itinerary",
+        json={"itinerary": base_itinerary, "latest_agent_trace": trace},
+    )
+    assert initial_save.status_code == 200, initial_save.text
+    assert initial_save.json()["data"]["latest_agent_trace"]["workflow_id"] == "wf_manual_edit_test"
+
+    edited_itinerary = {**base_itinerary, "summary": "Manual edits keep the prior execution trace."}
+    edited_save = client.put(
+        f"/api/v1/trips/{trip['id']}/itinerary",
+        json={"itinerary": edited_itinerary},
+    )
+    assert edited_save.status_code == 200, edited_save.text
+    payload = edited_save.json()["data"]
+    assert payload["itinerary"]["summary"] == "Manual edits keep the prior execution trace."
+    assert payload["latest_agent_trace"]["workflow_id"] == "wf_manual_edit_test"
+
+
 def test_trip_create_rejects_invalid_date_range(client: TestClient):
     _register(client)
     future_start = (date.today() + timedelta(days=5)).isoformat()

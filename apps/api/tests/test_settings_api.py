@@ -55,6 +55,7 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
     assert initial_response.status_code == 200
     assert initial_response.json()["data"] == {
         "agent": {
+            "provider_protocol": "openai",
             "base_url": None,
             "api_key_masked": None,
             "has_api_key": False,
@@ -64,7 +65,7 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
             "configured": False,
         },
         "search": {
-            "provider": "exa",
+            "provider": "groksearch",
             "transport": "mcp",
             "base_url": None,
             "api_key_masked": None,
@@ -89,16 +90,17 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
         "/api/v1/settings/llm",
         json={
             "agent": {
+                "provider_protocol": "newapi",
                 "base_url": " https://api.example.com/v1/ ",
                 "api_key": raw_api_key,
                 "model": "gpt-5.4-mini",
-                "wire_api": "responses",
+                "wire_api": "chat_completions",
                 "agent_provider": "helloagents",
             },
             "search": {
-                "provider": "exa",
-                "transport": "api",
-                "base_url": " https://search.example.com ",
+                "provider": "groksearch",
+                "transport": "mcp",
+                "base_url": " https://search.example.com/mcp ",
                 "api_key": raw_search_key,
                 "timeout_seconds": 45,
                 "xhs_source_enabled": True,
@@ -115,17 +117,18 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
 
     updated = update_response.json()["data"]
     assert updated["agent"]["base_url"] == "https://api.example.com/v1"
+    assert updated["agent"]["provider_protocol"] == "newapi"
     assert updated["agent"]["model"] == "gpt-5.4-mini"
-    assert updated["agent"]["wire_api"] == "responses"
+    assert updated["agent"]["wire_api"] == "chat_completions"
     assert updated["agent"]["agent_provider"] == "helloagents"
     assert updated["agent"]["configured"] is True
     assert updated["agent"]["has_api_key"] is True
     assert updated["agent"]["api_key_masked"].startswith(raw_api_key[:4])
     assert updated["agent"]["api_key_masked"].endswith(raw_api_key[-4:])
     assert updated["agent"]["api_key_masked"] != raw_api_key
-    assert updated["search"]["provider"] == "exa"
-    assert updated["search"]["transport"] == "api"
-    assert updated["search"]["base_url"] == "https://search.example.com"
+    assert updated["search"]["provider"] == "groksearch"
+    assert updated["search"]["transport"] == "mcp"
+    assert updated["search"]["base_url"] == "https://search.example.com/mcp"
     assert updated["search"]["timeout_seconds"] == 45.0
     assert updated["search"]["xhs_source_enabled"] is True
     assert updated["search"]["configured"] is True
@@ -152,11 +155,12 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
         assert user.llm_base_url == "https://api.example.com/v1"
         assert user.llm_api_key == raw_api_key
         assert user.llm_model == "gpt-5.4-mini"
-        assert user.llm_wire_api == "responses"
+        assert user.llm_wire_api == "chat_completions"
+        assert user.llm_provider_protocol == "newapi"
         assert user.llm_agent_provider == "helloagents"
-        assert user.search_service_provider == "exa"
-        assert user.search_service_transport == "api"
-        assert user.search_service_base_url == "https://search.example.com"
+        assert user.search_service_provider == "groksearch"
+        assert user.search_service_transport == "mcp"
+        assert user.search_service_base_url == "https://search.example.com/mcp"
         assert user.search_service_api_key == raw_search_key
         assert user.search_service_timeout_seconds == 45.0
         assert user.xhs_source_enabled is True

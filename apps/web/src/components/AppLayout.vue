@@ -156,9 +156,12 @@ function navigateToJob() {
   gap: var(--tm-space-6);
   padding: var(--tm-space-4) var(--tm-space-6);
   border-radius: var(--tm-radius-2xl);
-  background-color: var(--tm-snow);
+  border: var(--tm-border-subtle);
+  background-color: rgba(232, 234, 237, 0.9);
   box-shadow: var(--tm-shadow-float);
   margin-bottom: var(--tm-space-4);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
 }
 
 /* Brand */
@@ -176,11 +179,12 @@ function navigateToJob() {
   display: grid;
   place-items: center;
   border-radius: var(--tm-radius-md);
-  background: linear-gradient(135deg, var(--tm-moss), #4a6b50);
+  background: linear-gradient(135deg, #5a9bff 0%, var(--tm-moss) 54%, #77d7a8 100%);
   color: white;
   font-weight: 800;
   font-size: var(--tm-text-sm);
   letter-spacing: 0.08em;
+  box-shadow: var(--tm-shadow-primary);
 }
 
 .tm-topbar__brand-name {
@@ -196,6 +200,10 @@ function navigateToJob() {
   gap: var(--tm-space-1);
   flex: 1;
   justify-content: center;
+  padding: var(--tm-space-1);
+  border-radius: var(--tm-radius-full);
+  background: rgba(216, 220, 227, 0.5);
+  box-shadow: var(--tm-shadow-inset-sm);
 }
 
 .tm-topbar__nav-item {
@@ -205,7 +213,7 @@ function navigateToJob() {
   font-weight: 500;
   color: var(--tm-stone);
   text-decoration: none;
-  border-radius: var(--tm-radius-sm);
+  border-radius: var(--tm-radius-full);
   transition:
     color var(--tm-duration-fast) var(--tm-ease-out),
     background-color var(--tm-duration-fast) var(--tm-ease-out);
@@ -213,12 +221,14 @@ function navigateToJob() {
 
 .tm-topbar__nav-item:hover {
   color: var(--tm-tea);
-  background-color: var(--tm-mist);
+  background-color: var(--tm-snow);
+  box-shadow: var(--tm-shadow-raised-sm);
 }
 
 .tm-topbar__nav-item--active {
   color: var(--tm-moss);
-  background-color: rgba(93, 122, 99, 0.06);
+  background-color: var(--tm-paper);
+  box-shadow: var(--tm-shadow-inset-sm);
 }
 
 .tm-topbar__nav-item--active::after {
@@ -244,15 +254,16 @@ function navigateToJob() {
 .tm-topbar__locale {
   display: inline-flex;
   gap: 2px;
-  padding: 2px;
-  border-radius: var(--tm-radius-sm);
-  background-color: var(--tm-mist);
+  padding: 4px;
+  border-radius: var(--tm-radius-full);
+  background-color: var(--tm-paper);
+  box-shadow: var(--tm-shadow-inset-sm);
 }
 
 .tm-topbar__locale-btn {
   padding: var(--tm-space-1) var(--tm-space-2);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--tm-radius-full);
   background: transparent;
   font-size: var(--tm-text-xs);
   font-weight: 600;
@@ -262,9 +273,9 @@ function navigateToJob() {
 }
 
 .tm-topbar__locale-btn--active {
-  background-color: var(--tm-snow);
-  color: var(--tm-tea);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  background: linear-gradient(135deg, #5a9bff 0%, var(--tm-moss) 100%);
+  color: white;
+  box-shadow: var(--tm-shadow-primary);
 }
 
 .tm-topbar__user {
@@ -280,9 +291,10 @@ function navigateToJob() {
 
 .tm-topbar__logout {
   padding: var(--tm-space-1) var(--tm-space-3);
-  border: var(--tm-border-hairline);
-  border-radius: var(--tm-radius-sm);
-  background: transparent;
+  border: 0;
+  border-radius: var(--tm-radius-full);
+  background: var(--tm-snow);
+  box-shadow: var(--tm-shadow-raised-sm);
   font-size: var(--tm-text-xs);
   font-weight: 600;
   color: var(--tm-stone);
@@ -292,7 +304,8 @@ function navigateToJob() {
 
 .tm-topbar__logout:hover:not(:disabled) {
   color: var(--tm-tea);
-  background-color: var(--tm-mist);
+  background-color: var(--tm-snow);
+  box-shadow: var(--tm-shadow-raised-md);
 }
 
 .tm-topbar__logout:disabled {
@@ -302,8 +315,8 @@ function navigateToJob() {
 
 .tm-topbar__signin {
   padding: var(--tm-space-2) var(--tm-space-4);
-  border-radius: var(--tm-radius-sm);
-  background-color: var(--tm-moss);
+  border-radius: var(--tm-radius-full);
+  background: linear-gradient(135deg, #5a9bff 0%, var(--tm-moss) 100%);
   color: white;
   font-size: var(--tm-text-sm);
   font-weight: 600;
@@ -312,7 +325,8 @@ function navigateToJob() {
 }
 
 .tm-topbar__signin:hover {
-  background-color: #4a6b50;
+  color: white;
+  box-shadow: var(--tm-shadow-primary);
 }
 
 /* Hamburger (mobile only) */

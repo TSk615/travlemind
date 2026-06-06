@@ -33,21 +33,9 @@ class McpClientConfig:
         api_key = (get_env("TRAVELMIND_MCP_API_KEY") or "").strip() or None
         timeout_raw = (get_env("TRAVELMIND_MCP_TIMEOUT_SECONDS") or "30").strip()
         if not base_url:
-            public_api_url = (get_env("TRAVELMIND_PUBLIC_API_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
-            local_server_key = (get_env("TRAVELMIND_MCP_SERVER_API_KEY") or "").strip() or None
-            exa_pool_base = (get_env("TRAVELMIND_EXA_POOL_BASE_URL") or "").strip()
-            exa_pool_api_key = (get_env("TRAVELMIND_EXA_POOL_API_KEY") or "").strip()
-            if public_api_url and local_server_key and exa_pool_base and exa_pool_api_key:
-                base_url = f"{public_api_url}/mcp/"
-                api_key = local_server_key
-        if not base_url:
             return None
-        parsed = urlparse(base_url)
-        has_query_key = any(key == "exaApiKey" and value for key, value in parse_qsl(parsed.query, keep_blank_values=True))
         query_api_key_name = (get_env("TRAVELMIND_MCP_QUERY_API_KEY_NAME") or "").strip() or None
-        if query_api_key_name is None and has_query_key:
-            query_api_key_name = "exaApiKey"
-        if api_key is None and not has_query_key:
+        if api_key is None and query_api_key_name is None:
             return None
         try:
             timeout_seconds = float(timeout_raw)
@@ -147,13 +135,12 @@ class McpHttpClient:
         for candidate_url in self._candidate_urls():
             attempted_urls.append(candidate_url)
             try:
-                print(f"[MCP-HTTP] POST {candidate_url} method={payload.get('method')}")
                 if self._http_client is not None:
                     response = self._http_client.post(candidate_url, headers=headers, json=payload)
                 else:
                     with httpx.Client(timeout=self._config.timeout_seconds, follow_redirects=True) as client:
                         response = client.post(candidate_url, headers=headers, json=payload)
-                print(f"[MCP-HTTP] POST {candidate_url} -> {response.status_code}")
+                _LOGGER.debug("MCP HTTP POST %s method=%s status=%s", candidate_url, payload.get("method"), response.status_code)
                 if response.status_code in {404, 405, 421}:
                     last_response = response
                     continue

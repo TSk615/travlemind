@@ -30,20 +30,25 @@ withDefaults(
 /* Info card */
 .tm-card--info {
   background-color: var(--tm-snow);
-  border: var(--tm-border-hairline);
+  border: var(--tm-border-subtle);
   box-shadow: var(--tm-shadow-card);
 }
 
 /* Action card */
 .tm-card--action {
-  background-color: var(--tm-mist);
+  background-color: var(--tm-paper);
   border: var(--tm-border-subtle);
+  box-shadow: var(--tm-shadow-inset-sm);
 }
 
 /* Highlight card (AI results) */
 .tm-card--highlight {
-  background: linear-gradient(135deg, rgba(93, 122, 99, 0.08), rgba(201, 143, 107, 0.06));
+  background:
+    radial-gradient(circle at 86% 12%, rgba(66, 133, 244, 0.16), transparent 12rem),
+    radial-gradient(circle at 12% 92%, rgba(52, 168, 83, 0.13), transparent 12rem),
+    var(--tm-snow);
   border: var(--tm-border-subtle);
+  box-shadow: var(--tm-shadow-card);
 }
 
 /* Hoverable */

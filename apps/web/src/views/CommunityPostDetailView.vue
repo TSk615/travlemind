@@ -14,6 +14,7 @@ const post = ref<CommunityPostDetail | null>(null)
 const loading = ref(true)
 const error = ref<string | null>(null)
 const { locale } = useI18n()
+const backLabel = computed(() => (locale.value === "zh-CN" ? "返回社区" : "Back to community"))
 
 const copy = computed(() =>
   locale.value === "zh-CN"
@@ -136,6 +137,10 @@ watch(
 
 <template>
   <section class="page-grid community-page">
+    <div class="community-detail-nav">
+      <RouterLink class="button-link" to="/community">{{ backLabel }}</RouterLink>
+    </div>
+
     <StatePanel v-if="loading" kind="loading" :title="copy.loadingTitle" :message="copy.loadingMessage" />
 
     <StatePanel

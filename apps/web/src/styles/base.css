@@ -32,13 +32,15 @@ body {
   font-size: var(--tm-text-base);
   line-height: var(--tm-leading-normal);
   color: var(--tm-tea);
-  background-color: var(--tm-paper);
-  background-image:
-    radial-gradient(at 0% 0%, rgba(93, 122, 99, 0.04) 0px, transparent 50%),
-    radial-gradient(at 100% 0%, rgba(166, 158, 180, 0.03) 0px, transparent 50%);
+  background:
+    radial-gradient(circle at 10% 10%, rgba(255, 255, 255, 0.75), transparent 26rem),
+    radial-gradient(circle at 90% 4%, rgba(66, 133, 244, 0.12), transparent 24rem),
+    radial-gradient(circle at 75% 82%, rgba(52, 168, 83, 0.1), transparent 24rem),
+    var(--tm-paper);
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: geometricPrecision;
 }
 
 #app {
@@ -89,14 +91,15 @@ a:hover {
 
 /* --- Focus visible --- */
 :focus-visible {
-  outline: 2px solid var(--tm-moss);
+  outline: 0;
+  box-shadow: var(--tm-focus-ring);
   outline-offset: 2px;
   border-radius: var(--tm-radius-sm);
 }
 
 /* --- Selection --- */
 ::selection {
-  background: rgba(93, 122, 99, 0.15);
+  background: rgba(66, 133, 244, 0.22);
   color: var(--tm-tea);
 }
 

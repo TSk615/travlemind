@@ -10,8 +10,11 @@ import type {
   ImageGenerationStartResponse,
   ImagePromptComposeInput,
   ImagePromptComposeResult,
+  LlmModelsResponse,
+  LlmProviderProtocol,
   LlmSettings,
   LlmSettingsInput,
+  LlmWireApi,
   PromptTrendResponse,
   SearchDocument,
   Trip,
@@ -74,6 +77,16 @@ export interface TripExportPayload {
 }
 
 export interface JobRecord extends ExportJob {}
+
+export interface LlmConnectionTestResponse {
+  provider_protocol: LlmProviderProtocol
+  base_url: string
+  model: string
+  wire_api: LlmWireApi
+  ok: boolean
+  reply: string
+  latency_ms: number
+}
 
 interface EnvelopeError {
   code: string
@@ -321,7 +334,7 @@ export const api = {
       method: "DELETE"
     })
   },
-  saveTripItinerary(id: string, payload: { itinerary: GeneratedItinerary; latest_agent_trace: AgentRunTrace }) {
+  saveTripItinerary(id: string, payload: { itinerary: GeneratedItinerary; latest_agent_trace?: AgentRunTrace | null }) {
     return request<Trip>(`/api/v1/trips/${id}/itinerary`, {
       method: "PUT",
       body: JSON.stringify(payload)
@@ -378,6 +391,18 @@ export const api = {
   updateLlmSettings(payload: LlmSettingsInput) {
     return request<LlmSettings>("/api/v1/settings/llm", {
       method: "PUT",
+      body: JSON.stringify(payload)
+    })
+  },
+  listLlmModels(payload: { provider_protocol?: string; base_url?: string; api_key?: string; timeout_seconds?: number }) {
+    return request<LlmModelsResponse>("/api/v1/llm/models", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    })
+  },
+  testLlmConnection(payload: { provider_protocol?: string; base_url?: string; api_key?: string; model?: string; wire_api?: string; timeout_seconds?: number }) {
+    return request<LlmConnectionTestResponse>("/api/v1/llm/test", {
+      method: "POST",
       body: JSON.stringify(payload)
     })
   },

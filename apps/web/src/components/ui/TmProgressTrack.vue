@@ -62,7 +62,7 @@ const percentage = computed(() => Math.min(100, Math.max(0, (props.value / props
 
 .tm-progress__track {
   width: 100%;
-  height: 8px;
+  height: 10px;
   border-radius: var(--tm-radius-full);
   background-color: var(--tm-mist);
   box-shadow: var(--tm-shadow-inset-sm);
@@ -76,7 +76,7 @@ const percentage = computed(() => Math.min(100, Math.max(0, (props.value / props
 }
 
 .tm-progress__fill--default {
-  background-color: var(--tm-moss);
+  background: linear-gradient(90deg, #5a9bff, var(--tm-moss), var(--tm-success));
 }
 
 .tm-progress__fill--aurora {

@@ -2,6 +2,7 @@ import { defineStore } from "pinia"
 import type {
   ImageProvider,
   LlmAgentProvider,
+  LlmProviderProtocol,
   LlmSettings,
   LlmSettingsInput,
   LlmWireApi,
@@ -11,6 +12,7 @@ import type {
 import { api, getErrorMessage } from "@/lib/api"
 
 export interface RuntimeLlmConfig {
+  provider_protocol: LlmProviderProtocol
   base_url: string
   model: string
   wire_api: LlmWireApi
@@ -38,6 +40,22 @@ function normalizeWireApi(value: string | null | undefined): LlmWireApi {
   return value === "chat_completions" ? "chat_completions" : "responses"
 }
 
+function normalizeProviderProtocol(value: string | null | undefined): LlmProviderProtocol {
+  if (value === "newapi") {
+    return "newapi"
+  }
+  if (value === "gemini") {
+    return "gemini"
+  }
+  if (value === "claude") {
+    return "claude"
+  }
+  if (value === "neiapi") {
+    return "neiapi"
+  }
+  return "openai"
+}
+
 function normalizeAgentProvider(value: string | null | undefined): LlmAgentProvider {
   return value === "helloagents" ? "helloagents" : "standard"
 }
@@ -50,7 +68,7 @@ function normalizeSearchProvider(value: string | null | undefined): SearchServic
   if (value === "tavily") {
     return "tavily"
   }
-  return value === "groksearch" ? "groksearch" : "exa"
+  return "groksearch"
 }
 
 function normalizeImageProvider(value: string | null | undefined): ImageProvider {
@@ -73,6 +91,7 @@ function normalizeSettings(settings: LlmSettings): LlmSettings {
   return {
     agent: {
       ...settings.agent,
+      provider_protocol: normalizeProviderProtocol(settings.agent.provider_protocol),
       wire_api: normalizeWireApi(settings.agent.wire_api),
       agent_provider: normalizeAgentProvider(settings.agent.agent_provider)
     },
@@ -97,6 +116,7 @@ function buildRuntimeConfig(settings: LlmSettings | null): RuntimeLlmConfig | nu
   }
 
   return {
+    provider_protocol: normalizeProviderProtocol(settings?.agent.provider_protocol),
     base_url,
     model,
     wire_api: normalizeWireApi(settings?.agent.wire_api),
@@ -135,6 +155,7 @@ export const useLlmSettingsStore = defineStore("llm-settings", {
     resolvedConfig: (state) => state.runtimeConfig,
     resolvedImageConfig: (state) => state.imageRuntimeConfig,
     agentProvider: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider),
+    providerProtocol: (state) => normalizeProviderProtocol(state.settings?.agent.provider_protocol),
     usesHelloAgents: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider) === "helloagents"
   },
   actions: {

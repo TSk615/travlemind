@@ -1250,7 +1250,6 @@ function formatPrettyJson(value: unknown): string {
             <select v-model="searchForm.provider">
               <option value="groksearch">GrokSearch</option>
               <option value="tavily">Tavily</option>
-              <option value="exa">Exa</option>
             </select>
           </label>
           <label>

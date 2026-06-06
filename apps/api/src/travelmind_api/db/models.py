@@ -24,6 +24,7 @@ class User(Base):
     llm_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     llm_wire_api: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    llm_provider_protocol: Mapped[str | None] = mapped_column(String(64), nullable=True)
     llm_agent_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     image_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     image_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -187,6 +188,8 @@ def _ensure_sqlite_user_columns() -> None:
             statements.append("ALTER TABLE users ADD COLUMN llm_model VARCHAR(255)")
         if "llm_wire_api" not in existing_columns:
             statements.append("ALTER TABLE users ADD COLUMN llm_wire_api VARCHAR(64)")
+        if "llm_provider_protocol" not in existing_columns:
+            statements.append("ALTER TABLE users ADD COLUMN llm_provider_protocol VARCHAR(64)")
         if "llm_agent_provider" not in existing_columns:
             statements.append("ALTER TABLE users ADD COLUMN llm_agent_provider VARCHAR(64)")
         if "image_base_url" not in existing_columns:
