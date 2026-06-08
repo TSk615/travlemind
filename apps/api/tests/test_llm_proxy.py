@@ -606,23 +606,68 @@ def test_search_images_proxy_extracts_image_urls_via_web_fetch(client, monkeypat
     assert payload["fetch_payloads"][0]["url"] == "https://groksearch.example.test/kyoto-photo-spot"
 
 
-def test_tavily_images_proxy_returns_top_level_and_result_images(client, monkeypatch):
+def test_search_images_proxy_limits_tavily_image_domains(client, monkeypatch):
     _register(client)
 
     import travelmind_api.api.routes.llm as llm_route
 
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(llm_route.ConfiguredSearchGateway, "available_tools", lambda self: {"search"})
+
+    def fake_call_operation(self, name, arguments):
+        del self
+        captured["name"] = name
+        captured["arguments"] = arguments
+        return {
+            "images": [
+                {"url": "https://cdn.pixabay.com/photo/test.jpg", "description": "Pixabay image"}
+            ],
+            "results": [],
+        }
+
+    monkeypatch.setattr(llm_route.ConfiguredSearchGateway, "call_operation", fake_call_operation)
+
+    response = client.post(
+        "/api/v1/llm/search-images-proxy",
+        json={
+            "provider": "tavily",
+            "transport": "api",
+            "base_url": "https://api.tavily.com/search",
+            "api_key": "tvly-test",
+            "query": "Guangzhou Tower",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert captured["name"] == "search"
+    assert captured["arguments"]["include_images"] is True
+    assert captured["arguments"]["include_domains"] == ["hk.trip.com", "pixabay.com", "pexels.com"]
+    assert payload["arguments"]["include_domains"] == ["hk.trip.com", "pixabay.com", "pexels.com"]
+
+
+def test_tavily_images_proxy_returns_top_level_and_result_images(client, monkeypatch):
+    _register(client)
+
+    import travelmind_api.api.routes.llm as llm_route
+    calls: list[list[str]] = []
+
     class FakeResponse:
+        def __init__(self, domain: str):
+            self.domain = domain
+
         def json(self):
+            domain_slug = self.domain.replace(".", "-")
             return {
                 "images": [
-                    {"url": "https://cdn.example.test/top-1.jpg", "description": "Top image"}
+                    {"url": f"https://cdn.example.test/{domain_slug}-top-1.jpg", "description": "Top image"}
                 ],
                 "results": [
                     {
                         "title": "Wenguang Tower",
                         "url": "https://example.test/wenguang",
                         "images": [
-                            {"url": "https://cdn.example.test/result-1.jpg", "description": "Result image"}
+                            {"url": f"https://cdn.example.test/{domain_slug}-result-1.jpg", "description": "Result image"}
                         ],
                     }
                 ],
@@ -641,7 +686,8 @@ def test_tavily_images_proxy_returns_top_level_and_result_images(client, monkeyp
         def post(self, endpoint, headers=None, json=None):
             assert endpoint == "https://api.tavily.com/search"
             assert json["include_images"] is True
-            return FakeResponse()
+            calls.append(json["include_domains"])
+            return FakeResponse(json["include_domains"][0])
 
     monkeypatch.setattr(llm_route.httpx, "Client", FakeClient)
 
@@ -660,5 +706,157 @@ def test_tavily_images_proxy_returns_top_level_and_result_images(client, monkeyp
     assert response.status_code == 200, response.text
     payload = response.json()["data"]
     assert payload["provider"] == "tavily"
-    assert payload["top_level_images"][0]["url"] == "https://cdn.example.test/top-1.jpg"
-    assert payload["result_images"][0]["url"] == "https://cdn.example.test/result-1.jpg"
+    assert calls == [["hk.trip.com"], ["pixabay.com"], ["pexels.com"]]
+    assert payload["request_mode"] == "per_domain"
+    assert [entry["domain"] for entry in payload["domain_results"]] == ["hk.trip.com", "pixabay.com", "pexels.com"]
+    assert payload["image_candidates"][0]["source"] == "top_level"
+    assert payload["image_candidates"][0]["source_domain"] == "hk.trip.com"
+    assert payload["image_candidates"][0]["url"] == "https://cdn.example.test/hk-trip-com-top-1.jpg"
+    assert payload["image_candidates"][1]["source"] == "result"
+    assert payload["image_candidates"][1]["url"] == "https://cdn.example.test/hk-trip-com-result-1.jpg"
+    assert payload["top_level_images"][0]["url"] == "https://cdn.example.test/hk-trip-com-top-1.jpg"
+    assert payload["result_images"][0]["url"] == "https://cdn.example.test/hk-trip-com-result-1.jpg"
+
+
+def test_tavily_images_proxy_reuses_saved_tavily_key_when_request_omits_key(client, monkeypatch):
+    _register(client)
+    settings_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "search": {
+                "provider": "tavily",
+                "transport": "api",
+                "base_url": "https://api.tavily.com/search",
+                "api_key": "saved-tvly-key",
+                "timeout_seconds": 18,
+            }
+        },
+    )
+    assert settings_response.status_code == 200, settings_response.text
+
+    import travelmind_api.api.routes.llm as llm_route
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def json(self):
+            return {"images": [], "results": []}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, endpoint, headers=None, json=None):
+            captured["authorization"] = (headers or {}).get("Authorization")
+            captured["payload"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(llm_route.httpx, "Client", FakeClient)
+
+    response = client.post(
+        "/api/v1/llm/tavily-images-proxy",
+        json={
+            "base_url": "https://api.tavily.com/search",
+            "query": "Guangzhou Tower",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["authorization"] == "Bearer saved-tvly-key"
+    assert captured["payload"]["include_images"] is True
+
+
+def test_tavily_images_proxy_does_not_reuse_saved_groksearch_key(client):
+    _register(client)
+    settings_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "search": {
+                "provider": "groksearch",
+                "transport": "mcp",
+                "base_url": "https://groksearch.example.test/mcp",
+                "api_key": "saved-grok-bridge-key",
+                "timeout_seconds": 18,
+            }
+        },
+    )
+    assert settings_response.status_code == 200, settings_response.text
+
+    response = client.post(
+        "/api/v1/llm/tavily-images-proxy",
+        json={
+            "base_url": "https://api.tavily.com/search",
+            "query": "Guangzhou Tower",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "tavily_api_key_required"
+
+
+def test_tavily_images_proxy_limits_returned_image_candidates(client, monkeypatch):
+    _register(client)
+
+    import travelmind_api.api.routes.llm as llm_route
+
+    class FakeResponse:
+        def __init__(self, domain: str):
+            self.domain = domain
+
+        def json(self):
+            domain_slug = self.domain.replace(".", "-")
+            return {
+                "images": [
+                    {"url": f"https://cdn.example.test/{domain_slug}-top-{index}.jpg", "description": f"Top image {index}"}
+                    for index in range(30)
+                ],
+                "results": [],
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, endpoint, headers=None, json=None):
+            del endpoint, headers
+            return FakeResponse(json["include_domains"][0])
+
+    monkeypatch.setattr(llm_route.httpx, "Client", FakeClient)
+
+    response = client.post(
+        "/api/v1/llm/tavily-images-proxy",
+        json={
+            "base_url": "https://api.tavily.com/search",
+            "api_key": "tvly-test",
+            "query": "Guangzhou Tower",
+            "search_depth": "basic",
+            "max_results": 8,
+            "include_image_descriptions": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert len(payload["image_candidates"]) == 12
+    assert payload["image_candidates_total"] == 90
+    assert payload["image_candidates_truncated"] is True
+    assert len(payload["top_level_images"]) == 12
+    assert payload["top_level_images_total"] == 90
+    assert payload["top_level_images_truncated"] is True
+    assert payload["domain_results"][0]["images_total_count"] == 30
+    assert payload["domain_results"][0]["images_returned_count"] == 4
+    assert len(payload["raw_result"]["domain_results"][0]["result"]["images"]) == 4
+    assert payload["raw_result"]["domain_results"][0]["result"]["images_total_count"] == 30
+    assert payload["raw_result"]["domain_results"][0]["result"]["images_truncated"] is True

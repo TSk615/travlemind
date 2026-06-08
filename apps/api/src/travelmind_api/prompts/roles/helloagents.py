@@ -8,7 +8,7 @@ from travelmind_api.prompts.types import RolePromptSpec
 BRIEF_PARSER_PROMPT_VERSION = "helloagents.brief_parser.v2"
 ATTRACTION_SPECIALIST_PROMPT_VERSION = "helloagents.attraction_specialist.v2"
 WEATHER_SPECIALIST_PROMPT_VERSION = "helloagents.weather_specialist.v3"
-HOTEL_SPECIALIST_PROMPT_VERSION = "helloagents.hotel_specialist.v2"
+HOTEL_SPECIALIST_PROMPT_VERSION = "helloagents.hotel_specialist.v3"
 TRANSPORT_SPECIALIST_PROMPT_VERSION = "helloagents.transport_specialist.v1"
 ITINERARY_PLANNER_PROMPT_VERSION = "helloagents.itinerary_planner.v2"
 IMAGE_CURATOR_PROMPT_VERSION = "helloagents.image_curator.v1"
@@ -75,16 +75,44 @@ WEATHER_OUTPUT_SCHEMA: dict[str, Any] = {
 
 HOTEL_OUTPUT_SCHEMA: dict[str, Any] = {
     "recommended_areas": ["Downtown Kyoto", "Higashiyama"],
+    "final_recommended_hotel": {
+        "name": "Downtown Kyoto Hotel",
+        "area": "Downtown Kyoto",
+        "hotel_type": "quiet boutique hotel",
+        "reason": "Best fit for the user's preferred hotel style, route plan, review signals, and budget.",
+        "price_hint": "Current-search snapshot for the travel dates: around 18,000 to 24,000 JPY per night before taxes.",
+        "price_checked_at": "Use the search result timestamp/date when visible; otherwise say current search snapshot.",
+        "price_valid_for": "2026-04-14 to 2026-04-15, two travelers",
+        "review_score": "4.5/5 or unknown",
+        "review_count": "1,000+ reviews or unknown",
+        "review_summary": "Strong location and cleanliness feedback; rooms may be compact.",
+        "preference_match": "Matches quiet boutique preference while staying close to transit and food.",
+        "booking_confidence": "medium",
+        "caveats": ["Prices are dynamic; re-check before booking."],
+    },
     "hotel_candidates": [
         {
             "name": "Downtown Kyoto Hotel",
             "area": "Downtown Kyoto",
+            "hotel_type": "quiet boutique hotel",
             "reason": "Balanced access to food and transit.",
             "price_hint": "moderate",
+            "price_checked_at": "current search snapshot",
+            "price_valid_for": "trip dates, two travelers",
+            "review_score": "4.5/5 or unknown",
+            "review_count": "1,000+ reviews or unknown",
+            "review_summary": "Strong location and cleanliness feedback.",
+            "preference_match": "Fits the requested hotel style.",
+            "booking_confidence": "medium",
+            "caveats": ["Confirm refundable rate and room size before booking."],
         }
     ],
     "stay_strategy": ["Prefer a transit-friendly base that minimizes cross-city transfers."],
     "budget_notes": ["Keep the hotel near the target nightly budget band."],
+    "price_timeliness_notes": ["Hotel prices are dynamic; use only date-relevant price signals and say when the signal is stale or missing."],
+    "review_notes": ["Prefer hotels with strong recent cleanliness, location, and quietness feedback over generic area advice."],
+    "preference_match_notes": ["Explain how the final hotel matches the user's requested hotel type."],
+    "hotel_risks": ["Avoid recommending only an area; name one concrete hotel and state uncertainty when price data is incomplete."],
 }
 
 TRANSPORT_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -213,7 +241,13 @@ def build_hotel_specialist_prompt() -> RolePromptSpec:
     system_prompt = (
         "You are TravelMind Hotel Specialist. Return one hotel-recommendation JSON object only. "
         "You will receive structured MCP search results in the input payload under tool_results. "
-        "Focus on stay areas, candidate hotels, and stay strategy that reduce transfer burden and match the trip style. "
+        "You must choose exactly one final recommended hotel in final_recommended_hotel; do not stop at recommending only a district, area, or hotel zone. "
+        "The final hotel must be a concrete hotel name, unless the input has no usable hotel evidence; in that case choose the best available candidate and clearly mark uncertainty in caveats. "
+        "Use the user's accommodation preference as a hard ranking signal: hotel type, atmosphere, service level, quietness, family/couple fit, and convenience must match the requested style. "
+        "Evaluate review quality, not just location: summarize recent cleanliness, location, noise, service, room-size, and value-for-money signals when available. "
+        "Treat price freshness as mandatory: price_hint must say whether it is for the requested travel dates or only a current-search snapshot, and price_checked_at / price_valid_for must explain the time validity. "
+        "Avoid invented precision. If prices, ratings, or review counts are missing or stale, say unknown or dynamic instead of making them up. "
+        "Focus on one bookable hotel choice, backup candidates, review-based tradeoffs, and stay strategy that reduce transfer burden and match the trip style. "
         f"Use this schema shape: {json.dumps(HOTEL_OUTPUT_SCHEMA, ensure_ascii=True)}"
     )
     return RolePromptSpec(version=HOTEL_SPECIALIST_PROMPT_VERSION, system_prompt=system_prompt)

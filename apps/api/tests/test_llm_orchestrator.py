@@ -2018,11 +2018,40 @@ def test_helloagents_extract_urls_from_text_payload():
 
     urls = orchestrator._extract_urls_from_search_result(
         {
-            "text": "Title: Example\nURL: https://example.com/one\nMore text https://example.com/two?ref=travel."
+            "text": "Title: Example\nURL: https://example.com/one\nMore text https://example.com/two?ref=travel.",
+            "content": "Markdown citation [[1]](https://example.com/dirty)[[1]] should be cleaned.",
         }
     )
 
-    assert urls == ["https://example.com/one", "https://example.com/two?ref=travel"]
+    assert urls == ["https://example.com/one", "https://example.com/two?ref=travel", "https://example.com/dirty"]
+
+
+def test_helloagents_role_prompt_payload_strips_tool_url_metadata():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    raw_payload = {
+        "trip_request": {"destination": "Kyoto"},
+        "tool_results": {
+            "citations": ["https://sources.example.test/noise"],
+            "crawl_urls": ["https://stay.example.test/hotel-alpha"],
+            "search": {
+                "sources": [{"url": "https://stay.example.test/hotel-alpha", "title": "Hotel Alpha"}],
+                "content": "Hotel Alpha has strong reviews: https://stay.example.test/hotel-alpha",
+            },
+        },
+    }
+
+    prompt_payload = orchestrator._build_role_prompt_payload(raw_payload)
+    serialized_tool_results = json.dumps(prompt_payload["tool_results"], ensure_ascii=False)
+
+    assert "citations" not in prompt_payload["tool_results"]
+    assert "crawl_urls" not in prompt_payload["tool_results"]
+    assert "https://" not in serialized_tool_results
+    assert "Hotel Alpha" in serialized_tool_results
+    assert raw_payload["tool_results"]["citations"] == ["https://sources.example.test/noise"]
 
 
 def test_helloagents_orchestrator_warns_when_chinese_final_payload_is_not_localized(monkeypatch):

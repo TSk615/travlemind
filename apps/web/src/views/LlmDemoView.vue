@@ -119,13 +119,26 @@ interface SearchImageProbeEnvelope {
 
 interface TavilyImageItem {
   url?: string
+  title?: string | null
+  source_domain?: string | null
   description?: string | null
 }
 
 interface TavilyResultImageItem {
   result_title: string
   result_url: string
+  source_domain?: string | null
   url: string
+  description?: string | null
+}
+
+interface TavilyImageCandidateItem {
+  source: "top_level" | "result" | string
+  source_domain?: string | null
+  url: string
+  title?: string | null
+  result_title?: string | null
+  result_url?: string | null
   description?: string | null
 }
 
@@ -134,8 +147,15 @@ interface TavilyImagesProbeResult {
   base_url: string
   request: Record<string, unknown>
   raw_result: Record<string, unknown>
+  image_candidates?: TavilyImageCandidateItem[]
+  image_candidates_total?: number
+  image_candidates_truncated?: boolean
   top_level_images: TavilyImageItem[]
+  top_level_images_total?: number
+  top_level_images_truncated?: boolean
   result_images: TavilyResultImageItem[]
+  result_images_total?: number
+  result_images_truncated?: boolean
 }
 
 interface TavilyImagesProbeEnvelope {
@@ -217,6 +237,7 @@ const enCopy = {
   tavilyDescription: "Call Tavily /search directly with include_images enabled and inspect the returned image structures.",
   tavilyBaseUrlLabel: "Tavily base URL",
   tavilyApiKeyLabel: "Tavily API key",
+  tavilySavedKeyHint: "Leave blank to reuse your saved Tavily search key.",
   tavilyDepthLabel: "Search depth",
   tavilyMaxResultsLabel: "Max results",
   tavilyIncludeDescriptionsLabel: "Include image descriptions",
@@ -225,6 +246,8 @@ const enCopy = {
   clearTavily: "Clear Tavily probe",
   tavilyResultsTitle: "Tavily image results",
   tavilyResultsEmpty: "No Tavily probe yet.",
+  tavilyCandidatesTitle: "Usable image candidates",
+  tavilyCandidatesCount: "Candidates: {count}",
   tavilyTopImagesTitle: "Top-level images",
   tavilyResultImagesTitle: "Result images",
   tavilyImagesEmpty: "No image URLs returned by Tavily.",
@@ -338,6 +361,7 @@ const zhCopy = {
   tavilyDescription: "直接调用 Tavily /search 并开启 include_images，检查它返回的图片结构。",
   tavilyBaseUrlLabel: "Tavily 地址",
   tavilyApiKeyLabel: "Tavily API Key",
+  tavilySavedKeyHint: "留空会复用已保存的 Tavily 搜索密钥。",
   tavilyDepthLabel: "搜索深度",
   tavilyMaxResultsLabel: "返回上限",
   tavilyIncludeDescriptionsLabel: "返回图片描述",
@@ -346,6 +370,8 @@ const zhCopy = {
   clearTavily: "清空 Tavily 测试",
   tavilyResultsTitle: "Tavily 图片结果",
   tavilyResultsEmpty: "还没有 Tavily 探测。",
+  tavilyCandidatesTitle: "可用图片候选",
+  tavilyCandidatesCount: "候选图片：{count}",
   tavilyTopImagesTitle: "顶层 images",
   tavilyResultImagesTitle: "results[].images",
   tavilyImagesEmpty: "Tavily 没有返回图片 URL。",
@@ -503,6 +529,9 @@ watch(
     searchForm.base_url = settings?.search.base_url ?? searchForm.base_url
     searchForm.api_key = ""
     searchForm.timeout_seconds = Number(settings?.search.timeout_seconds ?? searchForm.timeout_seconds)
+    if (settings?.search.provider === "tavily" && settings.search.base_url) {
+      tavilyForm.base_url = settings.search.base_url
+    }
   },
   { immediate: true }
 )
@@ -519,6 +548,7 @@ watch(
 )
 
 const hasStoredSearchConfig = computed(() => Boolean(settingsStore.settings?.search.configured))
+const hasStoredTavilyConfig = computed(() => Boolean(settingsStore.settings?.search.provider === "tavily" && settingsStore.settings.search.configured))
 
 const canSend = computed(() => {
   return Boolean(!sending.value && form.base_url.trim() && form.model.trim() && input.value.trim())
@@ -545,8 +575,75 @@ const canProbeXhsImages = computed(() => {
 })
 
 const canProbeTavily = computed(() => {
-  return Boolean(!tavilyPending.value && tavilyForm.base_url.trim() && tavilyForm.api_key.trim() && tavilyForm.query.trim())
+  return Boolean(!tavilyPending.value && tavilyForm.base_url.trim() && (tavilyForm.api_key.trim() || hasStoredTavilyConfig.value) && tavilyForm.query.trim())
 })
+
+const tavilyImageCandidates = computed<TavilyImageCandidateItem[]>(() => {
+  const result = tavilyResult.value
+  if (!result) {
+    return []
+  }
+  if (Array.isArray(result.image_candidates) && result.image_candidates.length) {
+    return result.image_candidates
+  }
+
+  const seen = new Set<string>()
+  const candidates: TavilyImageCandidateItem[] = []
+  const record = (candidate: TavilyImageCandidateItem) => {
+    const url = String(candidate.url || "").trim()
+    if (!url || seen.has(url.toLowerCase())) {
+      return
+    }
+    seen.add(url.toLowerCase())
+    candidates.push({ ...candidate, url })
+  }
+
+  result.top_level_images.forEach((image) => {
+    record({
+      source: "top_level",
+      source_domain: image.source_domain ?? null,
+      url: String(image.url || ""),
+      title: image.title ?? null,
+      description: image.description ?? null,
+      result_title: null,
+      result_url: null
+    })
+  })
+
+  result.result_images.forEach((image) => {
+    record({
+      source: "result",
+      source_domain: image.source_domain ?? null,
+      url: image.url,
+      title: null,
+      description: image.description ?? null,
+      result_title: image.result_title,
+      result_url: image.result_url
+    })
+  })
+
+  return candidates
+})
+
+function formatLimitedCount(displayed: number, total?: number, truncated?: boolean): string {
+  const normalizedTotal = Number(total ?? displayed)
+  if (truncated || normalizedTotal > displayed) {
+    return `${displayed}/${normalizedTotal}`
+  }
+  return String(displayed)
+}
+
+const tavilyCandidateCountText = computed(() =>
+  formatLimitedCount(tavilyImageCandidates.value.length, tavilyResult.value?.image_candidates_total, tavilyResult.value?.image_candidates_truncated)
+)
+
+const tavilyTopImagesCountText = computed(() =>
+  formatLimitedCount(tavilyResult.value?.top_level_images.length ?? 0, tavilyResult.value?.top_level_images_total, tavilyResult.value?.top_level_images_truncated)
+)
+
+const tavilyResultImagesCountText = computed(() =>
+  formatLimitedCount(tavilyResult.value?.result_images.length ?? 0, tavilyResult.value?.result_images_total, tavilyResult.value?.result_images_truncated)
+)
 
 function clearChat() {
   messages.value = []
@@ -865,7 +962,7 @@ async function probeTavily() {
   try {
     const payload = {
       base_url: tavilyForm.base_url.trim(),
-      api_key: tavilyForm.api_key.trim(),
+      api_key: tavilyForm.api_key.trim() || undefined,
       query: tavilyForm.query.trim(),
       search_depth: tavilyForm.search_depth,
       max_results: tavilyForm.max_results,
@@ -1352,6 +1449,7 @@ function formatPrettyJson(value: unknown): string {
           <label>
             {{ copy.tavilyApiKeyLabel }}
             <input v-model="tavilyForm.api_key" type="password" autocomplete="off" placeholder="tvly-..." />
+            <small class="llm-demo-help">{{ copy.tavilySavedKeyHint }}</small>
           </label>
           <label>
             {{ copy.searchQueryLabel }}
@@ -1520,14 +1618,31 @@ function formatPrettyJson(value: unknown): string {
             <p class="llm-demo-meta"><strong>{{ copy.searchProviderLabel }}:</strong> {{ tavilyResult.provider }}</p>
             <p class="llm-demo-meta"><strong>{{ copy.endpointLabel }}:</strong> {{ tavilyResult.base_url }}</p>
 
+            <p class="llm-demo-section-title">{{ copy.tavilyCandidatesTitle }}</p>
+            <p class="llm-demo-meta">{{ copy.tavilyCandidatesCount.replace("{count}", tavilyCandidateCountText) }}</p>
+            <div v-if="tavilyImageCandidates.length === 0" class="llm-demo-empty">{{ copy.tavilyImagesEmpty }}</div>
+            <div v-else class="llm-demo-image-grid">
+              <article v-for="(image, index) in tavilyImageCandidates" :key="`${image.url}-${index}`" class="llm-demo-image-card">
+                <img :src="image.url" :alt="image.description || image.title || image.result_title || image.url" loading="lazy" />
+                <strong v-if="image.title || image.result_title" class="llm-demo-image-title">{{ summarizeText(image.title || image.result_title || "", 64) }}</strong>
+                <p v-if="image.description" class="llm-demo-image-description">{{ summarizeText(image.description) }}</p>
+                <small class="llm-demo-image-meta">{{ image.source_domain || image.source }} / {{ formatHostLabel(image.url) }}</small>
+                <small v-if="image.result_url" class="llm-demo-image-meta">{{ formatHostLabel(image.result_url) }}</small>
+                <div class="llm-demo-image-actions">
+                  <a class="llm-demo-link llm-demo-link--button" :href="image.url" target="_blank" rel="noreferrer">{{ copy.openImageLabel }}</a>
+                  <a v-if="image.result_url" class="llm-demo-link llm-demo-link--button llm-demo-link--soft" :href="image.result_url" target="_blank" rel="noreferrer">{{ copy.openSourceLabel }}</a>
+                </div>
+              </article>
+            </div>
+
             <p class="llm-demo-section-title">{{ copy.tavilyTopImagesTitle }}</p>
-            <p class="llm-demo-meta">{{ copy.tavilyTopImagesCount.replace("{count}", String(tavilyResult.top_level_images.length)) }}</p>
+            <p class="llm-demo-meta">{{ copy.tavilyTopImagesCount.replace("{count}", tavilyTopImagesCountText) }}</p>
             <div v-if="tavilyResult.top_level_images.length === 0" class="llm-demo-empty">{{ copy.tavilyImagesEmpty }}</div>
             <div v-else class="llm-demo-image-grid">
               <article v-for="(image, index) in tavilyResult.top_level_images" :key="`${image.url}-${index}`" class="llm-demo-image-card">
                 <img v-if="image.url" :src="image.url" :alt="image.description || image.url" loading="lazy" />
                 <p v-if="image.description" class="llm-demo-image-description">{{ summarizeText(image.description) }}</p>
-                <small v-if="image.url" class="llm-demo-image-meta">{{ formatHostLabel(image.url) }}</small>
+                <small v-if="image.url" class="llm-demo-image-meta">{{ image.source_domain || formatHostLabel(image.url) }}</small>
                 <div class="llm-demo-image-actions">
                   <a v-if="image.url" class="llm-demo-link llm-demo-link--button" :href="image.url" target="_blank" rel="noreferrer">{{ copy.openImageLabel }}</a>
                 </div>
@@ -1535,14 +1650,14 @@ function formatPrettyJson(value: unknown): string {
             </div>
 
             <p class="llm-demo-section-title">{{ copy.tavilyResultImagesTitle }}</p>
-            <p class="llm-demo-meta">{{ copy.tavilyResultImagesCount.replace("{count}", String(tavilyResult.result_images.length)) }}</p>
+            <p class="llm-demo-meta">{{ copy.tavilyResultImagesCount.replace("{count}", tavilyResultImagesCountText) }}</p>
             <div v-if="tavilyResult.result_images.length === 0" class="llm-demo-empty">{{ copy.tavilyImagesEmpty }}</div>
             <div v-else class="llm-demo-image-grid">
               <article v-for="(image, index) in tavilyResult.result_images" :key="`${image.url}-${index}`" class="llm-demo-image-card">
                 <img :src="image.url" :alt="image.description || image.result_title || image.url" loading="lazy" />
                 <strong v-if="image.result_title" class="llm-demo-image-title">{{ summarizeText(image.result_title, 64) }}</strong>
                 <p v-if="image.description" class="llm-demo-image-description">{{ summarizeText(image.description) }}</p>
-                <small class="llm-demo-image-meta">{{ formatHostLabel(image.url) }}</small>
+                <small class="llm-demo-image-meta">{{ image.source_domain || formatHostLabel(image.url) }}</small>
                 <small v-if="image.result_url" class="llm-demo-image-meta">{{ formatHostLabel(image.result_url) }}</small>
                 <div class="llm-demo-image-actions">
                   <a class="llm-demo-link llm-demo-link--button" :href="image.url" target="_blank" rel="noreferrer">{{ copy.openImageLabel }}</a>

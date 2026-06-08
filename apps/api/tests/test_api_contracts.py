@@ -276,6 +276,34 @@ def test_trip_create_requires_explicit_generate_step(client: TestClient):
     assert job["progress_percent"] == 0
 
 
+def test_trip_generate_returns_async_image_enrichment_targets(client: TestClient):
+    _register(client)
+    trip = _create_trip(client).json()["data"]
+
+    generate_response = client.post(f"/api/v1/trips/{trip['id']}/generate")
+    assert generate_response.status_code == 200
+
+    final_job = _wait_for_terminal_job(client, generate_response.json()["data"]["job_id"])
+
+    assert final_job["status"] == "completed"
+    assert final_job["result"]["followup_job_id"]
+    assert final_job["result"]["image_enrichment_summary"]["pending"] > 0
+    targets = final_job["result"]["image_enrichment_targets"]
+    assert targets
+    assert {"day_index", "item_index", "item_id", "name", "type", "location"} <= set(targets[0])
+
+    trip_detail = client.get(f"/api/v1/trips/{trip['id']}")
+    assert trip_detail.status_code == 200
+    itinerary_items = [
+        item
+        for day in trip_detail.json()["data"]["itinerary"]["days"]
+        for item in day["items"]
+    ]
+    pending_item_ids = {item["id"] for item in itinerary_items if item.get("image_status") == "pending"}
+    failed_item_ids = {item["id"] for item in itinerary_items if item.get("image_status") == "failed"}
+    assert {target["item_id"] for target in targets} <= (pending_item_ids | failed_item_ids)
+
+
 def test_trip_itinerary_save_without_trace_preserves_latest_trace(client: TestClient):
     _register(client)
     trip = _create_trip(client).json()["data"]

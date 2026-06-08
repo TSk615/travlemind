@@ -36,6 +36,8 @@ class User(Base):
     search_service_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     search_service_timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=30.0)
     xhs_source_enabled: Mapped[bool] = mapped_column(default=False)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -99,6 +101,19 @@ class Trip(Base):
     transport_mode: Mapped[str] = mapped_column(String(32), default="mixed")
     itinerary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     latest_agent_trace_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TripRefineSession(Base):
+    __tablename__ = "trip_refine_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    trip_id: Mapped[str] = mapped_column(String(32), ForeignKey("trips.id"), nullable=False, unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), nullable=False, index=True)
+    messages_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    uploaded_guides_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    community_sources_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -167,6 +182,20 @@ class ImageGeneration(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class AdminAuditLog(Base):
+    __tablename__ = "admin_audit_logs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    admin_user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), nullable=False, index=True)
+    admin_email_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    target_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # Lightweight SQLite compatibility for local developer databases created before
 # the LLM config fields existed. Fresh databases still rely on create_all().
 def _ensure_sqlite_user_columns() -> None:
@@ -212,6 +241,10 @@ def _ensure_sqlite_user_columns() -> None:
             statements.append("ALTER TABLE users ADD COLUMN search_service_timeout_seconds FLOAT NOT NULL DEFAULT 30")
         if "xhs_source_enabled" not in existing_columns:
             statements.append("ALTER TABLE users ADD COLUMN xhs_source_enabled BOOLEAN NOT NULL DEFAULT 0")
+        if "disabled_at" not in existing_columns:
+            statements.append("ALTER TABLE users ADD COLUMN disabled_at DATETIME")
+        if "disabled_reason" not in existing_columns:
+            statements.append("ALTER TABLE users ADD COLUMN disabled_reason TEXT")
 
         for statement in statements:
             conn.execute(text(statement))
@@ -239,3 +272,73 @@ def _ensure_sqlite_trip_columns() -> None:
 
 
 _ensure_sqlite_trip_columns()
+
+
+def _ensure_sqlite_trip_refine_sessions_table() -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "trip_refine_sessions" in inspector.get_table_names():
+            return
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trip_refine_sessions (
+                    id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    trip_id VARCHAR(32) NOT NULL,
+                    user_id VARCHAR(32) NOT NULL,
+                    messages_json JSON NOT NULL,
+                    uploaded_guides_json JSON NOT NULL,
+                    community_sources_json JSON NOT NULL,
+                    created_at DATETIME,
+                    updated_at DATETIME,
+                    UNIQUE (trip_id),
+                    FOREIGN KEY(trip_id) REFERENCES trips (id),
+                    FOREIGN KEY(user_id) REFERENCES users (id)
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_trip_refine_sessions_trip_id ON trip_refine_sessions (trip_id)"))
+        conn.execute(text("CREATE INDEX ix_trip_refine_sessions_user_id ON trip_refine_sessions (user_id)"))
+
+
+_ensure_sqlite_trip_refine_sessions_table()
+
+
+def _ensure_sqlite_admin_audit_logs_table() -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "admin_audit_logs" in inspector.get_table_names():
+            return
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE admin_audit_logs (
+                    id VARCHAR(32) NOT NULL PRIMARY KEY,
+                    admin_user_id VARCHAR(32) NOT NULL,
+                    admin_email_snapshot VARCHAR(255) NOT NULL,
+                    action VARCHAR(64) NOT NULL,
+                    target_type VARCHAR(64) NOT NULL,
+                    target_id VARCHAR(64) NOT NULL,
+                    reason TEXT NOT NULL,
+                    details_json JSON NOT NULL,
+                    created_at DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_admin_audit_logs_admin_user_id ON admin_audit_logs (admin_user_id)"))
+        conn.execute(text("CREATE INDEX ix_admin_audit_logs_action ON admin_audit_logs (action)"))
+        conn.execute(text("CREATE INDEX ix_admin_audit_logs_target_type ON admin_audit_logs (target_type)"))
+        conn.execute(text("CREATE INDEX ix_admin_audit_logs_target_id ON admin_audit_logs (target_id)"))
+
+
+_ensure_sqlite_admin_audit_logs_table()

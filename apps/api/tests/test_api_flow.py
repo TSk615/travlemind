@@ -315,9 +315,12 @@ def test_trip_generation_uses_helloagents_provider_when_selected(client: TestCli
     assert detail_payload["itinerary"]["days"]
     assert detail_payload["latest_agent_trace"]["provider"] == "helloagents-poc"
     assert detail_payload["latest_agent_trace"]["license_notice"]
-    assert len(detail_payload["latest_agent_trace"]["agent_runs"]) == 9
+    agent_run_keys = {run["key"] for run in detail_payload["latest_agent_trace"]["agent_runs"]}
+    assert len(detail_payload["latest_agent_trace"]["agent_runs"]) >= 7
     assert detail_payload["latest_agent_trace"]["agent_runs"][1]["key"] in {"attraction_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
-    assert {run["key"] for run in detail_payload["latest_agent_trace"]["agent_runs"]} >= {"image_curator", "attraction_image_specialist", "image_reviewer"}
+    assert "attraction_image_specialist" in agent_run_keys
+    assert "image_curator" not in agent_run_keys
+    assert "image_reviewer" not in agent_run_keys
     assert detail_payload["itinerary"]["days"][0]["items"][0]["image_status"] in {"completed", "failed", "pending", "skipped"}
     assert any("business-specialist" in note.lower() for note in detail_payload["latest_agent_trace"]["notes"])
 

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.common import success_response
 from travelmind_api.core.database import get_db
+from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.deps import get_current_user
 from travelmind_api.db.models import User
 from travelmind_api.services.auth_service import serialize_user
@@ -15,8 +16,8 @@ router = APIRouter(tags=["account"])
 
 
 @router.get("/me")
-def me(current_user: User = Depends(get_current_user)):
-    return success_response(serialize_user(current_user).model_dump(mode="json"))
+def me(current_user: User = Depends(get_current_user), settings: Settings = Depends(get_settings)):
+    return success_response(serialize_user(current_user, settings).model_dump(mode="json"))
 
 
 def _build_xhs_client() -> XhsCrawlerClient:

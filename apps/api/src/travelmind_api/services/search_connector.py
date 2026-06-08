@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from travelmind_api.core.env import get_env
 from travelmind_api.services.mcp import McpClientConfig, McpHttpClient
 
 SearchServiceProvider = Literal["groksearch", "tavily"]
 SearchServiceTransport = Literal["mcp", "api"]
+DEFAULT_IMAGE_INCLUDE_DOMAINS = ("hk.trip.com", "pixabay.com", "pexels.com")
+DEFAULT_IMAGE_PER_DOMAIN_LIMIT = 4
+_DOMAIN_TOKEN_SPLIT_PATTERN = re.compile(r"[\s,;\uFF0C\uFF1B]+")
+_DOMAIN_PATTERN = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$", re.IGNORECASE)
 
 
 def normalize_search_service_provider(value: object | None, *, default: SearchServiceProvider = "groksearch") -> SearchServiceProvider:
@@ -34,12 +40,58 @@ def normalize_search_service_transport(value: object | None, *, default: SearchS
     return default
 
 
+def normalize_domain_filter_values(
+    value: object | None,
+    *,
+    default: list[str] | tuple[str, ...] | None = None,
+    strict: bool = False,
+) -> list[str]:
+    if value is None:
+        return list(default or [])
+
+    if isinstance(value, str):
+        raw_items = [item for item in _DOMAIN_TOKEN_SPLIT_PATTERN.split(value) if item.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(item or "").strip() for item in value if str(item or "").strip()]
+    else:
+        raw_items = [str(value or "").strip()] if str(value or "").strip() else []
+
+    normalized: list[str] = []
+    invalid: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_items:
+        candidate = raw_item.strip().strip("\"'")
+        if not candidate:
+            continue
+        parsed = urlparse(candidate if "://" in candidate else f"https://{candidate}")
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        if not host or not _DOMAIN_PATTERN.fullmatch(host):
+            invalid.append(raw_item)
+            continue
+        if host in seen:
+            continue
+        seen.add(host)
+        normalized.append(host)
+
+    if strict and invalid:
+        raise ValueError(f"Invalid image source domain values: {', '.join(invalid)}")
+    return normalized[:20]
+
+
 class SearchServiceConfig(BaseModel):
     provider: SearchServiceProvider = "groksearch"
     transport: SearchServiceTransport = "mcp"
     base_url: str
     api_key: str
     timeout_seconds: float = Field(default=30.0, gt=0)
+    image_include_domains: list[str] = Field(default_factory=lambda: list(DEFAULT_IMAGE_INCLUDE_DOMAINS))
+
+    @field_validator("image_include_domains", mode="before")
+    @classmethod
+    def _normalize_image_include_domains(cls, value: object) -> list[str]:
+        return normalize_domain_filter_values(value, default=DEFAULT_IMAGE_INCLUDE_DOMAINS)
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object] | None) -> SearchServiceConfig | None:
@@ -58,6 +110,10 @@ class SearchServiceConfig(BaseModel):
             timeout_seconds = 30.0
         if timeout_seconds <= 0:
             timeout_seconds = 30.0
+        raw_image_domains = payload.get("image_include_domains")
+        if raw_image_domains is None:
+            raw_image_domains = payload.get("image_search_include_domains")
+        image_include_domains = normalize_domain_filter_values(raw_image_domains, default=DEFAULT_IMAGE_INCLUDE_DOMAINS)
 
         raw_provider = str(payload.get("provider") or "").strip().lower()
         if raw_provider and raw_provider not in {"groksearch", "grok-search", "grok_search", "grok", "tavily"}:
@@ -79,6 +135,7 @@ class SearchServiceConfig(BaseModel):
             base_url=base_url,
             api_key=api_key,
             timeout_seconds=timeout_seconds,
+            image_include_domains=image_include_domains,
         )
 
     @classmethod
@@ -110,6 +167,7 @@ class SearchServiceConfig(BaseModel):
                 base_url=grok_base_url.rstrip("/"),
                 api_key=grok_api_key,
                 timeout_seconds=grok_timeout,
+                image_include_domains=normalize_domain_filter_values(get_env("TRAVELMIND_IMAGE_SEARCH_INCLUDE_DOMAINS"), default=DEFAULT_IMAGE_INCLUDE_DOMAINS),
             )
         if configured_provider == "tavily":
             tavily_base_url = (
@@ -126,6 +184,10 @@ class SearchServiceConfig(BaseModel):
                 get_env("TRAVELMIND_TAVILY_TIMEOUT_SECONDS")
                 or "30"
             ).strip()
+            tavily_image_include_domains = normalize_domain_filter_values(
+                get_env("TRAVELMIND_TAVILY_IMAGE_INCLUDE_DOMAINS") or get_env("TRAVELMIND_IMAGE_SEARCH_INCLUDE_DOMAINS"),
+                default=DEFAULT_IMAGE_INCLUDE_DOMAINS,
+            )
             if not tavily_base_url or not tavily_api_key or configured_transport != "api":
                 return None
             try:
@@ -138,6 +200,7 @@ class SearchServiceConfig(BaseModel):
                 base_url=tavily_base_url.rstrip("/"),
                 api_key=tavily_api_key,
                 timeout_seconds=tavily_timeout,
+                image_include_domains=tavily_image_include_domains,
             )
         return None
 
@@ -235,11 +298,16 @@ class ConfiguredSearchGateway:
             num_results = int(arguments.get("num_results", arguments.get("numResults", 10)))
             include_images = bool(arguments.get("include_images", False))
             include_image_descriptions = bool(arguments.get("include_image_descriptions", False))
+            include_domains = normalize_domain_filter_values(
+                arguments.get("include_domains") if arguments.get("include_domains") is not None else self._config.image_include_domains,
+                default=[],
+            )
             return self._call_tavily_search(
                 query=query,
                 max_results=num_results,
                 include_images=include_images,
                 include_image_descriptions=include_image_descriptions,
+                include_domains=include_domains,
             )
         raise SearchServiceGatewayError("GrokSearch currently only supports MCP transport")
 
@@ -250,6 +318,7 @@ class ConfiguredSearchGateway:
         max_results: int,
         include_images: bool,
         include_image_descriptions: bool,
+        include_domains: list[str],
     ) -> dict[str, Any]:
         endpoint = self._config.base_url if self._config.base_url.endswith("/search") else f"{self._config.base_url}/search"
         headers = {
@@ -266,12 +335,89 @@ class ConfiguredSearchGateway:
         }
         try:
             with httpx.Client(timeout=self._config.timeout_seconds, follow_redirects=True) as client:
+                if include_images and len(include_domains) > 1:
+                    domain_payloads: list[tuple[str, dict[str, Any]]] = []
+                    for domain in include_domains:
+                        domain_payload = {**payload, "include_domains": [domain]}
+                        response = client.post(endpoint, headers=headers, json=domain_payload)
+                        response.raise_for_status()
+                        parsed = response.json()
+                        domain_payloads.append((domain, parsed if isinstance(parsed, dict) else {"data": parsed}))
+                    return self._merge_tavily_domain_payloads(domain_payloads)
+                if include_images and include_domains:
+                    payload["include_domains"] = include_domains
                 response = client.post(endpoint, headers=headers, json=payload)
                 response.raise_for_status()
                 parsed = response.json()
         except httpx.HTTPError as exc:
             raise SearchServiceGatewayError(str(exc)) from exc
         return parsed if isinstance(parsed, dict) else {"data": parsed}
+
+    def _merge_tavily_domain_payloads(self, domain_payloads: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+        merged: dict[str, Any] = {
+            "request_mode": "per_domain",
+            "domain_results": [],
+            "results": [],
+            "images": [],
+        }
+        seen_images: set[str] = set()
+        total_image_count = 0
+
+        for domain, payload in domain_payloads:
+            images = payload.get("images")
+            image_items = images if isinstance(images, list) else []
+            returned_for_domain = 0
+            for image in image_items:
+                if returned_for_domain >= DEFAULT_IMAGE_PER_DOMAIN_LIMIT:
+                    break
+                if isinstance(image, dict):
+                    image_url = str(image.get("url") or "").strip()
+                    image_payload = dict(image)
+                else:
+                    image_url = str(image or "").strip()
+                    image_payload = {"url": image_url}
+                if not image_url:
+                    continue
+                key = image_url.casefold()
+                if key in seen_images:
+                    continue
+                seen_images.add(key)
+                image_payload["url"] = image_url
+                image_payload["source_domain"] = domain
+                merged["images"].append(image_payload)
+                returned_for_domain += 1
+
+            results = payload.get("results")
+            result_items = results if isinstance(results, list) else []
+            for result in result_items:
+                if not isinstance(result, dict):
+                    continue
+                result_payload = dict(result)
+                result_payload["source_domain"] = domain
+                result_images = result_payload.get("images")
+                if isinstance(result_images, list):
+                    result_payload["images_total_count"] = len(result_images)
+                    result_payload["images_truncated"] = len(result_images) > DEFAULT_IMAGE_PER_DOMAIN_LIMIT
+                    result_payload["images"] = result_images[:DEFAULT_IMAGE_PER_DOMAIN_LIMIT]
+                merged["results"].append(result_payload)
+
+            total_image_count += len(image_items)
+            merged["domain_results"].append(
+                {
+                    "domain": domain,
+                    "images_total_count": len(image_items),
+                    "images_returned_count": returned_for_domain,
+                    "images_truncated": len(image_items) > returned_for_domain,
+                    "results_count": len(result_items),
+                    "response_time": payload.get("response_time"),
+                    "request_id": payload.get("request_id"),
+                }
+            )
+
+        merged["images_total_count"] = total_image_count
+        merged["images_returned_count"] = len(merged["images"])
+        merged["images_truncated"] = total_image_count > len(merged["images"])
+        return merged
 
     def _call_mcp_operation(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         assert self._mcp_client is not None

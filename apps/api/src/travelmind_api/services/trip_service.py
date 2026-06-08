@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.trips import TripCreateRequest, TripItinerarySaveRequest, TripResponse, TripUpdateRequest
 from travelmind_api.core.security import generate_identifier
-from travelmind_api.db.models import CommunityPost, JobRecord, Trip, User
+from travelmind_api.db.models import CommunityPost, JobRecord, Trip, TripRefineSession, User
 from travelmind_api.services.community_service import serialize_trip_community_post
 
 
@@ -183,6 +183,7 @@ def update_trip(session: Session, trip: Trip, payload: TripUpdateRequest) -> Tri
 def delete_trip(session: Session, trip: Trip) -> None:
     session.query(JobRecord).filter(JobRecord.trip_id == trip.id, JobRecord.owner_user_id == trip.user_id).delete(synchronize_session=False)
     session.query(CommunityPost).filter(CommunityPost.trip_id == trip.id, CommunityPost.author_user_id == trip.user_id).delete(synchronize_session=False)
+    session.query(TripRefineSession).filter(TripRefineSession.trip_id == trip.id, TripRefineSession.user_id == trip.user_id).delete(synchronize_session=False)
     session.delete(trip)
     session.commit()
 

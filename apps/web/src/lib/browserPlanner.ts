@@ -8,6 +8,7 @@ import type {
   TransportBookingSummary,
   Trip,
   TripRefineInput,
+  TripRefineSession,
   VisitRequirements
 } from "@travelmind/shared-types"
 import { ApiError, apiFetch, handleUnauthorizedStatus } from "@/lib/api"
@@ -18,6 +19,10 @@ interface BrowserPlanningResult {
   itinerary: GeneratedItinerary
   trace: AgentRunTrace
   rawText: string
+}
+
+export interface BrowserRefineContext {
+  session?: TripRefineSession | null
 }
 
 interface BrowserLlmDay {
@@ -98,14 +103,15 @@ export async function refineTripInBrowser(
   config: RuntimeLlmConfig,
   trip: Trip,
   groundedDocs: SearchDocument[],
-  refineInput: TripRefineInput
+  refineInput: TripRefineInput,
+  context: BrowserRefineContext = {}
 ): Promise<BrowserPlanningResult> {
-  const messages = buildMessages({ trip, groundedDocs, refineInput })
+  const messages = buildMessages({ trip, groundedDocs, refineInput, refineContext: context })
   const rawText = await callModel(config, messages)
   const payload = parsePayload(rawText)
   return {
     itinerary: enrichGeneratedItineraryWithBudget(trip, toGeneratedItinerary(payload, trip.itinerary ?? undefined)),
-    trace: createTrace(config, `Applied refine via backend relay with scope ${refineInput.scope}.`, groundedDocs),
+    trace: createTrace(config, buildRefineTraceNote(refineInput, context.session), groundedDocs),
     rawText
   }
 }
@@ -302,12 +308,15 @@ function extractChatCompletionsTextFromJson(rawBody: string): string {
 function buildMessages({
   trip,
   groundedDocs,
-  refineInput
+  refineInput,
+  refineContext
 }: {
   trip: Trip
   groundedDocs: SearchDocument[]
   refineInput?: TripRefineInput
+  refineContext?: BrowserRefineContext
 }): Array<{ role: string; content: string }> {
+  const session = refineContext?.session ?? null
   const tripPayload = {
     title: trip.title,
     origin: trip.origin,
@@ -337,6 +346,26 @@ function buildMessages({
       url: doc.url
     })),
     refine_instruction: refineInput ?? null,
+    refine_conversation: session?.messages.slice(-12).map((message) => ({
+      role: message.role,
+      text: message.text,
+      created_at: message.created_at
+    })) ?? [],
+    uploaded_guides: session?.uploaded_guides.slice(-6).map((guide) => ({
+      title: guide.title,
+      content: trimForPrompt(guide.content, 5000),
+      source_type: guide.source_type,
+      original_filename: guide.original_filename
+    })) ?? [],
+    community_guide_sources: session?.community_sources.slice(-6).map((source) => ({
+      post_id: source.post_id,
+      title: source.title,
+      destination: source.destination,
+      author_name: source.author_name,
+      share_note: source.share_note,
+      itinerary_summary: source.itinerary_summary,
+      snapshot: source.snapshot
+    })) ?? [],
     output_language: "zh-CN"
   }
 
@@ -349,6 +378,8 @@ function buildMessages({
         mode: "refine",
         rules: [
           "Treat existing_itinerary as the source of truth.",
+          "Use refine_conversation as durable conversation memory across prior user refinements.",
+          "Use uploaded_guides as user-provided guide context and community_guide_sources as inspiration, but do not copy them blindly.",
           "Keep unchanged parts of the itinerary as close as possible to the current version.",
           "If day_index is present, focus changes on that day and avoid unnecessary edits to other days.",
           "Return one full updated itinerary JSON object."
@@ -367,6 +398,21 @@ function buildMessages({
       content: userPrompt
     }
   ]
+}
+
+function buildRefineTraceNote(refineInput: TripRefineInput, session?: TripRefineSession | null): string {
+  const messageCount = session?.messages.length ?? 0
+  const uploadedCount = session?.uploaded_guides.length ?? 0
+  const communityCount = session?.community_sources.length ?? 0
+  return `Applied conversational refine via backend relay with scope ${refineInput.scope}; context included ${messageCount} prior message(s), ${uploadedCount} uploaded guide(s), and ${communityCount} community guide source(s).`
+}
+
+function trimForPrompt(value: string, maxLength: number): string {
+  const normalized = String(value || "").trim()
+  if (normalized.length <= maxLength) {
+    return normalized
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 120)).trim()}\n\n[Content trimmed for prompt length.]`
 }
 
 function parsePayload(rawText: string): BrowserLlmPayload {

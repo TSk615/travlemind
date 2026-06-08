@@ -16,6 +16,7 @@ const { locale, supportedLocales, setLocale, t } = useI18n()
 const communityNavLabel = computed(() => (locale.value === "zh-CN" ? "攻略社区" : "Community"))
 const settingsNavLabel = computed(() => (locale.value === "zh-CN" ? "模型设置" : "Settings"))
 const imageNavLabel = computed(() => (locale.value === "zh-CN" ? "AI 生图" : "AI Images"))
+const adminNavLabel = computed(() => "后台管理")
 const backgroundJob = computed(() => jobGuard.activeJob)
 const hasBackgroundJob = computed(() => jobGuard.hasActiveJob)
 const showBackgroundJobBanner = computed(() => {
@@ -49,6 +50,7 @@ const currentSection = computed(() => {
     return "trips"
   }
   if (route.name === "settings") return "settings"
+  if (String(route.name ?? "").startsWith("admin-")) return "admin"
   if (route.name === "images") return "images"
   if (route.name === "community" || route.name === "community-post") return "community"
   return route.name
@@ -91,6 +93,9 @@ function navigateToJob() {
         </RouterLink>
         <RouterLink v-if="auth.user" :class="['tm-topbar__nav-item', { 'tm-topbar__nav-item--active': currentSection === 'settings' }]" to="/settings">
           {{ settingsNavLabel }}
+        </RouterLink>
+        <RouterLink v-if="auth.user?.is_admin" :class="['tm-topbar__nav-item', { 'tm-topbar__nav-item--active': currentSection === 'admin' }]" to="/admin/users">
+          {{ adminNavLabel }}
         </RouterLink>
       </nav>
 

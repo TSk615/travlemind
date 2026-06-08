@@ -29,6 +29,7 @@ export interface User {
   avatar?: string | null
   locale: string
   created_at: string
+  is_admin: boolean
 }
 
 export interface XhsBindingStatus {
@@ -201,6 +202,44 @@ export interface TripRefineInput {
   instruction: string
   scope: string
   day_index?: number | null
+}
+
+export interface TripRefineMessage {
+  id: string
+  role: "user" | "assistant"
+  text: string
+  created_at: string
+}
+
+export interface TripUploadedGuideSource {
+  id: string
+  title: string
+  content: string
+  source_type: string
+  original_filename?: string | null
+  created_at: string
+}
+
+export interface TripCommunityGuideSource {
+  id: string
+  post_id: string
+  title: string
+  destination: string
+  author_name: string
+  share_note: string
+  itinerary_summary: string
+  snapshot: CommunityTripSnapshot
+  created_at: string
+}
+
+export interface TripRefineSession {
+  id: string
+  trip_id: string
+  messages: TripRefineMessage[]
+  uploaded_guides: TripUploadedGuideSource[]
+  community_sources: TripCommunityGuideSource[]
+  created_at: string
+  updated_at: string
 }
 
 export interface CommunityTripPublicationState {
@@ -492,4 +531,107 @@ export interface PromptTrendResponse {
   implemented: boolean
   source: string
   platform: PromptTrendPlatform
+}
+
+export interface AdminPage<T> {
+  items: T[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface AdminOwnerSummary {
+  id: string
+  email: string
+  name: string
+  is_admin: boolean
+  disabled_at?: string | null
+}
+
+export interface AdminUserSummary {
+  id: string
+  email: string
+  name: string
+  avatar?: string | null
+  locale: string
+  created_at: string
+  is_admin: boolean
+  disabled_at?: string | null
+  disabled_reason?: string | null
+  trip_count: number
+  community_post_count: number
+  job_count: number
+}
+
+export interface AdminUserDetail extends AdminUserSummary {
+  xhs_source_enabled: boolean
+  has_llm_api_key: boolean
+  has_search_api_key: boolean
+  has_image_api_key: boolean
+}
+
+export interface AdminTripSummary {
+  id: string
+  user_id: string
+  owner?: AdminOwnerSummary | null
+  title: string
+  origin: string
+  destination: string
+  start_date: string
+  end_date: string
+  budget: number
+  travelers: number
+  created_at: string
+  updated_at: string
+  has_itinerary: boolean
+  has_community_post: boolean
+}
+
+export interface AdminTripDetail extends AdminTripSummary {
+  interests: string[]
+  accommodation_preference: string
+  pace: string
+  transport_mode: string
+  itinerary?: Record<string, unknown> | null
+  latest_agent_trace?: Record<string, unknown> | null
+}
+
+export interface AdminCommunityPostSummary {
+  id: string
+  trip_id: string
+  author_user_id: string
+  author?: AdminOwnerSummary | null
+  title: string
+  destination: string
+  share_note: string
+  cover_image_url?: string | null
+  published_at: string
+  updated_at: string
+  source_trip_updated_at: string
+  is_stale: boolean
+}
+
+export interface AdminCommunityPostDetail extends AdminCommunityPostSummary {
+  snapshot: Record<string, unknown>
+}
+
+export interface AdminJobSummary {
+  job_id: string
+  owner_user_id?: string | null
+  owner?: AdminOwnerSummary | null
+  status: JobStatus | string
+  type: string
+  trip_id?: string | null
+  created_at: string
+  updated_at: string
+  stage?: string | null
+  stage_message?: string | null
+  progress_percent?: number | null
+  error_message?: string | null
+}
+
+export interface AdminJobDetail extends AdminJobSummary {
+  timeline_json: JobTimelineEntry[]
+  result?: Record<string, unknown> | null
+  payload?: Record<string, unknown> | null
 }

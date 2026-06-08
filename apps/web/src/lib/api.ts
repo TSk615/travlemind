@@ -1,6 +1,15 @@
 import { appConfig } from "@travelmind/config"
 import type {
   AgentRunTrace,
+  AdminCommunityPostDetail,
+  AdminCommunityPostSummary,
+  AdminJobDetail,
+  AdminJobSummary,
+  AdminPage,
+  AdminTripDetail,
+  AdminTripSummary,
+  AdminUserDetail,
+  AdminUserSummary,
   CommunityPostDetail,
   CommunityPostSummary,
   Envelope,
@@ -20,6 +29,7 @@ import type {
   Trip,
   TripPreferenceInput,
   TripRefineInput,
+  TripRefineSession,
   User,
   XhsAccountStatus,
   XhsBindingStatus
@@ -88,6 +98,13 @@ export interface LlmConnectionTestResponse {
   latency_ms: number
 }
 
+export interface AdminListParams {
+  page?: number
+  page_size?: number
+  query?: string
+  [key: string]: string | number | boolean | null | undefined
+}
+
 interface EnvelopeError {
   code: string
   message: string
@@ -110,6 +127,18 @@ export class ApiError extends Error {
 
 export function getErrorMessage(error: unknown, fallbackMessage: string): string {
   return error instanceof Error && error.message ? error.message : fallbackMessage
+}
+
+function buildQuery(params?: AdminListParams): string {
+  const query = new URLSearchParams()
+  Object.entries(params ?? {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") {
+      return
+    }
+    query.set(key, String(value))
+  })
+  const serialized = query.toString()
+  return serialized ? `?${serialized}` : ""
 }
 
 export function handleUnauthorizedStatus(status: number, enabled = true): void {
@@ -289,6 +318,54 @@ export const api = {
   me() {
     return request<User>("/api/v1/me", { handleUnauthorized: false })
   },
+  listAdminUsers(params?: AdminListParams) {
+    return request<AdminPage<AdminUserSummary>>(`/api/v1/admin/users${buildQuery(params)}`)
+  },
+  getAdminUser(id: string) {
+    return request<AdminUserDetail>(`/api/v1/admin/users/${id}`)
+  },
+  disableAdminUser(id: string, reason: string) {
+    return request<AdminUserDetail>(`/api/v1/admin/users/${id}/disable`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    })
+  },
+  enableAdminUser(id: string, reason: string) {
+    return request<AdminUserDetail>(`/api/v1/admin/users/${id}/enable`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    })
+  },
+  listAdminTrips(params?: AdminListParams) {
+    return request<AdminPage<AdminTripSummary>>(`/api/v1/admin/trips${buildQuery(params)}`)
+  },
+  getAdminTrip(id: string) {
+    return request<AdminTripDetail>(`/api/v1/admin/trips/${id}`)
+  },
+  deleteAdminTrip(id: string, reason: string) {
+    return request<{ success: boolean; trip_id: string }>(`/api/v1/admin/trips/${id}/delete`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    })
+  },
+  listAdminCommunityPosts(params?: AdminListParams) {
+    return request<AdminPage<AdminCommunityPostSummary>>(`/api/v1/admin/community/posts${buildQuery(params)}`)
+  },
+  getAdminCommunityPost(id: string) {
+    return request<AdminCommunityPostDetail>(`/api/v1/admin/community/posts/${id}`)
+  },
+  deleteAdminCommunityPost(id: string, reason: string) {
+    return request<{ success: boolean; post_id: string }>(`/api/v1/admin/community/posts/${id}/delete`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    })
+  },
+  listAdminJobs(params?: AdminListParams) {
+    return request<AdminPage<AdminJobSummary>>(`/api/v1/admin/jobs${buildQuery(params)}`)
+  },
+  getAdminJob(id: string) {
+    return request<AdminJobDetail>(`/api/v1/admin/jobs/${id}`)
+  },
   getXhsStatus() {
     return request<XhsAccountStatus>("/api/v1/account/xhs/status")
   },
@@ -378,6 +455,42 @@ export const api = {
     return request<JobRecord>(`/api/v1/trips/${id}/refine`, {
       method: "POST",
       body: JSON.stringify(payload)
+    })
+  },
+  getRefineSession(id: string) {
+    return request<TripRefineSession>(`/api/v1/trips/${id}/refine-session`)
+  },
+  resetRefineSession(id: string) {
+    return request<{ success: boolean; trip_id: string }>(`/api/v1/trips/${id}/refine-session`, {
+      method: "DELETE"
+    })
+  },
+  appendRefineMessage(id: string, payload: { role: "user" | "assistant"; text: string }) {
+    return request<TripRefineSession>(`/api/v1/trips/${id}/refine-session/messages`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    })
+  },
+  addUploadedGuide(id: string, payload: { title: string; content: string; source_type?: string; original_filename?: string | null }) {
+    return request<TripRefineSession>(`/api/v1/trips/${id}/refine-session/uploaded-guides`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    })
+  },
+  removeUploadedGuide(id: string, sourceId: string) {
+    return request<TripRefineSession>(`/api/v1/trips/${id}/refine-session/uploaded-guides/${sourceId}`, {
+      method: "DELETE"
+    })
+  },
+  attachCommunitySource(id: string, payload: { post_id: string }) {
+    return request<TripRefineSession>(`/api/v1/trips/${id}/refine-session/community-sources`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    })
+  },
+  removeCommunitySource(id: string, sourceId: string) {
+    return request<TripRefineSession>(`/api/v1/trips/${id}/refine-session/community-sources/${sourceId}`, {
+      method: "DELETE"
     })
   },
   enrichTripImages(id: string) {

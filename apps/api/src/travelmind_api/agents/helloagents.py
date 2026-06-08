@@ -62,6 +62,18 @@ _ROLE_SEQUENCE = (
     "itinerary_planner",
 )
 _SPECIALIST_PARALLEL_ROLES = ("attraction_specialist", "weather_specialist", "hotel_specialist", "transport_specialist")
+_TOOL_RESULT_URL_METADATA_KEYS = {
+    "url",
+    "urls",
+    "link",
+    "links",
+    "href",
+    "website",
+    "crawl_urls",
+    "citations",
+    "source_url",
+    "source_urls",
+}
 
 RoleProgressCallback = Callable[[str, str, str, int], None]
 
@@ -122,15 +134,29 @@ class HelloAgentsWeatherGuidance(BaseModel):
 class HelloAgentsHotelCandidate(BaseModel):
     name: str = Field(min_length=1)
     area: str = Field(default="")
+    hotel_type: str = Field(default="")
     reason: str = Field(default="")
     price_hint: str = Field(default="")
+    price_checked_at: str = Field(default="")
+    price_valid_for: str = Field(default="")
+    review_score: str = Field(default="")
+    review_count: str = Field(default="")
+    review_summary: str = Field(default="")
+    preference_match: str = Field(default="")
+    booking_confidence: str = Field(default="")
+    caveats: list[str] = Field(default_factory=list)
 
 
 class HelloAgentsHotelRecommendation(BaseModel):
     recommended_areas: list[str] = Field(default_factory=list)
+    final_recommended_hotel: HelloAgentsHotelCandidate | None = None
     hotel_candidates: list[HelloAgentsHotelCandidate] = Field(default_factory=list)
     stay_strategy: list[str] = Field(default_factory=list)
     budget_notes: list[str] = Field(default_factory=list)
+    price_timeliness_notes: list[str] = Field(default_factory=list)
+    review_notes: list[str] = Field(default_factory=list)
+    preference_match_notes: list[str] = Field(default_factory=list)
+    hotel_risks: list[str] = Field(default_factory=list)
 
 
 class HelloAgentsTransportOption(BaseModel):
@@ -719,6 +745,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             temperature=role_config.temperature,
         )
         enriched_payload = self._augment_payload_with_tool_results(role_config.role_name, input_payload)
+        prompt_payload = self._build_role_prompt_payload(enriched_payload)
         agent = agent_class(
             name=role_config.role_name,
             llm=llm,
@@ -732,10 +759,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             role=role_config.role_name,
             endpoint=self._describe_endpoint(llm_config),
             model=llm_config.model,
-            payload_keys=sorted(enriched_payload.keys()),
+            payload_keys=sorted(prompt_payload.keys()),
         )
         try:
-            response = agent.run(json.dumps(enriched_payload, ensure_ascii=False))
+            response = agent.run(json.dumps(prompt_payload, ensure_ascii=False))
         except Exception as exc:
             endpoint = self._describe_endpoint(llm_config)
             elapsed_seconds = max(time.perf_counter() - started, 0.0)
@@ -774,6 +801,28 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             response_chars=len(content),
         )
         return content
+
+    def _build_role_prompt_payload(self, enriched_payload: dict[str, Any]) -> dict[str, Any]:
+        prompt_payload = deepcopy(enriched_payload)
+        tool_results = prompt_payload.get("tool_results")
+        if isinstance(tool_results, dict):
+            prompt_payload["tool_results"] = self._strip_tool_url_metadata(tool_results)
+        return prompt_payload
+
+    def _strip_tool_url_metadata(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            stripped: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key).strip().lower()
+                if normalized_key in _TOOL_RESULT_URL_METADATA_KEYS:
+                    continue
+                stripped[key] = self._strip_tool_url_metadata(item)
+            return stripped
+        if isinstance(value, list):
+            return [self._strip_tool_url_metadata(item) for item in value]
+        if isinstance(value, str):
+            return re.sub(r"https?://[^\s<>'\"\]]+", "[link omitted]", value)
+        return value
 
     def _build_attraction_research_payload(self, request: PlanningRequest, brief: HelloAgentsBrief) -> dict[str, Any]:
         queries = [*brief.interests, *brief.must_have, request.destination, "local highlights"]
@@ -855,27 +904,47 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         }
 
     def _build_planner_hotels_payload(self, hotel: HelloAgentsHotelRecommendation) -> dict[str, Any]:
+        final_hotel = hotel.final_recommended_hotel or (hotel.hotel_candidates[0] if hotel.hotel_candidates else None)
         return {
             "recommended_areas": [str(area).strip() for area in hotel.recommended_areas if str(area).strip()][:3],
+            "final_recommended_hotel": self._hotel_candidate_to_planner_dict(final_hotel) if final_hotel is not None else None,
             "hotel_candidates": [
-                {
-                    "name": candidate.name,
-                    "area": candidate.area,
-                    "reason": candidate.reason,
-                    "price_hint": candidate.price_hint,
-                }
+                self._hotel_candidate_to_planner_dict(candidate)
                 for candidate in hotel.hotel_candidates[:4]
             ],
             "stay_strategy": [str(item).strip() for item in hotel.stay_strategy if str(item).strip()][:4],
             "budget_notes": [str(item).strip() for item in hotel.budget_notes if str(item).strip()][:4],
+            "price_timeliness_notes": [str(item).strip() for item in hotel.price_timeliness_notes if str(item).strip()][:4],
+            "review_notes": [str(item).strip() for item in hotel.review_notes if str(item).strip()][:4],
+            "preference_match_notes": [str(item).strip() for item in hotel.preference_match_notes if str(item).strip()][:4],
+            "hotel_risks": [str(item).strip() for item in hotel.hotel_risks if str(item).strip()][:4],
             "summary": self._compress_notes(
                 [
+                    *([f"Final hotel: {final_hotel.name} ({final_hotel.area})"] if final_hotel is not None else []),
                     *[f"Stay area: {area}" for area in hotel.recommended_areas[:2]],
                     *hotel.stay_strategy[:2],
                     *hotel.budget_notes[:2],
+                    *hotel.review_notes[:2],
                 ],
                 limit=3,
             ),
+        }
+
+    def _hotel_candidate_to_planner_dict(self, candidate: HelloAgentsHotelCandidate) -> dict[str, Any]:
+        return {
+            "name": candidate.name,
+            "area": candidate.area,
+            "hotel_type": candidate.hotel_type,
+            "reason": candidate.reason,
+            "price_hint": candidate.price_hint,
+            "price_checked_at": candidate.price_checked_at,
+            "price_valid_for": candidate.price_valid_for,
+            "review_score": candidate.review_score,
+            "review_count": candidate.review_count,
+            "review_summary": candidate.review_summary,
+            "preference_match": candidate.preference_match,
+            "booking_confidence": candidate.booking_confidence,
+            "caveats": [str(item).strip() for item in candidate.caveats if str(item).strip()][:4],
         }
 
     def _build_planner_transport_payload(self, transport: HelloAgentsTransportGuidance) -> dict[str, Any]:
@@ -1439,7 +1508,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         seen: set[str] = set()
 
         def record(candidate: str) -> None:
-            normalized = candidate.strip().rstrip(").,")
+            normalized = candidate.strip()
+            if ")[[" in normalized:
+                normalized = normalized.split(")[[", 1)[0]
+            normalized = normalized.rstrip(").,;]")
             if not normalized.startswith("http") or normalized in seen:
                 return
             seen.add(normalized)
@@ -1688,10 +1760,14 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         )
 
     def _summarize_hotels(self, hotels: HelloAgentsHotelRecommendation) -> str:
+        selected = hotels.final_recommended_hotel.name if hotels.final_recommended_hotel is not None else "none"
         return (
+            f"selected hotel {selected}, "
             f"{len(hotels.recommended_areas)} stay areas, "
             f"{len(hotels.hotel_candidates)} hotel candidates, "
-            f"{len(hotels.stay_strategy)} stay strategy notes."
+            f"{len(hotels.stay_strategy)} stay strategy notes, "
+            f"{len(hotels.price_timeliness_notes)} price freshness notes, "
+            f"{len(hotels.review_notes)} review notes."
         )
 
     def _summarize_transport(self, transport: HelloAgentsTransportGuidance) -> str:

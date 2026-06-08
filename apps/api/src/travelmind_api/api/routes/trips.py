@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.common import success_response
+from travelmind_api.api.schemas.refine_sessions import TripCommunityGuideAttachRequest, TripRefineMessageCreateRequest, TripUploadedGuideCreateRequest
 from travelmind_api.api.schemas.trips import TripCreateRequest, TripIntakeChatRequest, TripItinerarySaveRequest, TripRefineRequest, TripUpdateRequest
 from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import get_db
@@ -11,6 +12,17 @@ from travelmind_api.core.deps import get_current_user
 from travelmind_api.db.models import User
 from travelmind_api.services.community_service import get_trip_community_post_map
 from travelmind_api.services.job_service import create_job, dispatch_job, serialize_job
+from travelmind_api.services.refine_session_service import (
+    add_uploaded_guide,
+    append_refine_message,
+    attach_community_source,
+    delete_refine_session,
+    ensure_refine_session_owns_source,
+    get_or_create_refine_session,
+    remove_community_source,
+    remove_uploaded_guide,
+    serialize_refine_session,
+)
 from travelmind_api.services.trip_intake_service import run_trip_intake_chat
 from travelmind_api.services.trip_service import create_trip, delete_trip, get_trip_or_404, list_trips, save_trip_itinerary, serialize_trip, update_trip
 
@@ -66,6 +78,96 @@ def save_trip_itinerary_endpoint(
     trip = get_trip_or_404(db, current_user, trip_id)
     trip = save_trip_itinerary(db, trip, payload)
     return success_response(_serialize_trip_payload(db, current_user, trip))
+
+
+@router.get("/{trip_id}/refine-session")
+def get_refine_session_endpoint(
+    trip_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = get_trip_or_404(db, current_user, trip_id)
+    record = get_or_create_refine_session(db, user=current_user, trip=trip)
+    return success_response(serialize_refine_session(record).model_dump(mode="json"))
+
+
+@router.delete("/{trip_id}/refine-session")
+def delete_refine_session_endpoint(
+    trip_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = get_trip_or_404(db, current_user, trip_id)
+    record = get_or_create_refine_session(db, user=current_user, trip=trip)
+    delete_refine_session(db, record=record)
+    return success_response({"success": True, "trip_id": trip.id})
+
+
+@router.post("/{trip_id}/refine-session/messages")
+def append_refine_message_endpoint(
+    trip_id: str,
+    payload: TripRefineMessageCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = get_trip_or_404(db, current_user, trip_id)
+    record = get_or_create_refine_session(db, user=current_user, trip=trip)
+    record = append_refine_message(db, record=record, payload=payload)
+    return success_response(serialize_refine_session(record).model_dump(mode="json"))
+
+
+@router.post("/{trip_id}/refine-session/uploaded-guides")
+def add_uploaded_guide_endpoint(
+    trip_id: str,
+    payload: TripUploadedGuideCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = get_trip_or_404(db, current_user, trip_id)
+    record = get_or_create_refine_session(db, user=current_user, trip=trip)
+    record = add_uploaded_guide(db, record=record, payload=payload)
+    return success_response(serialize_refine_session(record).model_dump(mode="json"))
+
+
+@router.delete("/{trip_id}/refine-session/uploaded-guides/{source_id}")
+def remove_uploaded_guide_endpoint(
+    trip_id: str,
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = get_trip_or_404(db, current_user, trip_id)
+    record = get_or_create_refine_session(db, user=current_user, trip=trip)
+    ensure_refine_session_owns_source(record, source_id, source_type="uploaded")
+    record = remove_uploaded_guide(db, record=record, source_id=source_id)
+    return success_response(serialize_refine_session(record).model_dump(mode="json"))
+
+
+@router.post("/{trip_id}/refine-session/community-sources")
+def attach_community_source_endpoint(
+    trip_id: str,
+    payload: TripCommunityGuideAttachRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = get_trip_or_404(db, current_user, trip_id)
+    record = get_or_create_refine_session(db, user=current_user, trip=trip)
+    record = attach_community_source(db, record=record, payload=payload)
+    return success_response(serialize_refine_session(record).model_dump(mode="json"))
+
+
+@router.delete("/{trip_id}/refine-session/community-sources/{source_id}")
+def remove_community_source_endpoint(
+    trip_id: str,
+    source_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    trip = get_trip_or_404(db, current_user, trip_id)
+    record = get_or_create_refine_session(db, user=current_user, trip=trip)
+    ensure_refine_session_owns_source(record, source_id, source_type="community")
+    record = remove_community_source(db, record=record, source_id=source_id)
+    return success_response(serialize_refine_session(record).model_dump(mode="json"))
 
 
 

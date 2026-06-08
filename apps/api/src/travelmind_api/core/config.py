@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     image_root: str | None = None
     public_api_url: str = "http://127.0.0.1:8000"
     cors_origins: list[str] = ["http://127.0.0.1:5173", "http://localhost:5173"]
+    admin_emails: str = "zhMarch@marchxyz.com"
 
     model_config = SettingsConfigDict(
         env_prefix="TRAVELMIND_",
@@ -65,6 +66,10 @@ class Settings(BaseSettings):
             path = self.project_root / "logs"
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    @property
+    def normalized_admin_emails(self) -> set[str]:
+        return {email.strip().lower() for email in self.admin_emails.split(",") if email.strip()}
 
 
 @lru_cache(maxsize=1)

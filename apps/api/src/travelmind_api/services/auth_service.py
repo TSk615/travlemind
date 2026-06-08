@@ -183,8 +183,19 @@ def mask_api_key(api_key: str | None) -> str | None:
     return f"{api_key[:4]}{'*' * (len(api_key) - 8)}{api_key[-4:]}"
 
 
+def is_admin_user(user: User, settings: Settings) -> bool:
+    return user.email.strip().lower() in settings.normalized_admin_emails
 
-def serialize_user(user: User) -> UserResponse:
+
+def ensure_user_active(user: User) -> None:
+    if getattr(user, "disabled_at", None) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "user_disabled", "message": "This account has been disabled"},
+        )
+
+
+def serialize_user(user: User, settings: Settings | None = None) -> UserResponse:
     return UserResponse(
         id=user.id,
         email=user.email,
@@ -192,6 +203,7 @@ def serialize_user(user: User) -> UserResponse:
         avatar=user.avatar,
         locale=user.locale,
         created_at=user.created_at,
+        is_admin=is_admin_user(user, settings) if settings is not None else False,
     )
 
 
@@ -268,6 +280,7 @@ def authenticate_user(session: Session, payload: LoginRequest) -> User:
     user = session.scalar(select(User).where(User.email == _normalize_email(payload.email)))
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "invalid_credentials", "message": "Invalid email or password"})
+    ensure_user_active(user)
     return user
 
 
@@ -370,6 +383,13 @@ def refresh_access_token(session: Session, refresh_token: str | None, settings: 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "user_not_found", "message": "User not found"},
+        )
+    if getattr(user, "disabled_at", None) is not None:
+        session.delete(refresh_session)
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "user_disabled", "message": "This account has been disabled"},
         )
 
     return issue_access_token(user, settings)

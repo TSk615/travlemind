@@ -249,7 +249,7 @@ def _image_enrichment_debug_summary(plan: PlanningResult | None) -> list[dict[st
         return rows
     for day in plan.days:
         for item in day.items:
-            if item.image_priority_tier in {None, "skipped"} and item.image_status != "failed":
+            if item.image_priority_tier in {None, "skipped"} and item.image_status != "failed" and not item.image_urls:
                 continue
             rows.append(
                 {
@@ -263,6 +263,28 @@ def _image_enrichment_debug_summary(plan: PlanningResult | None) -> list[dict[st
                 }
             )
     return rows[:20]
+
+
+def _image_enrichment_targets(plan: PlanningResult | None) -> list[dict[str, object]]:
+    if plan is None:
+        return []
+
+    targets: list[dict[str, object]] = []
+    for day in plan.days:
+        for item_index, item in enumerate(day.items):
+            if item.image_status != "pending":
+                continue
+            targets.append(
+                {
+                    "day_index": day.day_index,
+                    "item_index": item_index,
+                    "item_id": item.id,
+                    "name": item.name,
+                    "type": item.type,
+                    "location": item.location,
+                }
+            )
+    return targets
 
 
 def _resolve_image_config(user: User | None) -> ImageModelConfig | None:
@@ -330,6 +352,7 @@ def _process_trip_generation(job: JobExecution) -> dict:
             "agent_trace": agent_trace,
             "image_enrichment_summary": _image_enrichment_summary(result),
             "image_enrichment_debug": _image_enrichment_debug_summary(result),
+            "image_enrichment_targets": _image_enrichment_targets(result),
             "followup_job_id": followup_job.id,
         }
 
@@ -400,13 +423,14 @@ def _process_trip_refine(job: JobExecution) -> dict:
             "agent_trace": agent_trace,
             "image_enrichment_summary": _image_enrichment_summary(refined_plan),
             "image_enrichment_debug": _image_enrichment_debug_summary(refined_plan),
+            "image_enrichment_targets": _image_enrichment_targets(refined_plan),
             "followup_job_id": followup_job.id,
         }
 
 
 def _process_trip_image_enrichment(job: JobExecution) -> dict:
     log_job_event("trip_image_enrich_started", job_id=job.id, logger_name=__name__, message="Starting trip image enrichment job.")
-    _transition_job(job.id, stage="source_search", stage_message="Curating scenic stops for visual coverage.", progress_percent=24)
+    _transition_job(job.id, stage="source_search", stage_message="Preparing pending scenic stops for Tavily image search.", progress_percent=24)
     with session_scope() as session:
         trip = session.query(Trip).filter(Trip.id == job.trip_id).one_or_none()
         if not trip:
@@ -416,7 +440,7 @@ def _process_trip_image_enrichment(job: JobExecution) -> dict:
         plan = _load_plan_from_trip(trip)
         if plan is None:
             raise HTTPException(status_code=400, detail="Generate itinerary before enriching images")
-        _transition_job(job.id, stage="route_planning", stage_message="Running image curator and Tavily image enrichment.", progress_percent=68)
+        _transition_job(job.id, stage="route_planning", stage_message="Searching Tavily image sources and writing images back.", progress_percent=68)
         enriched_plan = enrich_plan_images(
             plan,
             request,
@@ -433,6 +457,7 @@ def _process_trip_image_enrichment(job: JobExecution) -> dict:
             "agent_trace": agent_trace,
             "image_enrichment_summary": _image_enrichment_summary(enriched_plan),
             "image_enrichment_debug": _image_enrichment_debug_summary(enriched_plan),
+            "image_enrichment_targets": _image_enrichment_targets(enriched_plan),
         }
 
 

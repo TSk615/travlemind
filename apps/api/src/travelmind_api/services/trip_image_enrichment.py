@@ -39,6 +39,10 @@ _GENERIC_EXPLORE_PATTERN = re.compile(
     r"(walk|stroll|slow walk|free time|neighborhood|wander|散步|漫步|步行|闲逛|自由活动|逛街)",
     re.IGNORECASE,
 )
+_IMAGE_AGENT_RUN_KEYS = {"image_curator", "attraction_image_specialist", "image_reviewer"}
+_DIRECT_IMAGE_COUNT_PER_ITEM = 1
+_DIRECT_IMAGE_SEARCH_RESULT_COUNT = 6
+_DIRECT_IMAGE_MAX_WORKERS = 3
 _HIGH_PRIORITY_IMAGE_MAX_WORKERS = 3
 _MAX_REVIEW_CANDIDATES = 5
 _STRATEGY_SUFFIX_PATTERN = re.compile(
@@ -140,28 +144,22 @@ def enrich_plan_images(
     llm_config: LlmConfig | None,
     search_service: SearchServiceConfig | None,
 ) -> PlanningResult:
+    _ = llm_config
     visual_items = _collect_and_prepare_visual_items(plan)
-    plan.trace.agent_runs = [run for run in plan.trace.agent_runs if run.key not in {"image_curator", "attraction_image_specialist"}]
+    plan.trace.agent_runs = [run for run in plan.trace.agent_runs if run.key not in _IMAGE_AGENT_RUN_KEYS]
 
-    curator_run, selections = _run_image_curator(plan, request, llm_config=llm_config, visual_items=visual_items)
-    plan.trace.agent_runs.append(curator_run)
-
-    specialist_run, reviewer_run = _run_image_specialist(
-        plan,
+    specialist_run = _run_direct_tavily_image_specialist(
         request,
-        llm_config=llm_config,
         search_service=search_service,
-        selections=selections,
         visual_items=visual_items,
     )
     plan.trace.agent_runs.append(specialist_run)
-    plan.trace.agent_runs.append(reviewer_run)
     return plan
 
 
 def prepare_plan_images_for_async_enrichment(plan: PlanningResult) -> PlanningResult:
     _collect_and_prepare_visual_items(plan)
-    plan.trace.agent_runs = [run for run in plan.trace.agent_runs if run.key not in {"image_curator", "attraction_image_specialist"}]
+    plan.trace.agent_runs = [run for run in plan.trace.agent_runs if run.key not in _IMAGE_AGENT_RUN_KEYS]
     return plan
 
 
@@ -348,6 +346,152 @@ def _build_curator_run(
         model=model,
         notes=notes,
         citations=[],
+    )
+
+
+def _run_direct_tavily_image_specialist(
+    request: PlanningRequest,
+    *,
+    search_service: SearchServiceConfig | None,
+    visual_items: list[PlannedItem],
+) -> AgentRunStep:
+    if not visual_items:
+        return AgentRunStep(
+            key="attraction_image_specialist",
+            title="Attraction image specialist",
+            description="Searches and attaches source images for pending itinerary items.",
+            prompt_focus="No pending scenic items were available.",
+            output_summary="No image search was necessary.",
+            prompt_version="tavily.direct_image_enrichment.v1",
+            status="completed",
+            model=None,
+            notes=["No itinerary items required image search."],
+            citations=[],
+        )
+
+    resolved_search_service = _resolve_tavily_image_search_config(search_service)
+    if resolved_search_service is None:
+        for item in visual_items:
+            item.image_status = "failed"
+            item.image_failure_reason = "Tavily image search is not configured."
+        return AgentRunStep(
+            key="attraction_image_specialist",
+            title="Attraction image specialist",
+            description="Searches and attaches source images for pending itinerary items.",
+            prompt_focus="Use Tavily only; do not fall back to GrokSearch or other providers.",
+            output_summary="Image enrichment was skipped because Tavily was not configured.",
+            prompt_version="tavily.direct_image_enrichment.v1",
+            status="failed",
+            model=None,
+            notes=["Tavily is required for image enrichment and was not available."],
+            citations=[],
+        )
+
+    gateway = ConfiguredSearchGateway(resolved_search_service)
+    try:
+        available_tools = gateway.available_tools()
+    except Exception as exc:
+        for item in visual_items:
+            item.image_status = "failed"
+            item.image_failure_reason = "Tavily tool discovery failed."
+        return AgentRunStep(
+            key="attraction_image_specialist",
+            title="Attraction image specialist",
+            description="Searches and attaches source images for pending itinerary items.",
+            prompt_focus="Use Tavily only; do not fall back to GrokSearch or other providers.",
+            output_summary="Image enrichment could not start because Tavily tool discovery failed.",
+            prompt_version="tavily.direct_image_enrichment.v1",
+            status="failed",
+            model=None,
+            notes=[f"Tavily tool discovery failed: {str(exc).strip() or exc.__class__.__name__}."],
+            citations=[],
+        )
+    if "search" not in available_tools:
+        for item in visual_items:
+            item.image_status = "failed"
+            item.image_failure_reason = "Tavily search tool is unavailable."
+        return AgentRunStep(
+            key="attraction_image_specialist",
+            title="Attraction image specialist",
+            description="Searches and attaches source images for pending itinerary items.",
+            prompt_focus="Use Tavily only; do not fall back to GrokSearch or other providers.",
+            output_summary="Image enrichment was skipped because the Tavily search tool was unavailable.",
+            prompt_version="tavily.direct_image_enrichment.v1",
+            status="failed",
+            model=None,
+            notes=[f"Available tools: {', '.join(sorted(available_tools)) or 'none'}."],
+            citations=[],
+        )
+
+    search_targets = [item for item in visual_items if item.image_status == "pending"]
+    outcomes: list[ImageSearchOutcome] = []
+    if search_targets:
+        with ThreadPoolExecutor(
+            max_workers=min(_DIRECT_IMAGE_MAX_WORKERS, len(search_targets)),
+            thread_name_prefix="trip-image-direct",
+        ) as executor:
+            futures = [
+                executor.submit(_search_item_images_direct, resolved_search_service, request, item)
+                for item in search_targets
+            ]
+            outcomes.extend(future.result() for future in futures)
+
+    all_citations: list[str] = []
+    completed = 0
+    failed = 0
+    total_raw_candidates = 0
+    total_selected = 0
+    candidate_debug_notes: list[str] = []
+    outcomes_by_id = {outcome.item_id: outcome for outcome in outcomes}
+    for item in search_targets:
+        outcome = outcomes_by_id.get(item.id)
+        if outcome is None:
+            item.image_status = "failed"
+            item.image_failure_reason = "Image search did not return an outcome."
+            failed += 1
+            continue
+        item.image_urls = list(outcome.image_urls)
+        item.image_source_urls = list(outcome.source_urls[: max(1, min(len(outcome.source_urls), len(outcome.image_urls) or 1))])
+        item.image_status = outcome.status
+        item.image_failure_reason = outcome.failure_reason if outcome.status == "failed" else None
+        all_citations.extend(outcome.source_urls)
+        total_raw_candidates += outcome.candidate_count_raw
+        total_selected += outcome.candidate_count_after_review
+        candidate_debug_notes.extend(_build_candidate_debug_notes(item, outcome))
+        if outcome.image_urls:
+            completed += 1
+        else:
+            failed += 1
+
+    endpoint = urlparse(resolved_search_service.base_url).netloc or resolved_search_service.base_url
+    domains = resolved_search_service.image_include_domains
+    query_previews = [
+        f"Image query [{_best_item_name(item)}]: {_direct_image_query_for_item(item, request)}"
+        for item in search_targets[:5]
+    ]
+    return AgentRunStep(
+        key="attraction_image_specialist",
+        title="Attraction image specialist",
+        description="Searches and attaches source images for pending itinerary items.",
+        prompt_focus="Directly search Tavily for pending scenic items, then write selected images back to each item before display.",
+        output_summary=f"Attached images for {completed} pending items; {failed} pending items remained without usable images.",
+        prompt_version="tavily.direct_image_enrichment.v1",
+        status="completed" if failed == 0 else "partial",
+        model=None,
+        notes=[
+            "Provider: tavily.",
+            f"Third-party endpoint: {endpoint}.",
+            "Wire API: api.",
+            "Search tool: search.",
+            "Image mode: include_images + include_image_descriptions.",
+            f"Image source domains: {', '.join(domains) or 'default Tavily'}.",
+            f"Execution strategy: direct pending items parallel (max {_DIRECT_IMAGE_MAX_WORKERS} workers); curator and reviewer skipped.",
+            f"Per-item image cap: {_DIRECT_IMAGE_COUNT_PER_ITEM}.",
+            *query_previews,
+            f"Candidate counts: raw={total_raw_candidates}, selected={total_selected}.",
+            *candidate_debug_notes[:12],
+        ],
+        citations=_dedupe(all_citations),
     )
 
 
@@ -616,6 +760,77 @@ def _resolve_tavily_image_search_config(search_service: SearchServiceConfig | No
         api_key=tavily_api_key,
         timeout_seconds=tavily_timeout,
     )
+
+
+def _direct_image_query_for_item(item: PlannedItem, request: PlanningRequest) -> str:
+    query_plan = _build_fallback_image_query_plan(item, request)
+    return query_plan.search_queries[0] if query_plan.search_queries else _build_image_query(item, request)
+
+
+def _search_item_images_direct(
+    search_service: SearchServiceConfig,
+    request: PlanningRequest,
+    item: PlannedItem,
+) -> ImageSearchOutcome:
+    gateway = ConfiguredSearchGateway(search_service)
+    query = _direct_image_query_for_item(item, request)
+    try:
+        search_payload = gateway.call_operation(
+            "search",
+            {
+                "query": query,
+                "num_results": _DIRECT_IMAGE_SEARCH_RESULT_COUNT,
+                "include_images": True,
+                "include_image_descriptions": True,
+            },
+        )
+        candidates = _extract_tavily_image_candidates(search_payload)
+        selected_candidates = [candidate for candidate in candidates if candidate.url][:_DIRECT_IMAGE_COUNT_PER_ITEM]
+        image_urls = _dedupe([candidate.url for candidate in selected_candidates])
+        source_urls = _dedupe([candidate.source_url for candidate in selected_candidates if candidate.source_url])
+        if not image_urls:
+            return ImageSearchOutcome(
+                item_id=item.id,
+                image_urls=[],
+                source_urls=[],
+                status="failed",
+                failure_reason=f"Tavily returned no image candidates for query: {query}",
+                candidate_count_raw=len(candidates),
+                candidate_count_after_rules=len(candidates),
+                candidate_count_after_review=0,
+                review_mode="direct_tavily",
+                review_summary="Direct Tavily selection found no usable image candidates.",
+                debug_query=query,
+                debug_candidates_raw=[_serialize_tavily_candidate(candidate) for candidate in candidates[:8]],
+                debug_candidates_after_rules=[_serialize_tavily_candidate(candidate) for candidate in candidates[:8]],
+                debug_candidates_after_review=[],
+            )
+        return ImageSearchOutcome(
+            item_id=item.id,
+            image_urls=image_urls,
+            source_urls=source_urls,
+            status="completed",
+            failure_reason=None,
+            candidate_count_raw=len(candidates),
+            candidate_count_after_rules=len(candidates),
+            candidate_count_after_review=len(selected_candidates),
+            review_mode="direct_tavily",
+            review_summary="Direct Tavily candidate selection; curator and reviewer skipped.",
+            debug_query=query,
+            debug_candidates_raw=[_serialize_tavily_candidate(candidate) for candidate in candidates[:8]],
+            debug_candidates_after_rules=[_serialize_tavily_candidate(candidate) for candidate in candidates[:8]],
+            debug_candidates_after_review=[_serialize_tavily_candidate(candidate) for candidate in selected_candidates],
+        )
+    except Exception as exc:
+        return ImageSearchOutcome(
+            item_id=item.id,
+            image_urls=[],
+            source_urls=[],
+            status="failed",
+            failure_reason=f"Image search failed for query '{query}': {str(exc).strip() or exc.__class__.__name__}",
+            review_mode="search_failed",
+            debug_query=query,
+        )
 
 
 def _search_item_images(

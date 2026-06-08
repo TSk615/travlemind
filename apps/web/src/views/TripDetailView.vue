@@ -1,7 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
-import type { AgentRunStep, GeneratedItinerary, ItineraryDay, ItineraryItem, JobTimelineEntry, SearchDocument, TransportBookingSummary, Trip, TripRefineInput } from "@travelmind/shared-types"
+import type {
+  AgentRunStep,
+  CommunityPostSummary,
+  GeneratedItinerary,
+  ItineraryDay,
+  ItineraryItem,
+  JobTimelineEntry,
+  SearchDocument,
+  TransportBookingSummary,
+  Trip,
+  TripRefineInput,
+  TripRefineSession
+} from "@travelmind/shared-types"
 import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
@@ -58,12 +70,13 @@ const isDebug = computed(() => {
 })
 
 const refineModalOpen = ref(false)
-function openRefineModal() {
+async function openRefineModal() {
   if (actionLocked.value || !canUseBrowserModel.value) {
     return
   }
   refineError.value = null
   refineModalOpen.value = true
+  await loadRefineContext()
 }
 function closeRefineModal() {
   if (refinePending.value) {
@@ -97,6 +110,12 @@ const searchResults = ref<SearchDocument[]>([])
 const hasSearched = ref(false)
 const searchQuery = ref("best quiet morning spots")
 const manualLinks = ref("https://kyoto.travel/en")
+const refineSession = ref<TripRefineSession | null>(null)
+const refineSessionPending = ref(false)
+const refineGuideTitle = ref("")
+const refineGuideContent = ref("")
+const refineCommunityPosts = ref<CommunityPostSummary[]>([])
+const selectedCommunityPostId = ref("")
 const customRefineInstruction = ref("")
 const communityPending = ref(false)
 const communityError = ref<string | null>(null)
@@ -614,6 +633,13 @@ const hasPendingItemImages = computed(() =>
     )
   )
 )
+const shouldDisplayItinerary = computed(() => Boolean(trip.value?.itinerary && !hasPendingItemImages.value))
+const pendingImageDisplayTitle = computed(() => (locale.value === "zh-CN" ? "正在补充景点图片" : "Adding attraction images"))
+const pendingImageDisplayMessage = computed(() =>
+  locale.value === "zh-CN"
+    ? "攻略已生成，正在按 Trip.com、Pixabay、Pexels 补图，完成后会自动展示完整攻略。"
+    : "The itinerary is generated. We are adding images from Trip.com, Pixabay, and Pexels, then the full guide will appear automatically."
+)
 const imageEnrichmentCounts = computed(() => {
   const counts = { pending: 0, completed: 0, failed: 0, skipped: 0 }
   for (const day of trip.value?.itinerary?.days ?? []) {
@@ -788,6 +814,55 @@ const latestSuccessfulExecutionDescription = computed(() =>
       ? "这里只展示最近一次成功执行回写的 trace 记录。"
       : "This section shows the trace persisted from the latest successful execution."
 )
+const refineWorkbenchCopy = computed(() => ({
+  title: "Conversational refine",
+  subtitle: "Refine this itinerary with remembered conversation, uploaded guide notes, and community guide references.",
+  memoryTitle: "Conversation memory",
+  memoryEmpty: "No refine conversation yet.",
+  uploadedTitle: "Uploaded guides",
+  uploadedEmpty: "No uploaded guide notes yet.",
+  guideTitleLabel: "Guide title",
+  guideTitlePlaceholder: "Example: Kyoto food notes",
+  guideContentLabel: "Guide content",
+  guideContentPlaceholder: "Paste text from a guide, travel note, or checklist.",
+  guideFileLabel: "Import text file",
+  addGuide: "Add guide",
+  communityTitle: "Community guides",
+  communityEmpty: "No community guide selected yet.",
+  communitySelectLabel: "Published community guide",
+  communitySelectPlaceholder: "Choose a community guide",
+  attachCommunity: "Attach guide",
+  removeSource: "Remove",
+  resetMemory: "Reset memory",
+  resetConfirm: "Clear this trip's refine conversation and attached guide sources?",
+  contextLabel: "Context",
+  messagesLabel: "messages",
+  uploadedLabel: "uploaded",
+  communityLabel: "community",
+  assistantSummaryPrefix: "Updated itinerary",
+  guideValidation: "Add a title and at least 20 characters of guide content.",
+  communityValidation: "Choose a community guide first."
+}))
+const refineConversationMessages = computed(() => refineSession.value?.messages ?? [])
+const refineUploadedGuides = computed(() => refineSession.value?.uploaded_guides ?? [])
+const refineCommunitySources = computed(() => refineSession.value?.community_sources ?? [])
+const refineCommunityOptions = computed(() => {
+  const attachedPostIds = new Set(refineCommunitySources.value.map((source) => source.post_id))
+  return refineCommunityPosts.value
+    .filter((post) => !attachedPostIds.has(post.id))
+    .map((post) => ({
+      value: post.id,
+      label: `${post.destination} - ${post.title}`
+    }))
+})
+const refineContextSummary = computed(() => {
+  const labels = refineWorkbenchCopy.value
+  return [
+    `${refineConversationMessages.value.length} ${labels.messagesLabel}`,
+    `${refineUploadedGuides.value.length} ${labels.uploadedLabel}`,
+    `${refineCommunitySources.value.length} ${labels.communityLabel}`
+  ].join(" / ")
+})
 const quickRefineActions = computed(() => copy.value.quickRefineActions)
 const itineraryDraftRisksText = computed(() => (itineraryDraft.value?.risks ?? []).join("\n"))
 const itineraryItemTypeOptions = computed(() => {
@@ -1602,8 +1677,142 @@ async function loadTrip(initial = false) {
   }
 }
 
+async function loadRefineContext() {
+  if (!trip.value) {
+    return
+  }
+
+  refineSessionPending.value = true
+  try {
+    const [session, posts] = await Promise.all([
+      api.getRefineSession(tripId.value),
+      api.listCommunityPosts()
+    ])
+    refineSession.value = session
+    refineCommunityPosts.value = posts
+  } catch (value) {
+    refineError.value = getErrorMessage(value, refineWorkbenchCopy.value.title)
+  } finally {
+    refineSessionPending.value = false
+  }
+}
+
+async function ensureRefineSessionLoaded(): Promise<TripRefineSession | null> {
+  if (!refineSession.value) {
+    await loadRefineContext()
+  }
+  return refineSession.value
+}
+
+async function addRefineUploadedGuide() {
+  const title = refineGuideTitle.value.trim()
+  const content = refineGuideContent.value.trim()
+  if (!title || content.length < 20) {
+    refineError.value = refineWorkbenchCopy.value.guideValidation
+    return
+  }
+
+  refineSessionPending.value = true
+  refineError.value = null
+  try {
+    refineSession.value = await api.addUploadedGuide(tripId.value, {
+      title,
+      content,
+      source_type: "manual_text"
+    })
+    refineGuideTitle.value = ""
+    refineGuideContent.value = ""
+  } catch (value) {
+    refineError.value = getErrorMessage(value, refineWorkbenchCopy.value.addGuide)
+  } finally {
+    refineSessionPending.value = false
+  }
+}
+
+async function handleGuideFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) {
+    return
+  }
+  try {
+    const text = await file.text()
+    if (!refineGuideTitle.value.trim()) {
+      refineGuideTitle.value = file.name.replace(/\.[^.]+$/, "")
+    }
+    refineGuideContent.value = text.slice(0, 40000)
+  } catch (value) {
+    refineError.value = getErrorMessage(value, "Unable to read guide file")
+  } finally {
+    input.value = ""
+  }
+}
+
+async function removeRefineUploadedGuide(sourceId: string) {
+  refineSessionPending.value = true
+  refineError.value = null
+  try {
+    refineSession.value = await api.removeUploadedGuide(tripId.value, sourceId)
+  } catch (value) {
+    refineError.value = getErrorMessage(value, refineWorkbenchCopy.value.removeSource)
+  } finally {
+    refineSessionPending.value = false
+  }
+}
+
+async function attachSelectedCommunitySource() {
+  const postId = selectedCommunityPostId.value.trim()
+  if (!postId) {
+    refineError.value = refineWorkbenchCopy.value.communityValidation
+    return
+  }
+
+  refineSessionPending.value = true
+  refineError.value = null
+  try {
+    refineSession.value = await api.attachCommunitySource(tripId.value, { post_id: postId })
+    selectedCommunityPostId.value = ""
+  } catch (value) {
+    refineError.value = getErrorMessage(value, refineWorkbenchCopy.value.attachCommunity)
+  } finally {
+    refineSessionPending.value = false
+  }
+}
+
+async function removeRefineCommunitySource(sourceId: string) {
+  refineSessionPending.value = true
+  refineError.value = null
+  try {
+    refineSession.value = await api.removeCommunitySource(tripId.value, sourceId)
+  } catch (value) {
+    refineError.value = getErrorMessage(value, refineWorkbenchCopy.value.removeSource)
+  } finally {
+    refineSessionPending.value = false
+  }
+}
+
+async function resetRefineSession() {
+  if (!window.confirm(refineWorkbenchCopy.value.resetConfirm)) {
+    return
+  }
+
+  refineSessionPending.value = true
+  refineError.value = null
+  try {
+    await api.resetRefineSession(tripId.value)
+    refineSession.value = await api.getRefineSession(tripId.value)
+    selectedCommunityPostId.value = ""
+    refineGuideTitle.value = ""
+    refineGuideContent.value = ""
+  } catch (value) {
+    refineError.value = getErrorMessage(value, refineWorkbenchCopy.value.resetMemory)
+  } finally {
+    refineSessionPending.value = false
+  }
+}
+
 function schedulePendingImageRefresh() {
-  if (timer !== null || activeJob.value || !hasPendingItemImages.value) {
+  if (timer !== null || isJobRunning.value || !hasPendingItemImages.value) {
     return
   }
   timer = window.setTimeout(() => {
@@ -1636,7 +1845,6 @@ async function pollJob(jobId: string, kind: "generate" | "export" | "image_enric
   try {
     activeJob.value = await api.getJob(jobId)
     if (activeJob.value.status === "completed" || activeJob.value.status === "failed") {
-      await loadTrip(false)
       if (kind === "generate" && activeJob.value.status === "completed") {
         const followupJobId = String(activeJob.value.result?.followup_job_id ?? "").trim()
         if (followupJobId) {
@@ -1644,6 +1852,7 @@ async function pollJob(jobId: string, kind: "generate" | "export" | "image_enric
           return
         }
       }
+      await loadTrip(false)
       if (activeJob.value.status === "failed") {
         const message =
           activeJob.value.error_message?.trim()
@@ -1773,15 +1982,25 @@ async function submitRefine(payload: TripRefineInput) {
     await settingsStore.fetch(true)
     const config = ensureBrowserLlmConfig()
     activeJob.value = createBrowserJob("trip.refine", "brief_parsing", copy.value.browserRefineMessage, 12)
-    const groundedDocs = hasSearched ? searchResults.value : await collectGroundingDocs()
+    const sessionForPrompt = await ensureRefineSessionLoaded()
+    const groundedDocs = hasSearched.value ? searchResults.value : await collectGroundingDocs()
     updateBrowserJob({ stage: "source_search", stage_message: copy.value.searchPanelMessage, progress_percent: 32 })
     updateBrowserJob({ stage: "route_planning", stage_message: copy.value.browserRefineMessage, progress_percent: 76 })
-    const result = await refineTripInBrowser(config, trip.value, groundedDocs, payload)
+    const result = await refineTripInBrowser(config, trip.value, groundedDocs, payload, { session: sessionForPrompt })
     updateBrowserJob({ stage: "export_ready", stage_message: copy.value.browserSavedMessage, progress_percent: 92 })
     trip.value = await api.saveTripItinerary(tripId.value, {
       itinerary: result.itinerary,
       latest_agent_trace: result.trace
     })
+    try {
+      refineSession.value = await api.appendRefineMessage(tripId.value, { role: "user", text: payload.instruction })
+      refineSession.value = await api.appendRefineMessage(tripId.value, {
+        role: "assistant",
+        text: `${refineWorkbenchCopy.value.assistantSummaryPrefix}: ${result.itinerary.summary}`
+      })
+    } catch (historyError) {
+      refineError.value = getErrorMessage(historyError, "Saved itinerary, but failed to update refine memory.")
+    }
     updateBrowserJob({ status: "completed", stage: "export_ready", stage_message: copy.value.browserSaved, progress_percent: 100, result: { summary: result.itinerary.summary } })
   } catch (value) {
     const message = getErrorMessage(value, t("tripDetail.asyncFailedTitle"))
@@ -2003,6 +2222,11 @@ watch(
     communityNotice.value = null
     searchResults.value = []
     hasSearched.value = false
+    refineSession.value = null
+    refineCommunityPosts.value = []
+    refineGuideTitle.value = ""
+    refineGuideContent.value = ""
+    selectedCommunityPostId.value = ""
     customRefineInstruction.value = ""
     communityNoteDraft.value = ""
     communityEditorOpen.value = false
@@ -2092,9 +2316,9 @@ onBeforeUnmount(() => {
       </header>
 
       <!-- Overview metrics -->
-      <section v-if="trip.itinerary" id="overview" class="tm-detail__overview">
+      <section v-if="shouldDisplayItinerary" id="overview" class="tm-detail__overview">
         <p class="tm-detail__section-kicker">{{ copy.overviewKicker }}</p>
-        <h2 class="tm-detail__section-title">{{ trip.itinerary.summary }}</h2>
+        <h2 class="tm-detail__section-title">{{ trip.itinerary?.summary }}</h2>
         <div class="tm-detail__metrics">
           <TmMetricCard v-for="metric in itineraryMetrics" :key="metric.label" :label="metric.label" :value="metric.value" />
         </div>
@@ -2303,7 +2527,7 @@ onBeforeUnmount(() => {
               <p class="tm-detail__section-desc">{{ copy.itineraryPanelDescription }}</p>
             </div>
 
-            <div v-if="trip.itinerary" class="tm-detail__section-actions">
+            <div v-if="shouldDisplayItinerary" class="tm-detail__section-actions">
               <template v-if="itineraryEditorOpen">
                 <TmButton variant="primary" :disabled="itinerarySavePending" :loading="itinerarySavePending" @click="saveItineraryEditor">
                   {{ itinerarySavePending ? itineraryEditorCopy.savingAction : itineraryEditorCopy.saveAction }}
@@ -2455,12 +2679,14 @@ onBeforeUnmount(() => {
             </template>
 
             <template v-else>
-              <ul v-if="trip.itinerary?.risks?.length" class="tm-detail__risk-list">
+              <StatePanel v-if="trip.itinerary && hasPendingItemImages" kind="loading" :title="pendingImageDisplayTitle" :message="pendingImageDisplayMessage" compact />
+
+              <ul v-if="shouldDisplayItinerary && trip.itinerary?.risks?.length" class="tm-detail__risk-list">
                 <li v-for="risk in trip.itinerary.risks" :key="risk">{{ risk }}</li>
               </ul>
 
               <!-- Referenced visuals -->
-              <section v-if="citedXhsVisualDocs.length" class="tm-detail__visuals">
+              <section v-if="shouldDisplayItinerary && citedXhsVisualDocs.length" class="tm-detail__visuals">
                 <span class="tm-detail__badge">{{ locale === "zh-CN" ? "参考风景图" : "Referenced visuals" }}</span>
                 <div class="tm-detail__visual-grid">
                   <article v-for="doc in citedXhsVisualDocs" :key="doc.id" class="tm-detail__visual-card">
@@ -2479,8 +2705,8 @@ onBeforeUnmount(() => {
               </section>
 
               <!-- Day cards -->
-              <div v-if="trip.itinerary" class="tm-detail__days">
-                <article v-for="day in trip.itinerary.days" :key="day.day_index" class="tm-detail__day-card">
+              <div v-if="shouldDisplayItinerary" class="tm-detail__days">
+                <article v-for="day in trip.itinerary?.days ?? []" :key="day.day_index" class="tm-detail__day-card">
                   <div class="tm-detail__day-header">
                     <div>
                       <p class="tm-detail__kicker">{{ t('common.daysLabel', { day: day.day_index, title: day.title }) }}</p>
@@ -2669,12 +2895,103 @@ onBeforeUnmount(() => {
 
     <!-- Refine modal -->
     <div v-if="refineModalOpen && trip" class="tm-detail__modal-backdrop" @click.self="closeRefineModal">
-      <article class="tm-detail__modal-card">
+      <article class="tm-detail__modal-card tm-detail__modal-card--wide">
         <div class="tm-detail__section-header">
-          <p class="tm-detail__section-kicker">{{ copy.quickRefineTitle }}</p>
-          <h2 class="tm-detail__section-title">{{ copy.quickRefineTitle }}</h2>
-          <p class="tm-detail__section-desc">{{ copy.quickRefineSubtitle }}</p>
+          <p class="tm-detail__section-kicker">{{ refineWorkbenchCopy.contextLabel }}: {{ refineContextSummary }}</p>
+          <h2 class="tm-detail__section-title">{{ refineWorkbenchCopy.title }}</h2>
+          <p class="tm-detail__section-desc">{{ refineWorkbenchCopy.subtitle }}</p>
         </div>
+
+        <StatePanel v-if="refineSessionPending && !refineSession" kind="loading" :title="refineWorkbenchCopy.title" message="Loading refine context." compact />
+
+        <div class="tm-detail__refine-workbench">
+          <section class="tm-detail__refine-pane">
+            <div class="tm-detail__subsection-header">
+              <p class="tm-detail__kicker">{{ refineWorkbenchCopy.memoryTitle }}</p>
+              <TmButton variant="ghost" size="sm" :disabled="refineSessionPending || refinePending" @click="resetRefineSession">
+                {{ refineWorkbenchCopy.resetMemory }}
+              </TmButton>
+            </div>
+            <div v-if="refineConversationMessages.length" class="tm-detail__refine-messages">
+              <article v-for="message in refineConversationMessages.slice(-8)" :key="message.id" :class="['tm-detail__refine-message', `tm-detail__refine-message--${message.role}`]">
+                <p class="tm-detail__kicker">{{ message.role }}</p>
+                <p>{{ message.text }}</p>
+              </article>
+            </div>
+            <p v-else class="tm-detail__muted">{{ refineWorkbenchCopy.memoryEmpty }}</p>
+          </section>
+
+          <section class="tm-detail__refine-pane">
+            <p class="tm-detail__kicker">{{ refineWorkbenchCopy.uploadedTitle }}</p>
+            <div v-if="refineUploadedGuides.length" class="tm-detail__source-list">
+              <article v-for="guide in refineUploadedGuides" :key="guide.id" class="tm-detail__source-row">
+                <div>
+                  <strong>{{ guide.title }}</strong>
+                  <p class="tm-detail__muted">{{ guide.content.slice(0, 140) }}{{ guide.content.length > 140 ? "..." : "" }}</p>
+                </div>
+                <TmButton variant="ghost" size="sm" :disabled="refineSessionPending || refinePending" @click="removeRefineUploadedGuide(guide.id)">
+                  {{ refineWorkbenchCopy.removeSource }}
+                </TmButton>
+              </article>
+            </div>
+            <p v-else class="tm-detail__muted">{{ refineWorkbenchCopy.uploadedEmpty }}</p>
+            <div class="tm-detail__editor-grid">
+              <TmField
+                id="refine-guide-title"
+                :model-value="refineGuideTitle"
+                :label="refineWorkbenchCopy.guideTitleLabel"
+                :placeholder="refineWorkbenchCopy.guideTitlePlaceholder"
+                @update:model-value="(v: string | number) => refineGuideTitle = String(v)"
+              />
+              <label class="tm-detail__file-field">
+                <span>{{ refineWorkbenchCopy.guideFileLabel }}</span>
+                <input type="file" accept=".txt,.md,.json,.csv,.html,.htm" :disabled="refineSessionPending || refinePending" @change="handleGuideFileSelected" />
+              </label>
+            </div>
+            <TmTextarea
+              id="refine-guide-content"
+              :model-value="refineGuideContent"
+              :label="refineWorkbenchCopy.guideContentLabel"
+              :placeholder="refineWorkbenchCopy.guideContentPlaceholder"
+              :rows="4"
+              @update:model-value="(v: string) => refineGuideContent = v"
+            />
+            <TmButton variant="secondary" size="sm" :disabled="refineSessionPending || refinePending" @click="addRefineUploadedGuide">
+              {{ refineWorkbenchCopy.addGuide }}
+            </TmButton>
+          </section>
+
+          <section class="tm-detail__refine-pane">
+            <p class="tm-detail__kicker">{{ refineWorkbenchCopy.communityTitle }}</p>
+            <div v-if="refineCommunitySources.length" class="tm-detail__source-list">
+              <article v-for="source in refineCommunitySources" :key="source.id" class="tm-detail__source-row">
+                <div>
+                  <strong>{{ source.title }}</strong>
+                  <p class="tm-detail__muted">{{ source.destination }} / {{ source.author_name }} / {{ source.itinerary_summary }}</p>
+                </div>
+                <TmButton variant="ghost" size="sm" :disabled="refineSessionPending || refinePending" @click="removeRefineCommunitySource(source.id)">
+                  {{ refineWorkbenchCopy.removeSource }}
+                </TmButton>
+              </article>
+            </div>
+            <p v-else class="tm-detail__muted">{{ refineWorkbenchCopy.communityEmpty }}</p>
+            <div class="tm-detail__refine-community-picker">
+              <TmSelect
+                id="refine-community-source"
+                :model-value="selectedCommunityPostId"
+                :label="refineWorkbenchCopy.communitySelectLabel"
+                :placeholder="refineWorkbenchCopy.communitySelectPlaceholder"
+                :options="refineCommunityOptions"
+                :disabled="refineSessionPending || refinePending || refineCommunityOptions.length === 0"
+                @update:model-value="(v: string) => selectedCommunityPostId = v"
+              />
+              <TmButton variant="secondary" size="sm" :disabled="refineSessionPending || refinePending || !selectedCommunityPostId" @click="attachSelectedCommunitySource">
+                {{ refineWorkbenchCopy.attachCommunity }}
+              </TmButton>
+            </div>
+          </section>
+        </div>
+
         <div class="tm-detail__quick-actions">
           <TmButton v-for="action in quickRefineActions" :key="action.label" variant="ghost" size="sm" :disabled="actionLocked || !canUseBrowserModel" @click="runPresetRefine(action)">
             {{ action.label }}
@@ -2940,6 +3257,22 @@ onBeforeUnmount(() => {
 
 .tm-detail__modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); display: grid; place-items: center; z-index: 100; padding: var(--tm-space-6); }
 .tm-detail__modal-card { max-width: 560px; width: 100%; padding: var(--tm-space-8); border-radius: var(--tm-radius-2xl); background-color: var(--tm-paper); box-shadow: var(--tm-shadow-float); display: flex; flex-direction: column; gap: var(--tm-space-4); }
+.tm-detail__modal-card--wide { max-width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+
+.tm-detail__refine-workbench { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--tm-space-4); }
+.tm-detail__refine-pane { display: flex; flex-direction: column; gap: var(--tm-space-3); min-width: 0; padding: var(--tm-space-4); border-radius: var(--tm-radius-lg); background-color: var(--tm-mist); border: var(--tm-border-subtle); }
+.tm-detail__refine-messages,
+.tm-detail__source-list { display: flex; flex-direction: column; gap: var(--tm-space-2); max-height: 220px; overflow: auto; }
+.tm-detail__refine-message,
+.tm-detail__source-row { padding: var(--tm-space-3); border-radius: var(--tm-radius-md); background-color: var(--tm-paper); box-shadow: var(--tm-shadow-inset-sm); }
+.tm-detail__refine-message p,
+.tm-detail__source-row p { margin: 0; overflow-wrap: anywhere; }
+.tm-detail__refine-message--user { border-left: 3px solid var(--tm-moss); }
+.tm-detail__refine-message--assistant { border-left: 3px solid var(--tm-clay); }
+.tm-detail__source-row { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--tm-space-3); }
+.tm-detail__file-field { display: flex; flex-direction: column; gap: var(--tm-space-2); font-size: var(--tm-text-sm); font-weight: 700; color: var(--tm-tea); }
+.tm-detail__file-field input { width: 100%; font-size: var(--tm-text-sm); color: var(--tm-stone); }
+.tm-detail__refine-community-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--tm-space-3); }
 
 @media (max-width: 1024px) {
   .tm-detail__body { display: block; }
@@ -2949,5 +3282,7 @@ onBeforeUnmount(() => {
   .tm-detail__header { flex-direction: column; }
   .tm-detail__item { grid-template-columns: 1fr; }
   .tm-detail__data-grid { grid-template-columns: 1fr; }
+  .tm-detail__refine-workbench { grid-template-columns: 1fr; }
+  .tm-detail__refine-community-picker { grid-template-columns: 1fr; }
 }
 </style>

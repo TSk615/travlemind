@@ -28,7 +28,7 @@ def register(payload: RegisterRequest, response: Response, db: Session = Depends
     user = register_user(db, payload)
     access_token, refresh_token = issue_tokens(db, user, settings)
     attach_auth_cookies(response, access_token, refresh_token, settings)
-    return success_response(serialize_user(user).model_dump(mode="json"))
+    return success_response(serialize_user(user, settings).model_dump(mode="json"))
 
 
 @router.post("/login")
@@ -36,7 +36,7 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
     user = authenticate_user(db, payload)
     access_token, refresh_token = issue_tokens(db, user, settings)
     attach_auth_cookies(response, access_token, refresh_token, settings)
-    return success_response(serialize_user(user).model_dump(mode="json"))
+    return success_response(serialize_user(user, settings).model_dump(mode="json"))
 
 
 @router.post("/refresh")

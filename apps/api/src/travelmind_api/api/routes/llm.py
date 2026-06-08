@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from travelmind_api.api.schemas.common import success_response
 from travelmind_api.api.schemas.llm import LlmConnectionTestRequest, LlmConnectionTestResponse, LlmModelsRequest, LlmProxyRequest
+from travelmind_api.core.env import get_env
 from travelmind_api.core.deps import get_current_user
 from travelmind_api.db.models import User
 from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
@@ -20,8 +21,12 @@ from travelmind_api.services.llm.config import default_base_url_for_protocol, no
 from travelmind_api.services.llm.models import fetch_llm_models
 from travelmind_api.services.search_connector import (
     ConfiguredSearchGateway,
+    DEFAULT_IMAGE_INCLUDE_DOMAINS,
+    DEFAULT_IMAGE_PER_DOMAIN_LIMIT,
     SearchServiceConfig,
     SearchServiceGatewayError,
+    normalize_domain_filter_values,
+    normalize_search_service_provider,
 )
 from travelmind_api.services.xhs_account import load_xhs_search_state, mark_xhs_session_available, mark_xhs_session_expired
 from travelmind_api.services.xhs_crawler import XhsCrawlerClient, XhsCrawlerClientError, XhsCrawlerConfig, XhsCrawlerSessionExpiredError
@@ -60,6 +65,7 @@ _IMAGE_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _IMAGE_EXTENSION_PATTERN = re.compile(r"\.(?:png|jpe?g|webp|gif|bmp|svg)(?:$|[?#])", re.IGNORECASE)
 _IMAGE_HINT_PATTERN = re.compile(r"(?:image|photo|thumbnail|hero|cover|poster)", re.IGNORECASE)
 _OG_IMAGE_PATTERN = re.compile(r"(?:og:image|twitter:image)[^\"'>]*[\"'](https?://[^\"']+)", re.IGNORECASE)
+_TAVILY_IMAGE_RESPONSE_LIMIT = 24
 
 
 def _build_endpoint(base_url: str, wire_api: str) -> str:
@@ -422,6 +428,13 @@ def _resolve_tavily_endpoint(payload: TavilyImagesProxyRequest) -> str:
     return f"{base}/search"
 
 
+def _resolve_tavily_image_include_domains() -> list[str]:
+    return normalize_domain_filter_values(
+        get_env("TRAVELMIND_TAVILY_IMAGE_INCLUDE_DOMAINS") or get_env("TRAVELMIND_IMAGE_SEARCH_INCLUDE_DOMAINS"),
+        default=DEFAULT_IMAGE_INCLUDE_DOMAINS,
+    )
+
+
 def _normalize_probe_queries(queries: list[str]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -433,6 +446,32 @@ def _normalize_probe_queries(queries: list[str]) -> list[str]:
         seen.add(key)
         normalized.append(candidate)
     return normalized[:4]
+
+
+def _limit_tavily_raw_result_images(raw: dict[str, Any], limit: int = _TAVILY_IMAGE_RESPONSE_LIMIT) -> dict[str, Any]:
+    limited = dict(raw)
+    top_images = limited.get("images")
+    if isinstance(top_images, list):
+        limited["images_total_count"] = len(top_images)
+        limited["images_truncated"] = len(top_images) > limit
+        limited["images"] = top_images[:limit]
+
+    results = limited.get("results")
+    if isinstance(results, list):
+        limited_results: list[Any] = []
+        for item in results:
+            if not isinstance(item, dict):
+                limited_results.append(item)
+                continue
+            limited_item = dict(item)
+            item_images = limited_item.get("images")
+            if isinstance(item_images, list):
+                limited_item["images_total_count"] = len(item_images)
+                limited_item["images_truncated"] = len(item_images) > limit
+                limited_item["images"] = item_images[:limit]
+            limited_results.append(limited_item)
+        limited["results"] = limited_results
+    return limited
 
 
 @router.post("/proxy")
@@ -585,6 +624,10 @@ def proxy_search_images_request(payload: SearchImageProxyRequest, current_user: 
         available_tools = gateway.available_tools()
         operation, strategy = _pick_image_operation(config, available_tools, payload.preferred_tool)
         arguments = _build_image_operation_arguments(operation, payload.query)
+        if config.provider == "tavily" and operation == "search":
+            arguments["include_images"] = True
+            arguments["include_image_descriptions"] = True
+            arguments["include_domains"] = config.image_include_domains
         result = gateway.call_operation(operation, arguments)
         hits = _summarize_search_hits(result)
         image_urls = _extract_image_urls(result)
@@ -637,7 +680,10 @@ def proxy_search_images_request(payload: SearchImageProxyRequest, current_user: 
 
 @router.post("/tavily-images-proxy")
 def proxy_tavily_images_request(payload: TavilyImagesProxyRequest, current_user: User = Depends(get_current_user)):
-    api_key = str(payload.api_key or "").strip() or str(getattr(current_user, "search_service_api_key", None) or "").strip()
+    api_key = str(payload.api_key or "").strip()
+    saved_search_provider = normalize_search_service_provider(getattr(current_user, "search_service_provider", None), default="groksearch")
+    if not api_key and saved_search_provider == "tavily":
+        api_key = str(getattr(current_user, "search_service_api_key", None) or "").strip()
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -652,6 +698,7 @@ def proxy_tavily_images_request(payload: TavilyImagesProxyRequest, current_user:
         )
 
     endpoint = _resolve_tavily_endpoint(payload)
+    include_domains = _resolve_tavily_image_include_domains()
     upstream_payload = {
         "query": query,
         "search_depth": str(payload.search_depth or "basic").strip() or "basic",
@@ -659,16 +706,25 @@ def proxy_tavily_images_request(payload: TavilyImagesProxyRequest, current_user:
         "include_images": True,
         "include_image_descriptions": bool(payload.include_image_descriptions),
     }
+    if include_domains:
+        upstream_payload["include_domains"] = include_domains
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
 
+    raw_payloads: list[tuple[str | None, dict[str, Any], dict[str, Any]]] = []
     try:
         with httpx.Client(timeout=httpx.Timeout(connect=20.0, read=120.0, write=60.0, pool=60.0), follow_redirects=True) as client:
-            response = client.post(endpoint, headers=headers, json=upstream_payload)
-            raw = response.json()
+            domain_batch = include_domains or [None]
+            for domain in domain_batch:
+                request_payload = dict(upstream_payload)
+                if domain is not None:
+                    request_payload["include_domains"] = [domain]
+                response = client.post(endpoint, headers=headers, json=request_payload)
+                raw = response.json()
+                raw_payloads.append((domain, raw if isinstance(raw, dict) else {"data": raw}, request_payload))
     except httpx.TimeoutException as exc:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
@@ -680,34 +736,164 @@ def proxy_tavily_images_request(payload: TavilyImagesProxyRequest, current_user:
             detail={"code": "tavily_request_failed", "message": str(exc) or "Tavily request failed"},
         ) from exc
 
-    top_images = raw.get("images")
-    top_image_items = top_images if isinstance(top_images, list) else []
+    top_image_items: list[Any] = []
+    top_level_images_total = 0
+    image_candidates: list[dict[str, Any]] = []
+    image_candidates_total = 0
+    image_candidates_by_domain: dict[str, int] = {}
+    seen_image_urls: set[str] = set()
+    domain_results: list[dict[str, Any]] = []
+    per_source_limit = DEFAULT_IMAGE_PER_DOMAIN_LIMIT if include_domains else _TAVILY_IMAGE_RESPONSE_LIMIT
+
+    def add_image_candidate(candidate: dict[str, Any]) -> None:
+        nonlocal image_candidates_total
+        image_url = str(candidate.get("url") or "").strip()
+        if not image_url:
+            return
+        key = image_url.casefold()
+        if key in seen_image_urls:
+            return
+        seen_image_urls.add(key)
+        image_candidates_total += 1
+        domain_key = str(candidate.get("source_domain") or "all").strip() or "all"
+        current_domain_count = image_candidates_by_domain.get(domain_key, 0)
+        if current_domain_count < per_source_limit:
+            image_candidates.append({**candidate, "url": image_url})
+            image_candidates_by_domain[domain_key] = current_domain_count + 1
+
     result_images: list[dict[str, Any]] = []
-    for item in raw.get("results") or []:
-        if not isinstance(item, dict):
-            continue
-        item_images = item.get("images")
-        if not isinstance(item_images, list):
-            continue
-        for image in item_images:
-            if isinstance(image, dict):
-                result_images.append(
+    result_images_total = 0
+    result_images_by_domain: dict[str, int] = {}
+    raw_result: dict[str, Any]
+
+    for domain, raw, _request_payload in raw_payloads:
+        domain_key = domain or "all"
+        top_images = raw.get("images")
+        top_image_items_raw = top_images if isinstance(top_images, list) else []
+        top_level_images_total += len(top_image_items_raw)
+        top_level_returned_for_domain = 0
+        for image in top_image_items_raw:
+            if top_level_returned_for_domain < per_source_limit:
+                if isinstance(image, dict):
+                    top_image = dict(image)
+                    top_image["source_domain"] = domain
+                    top_image_items.append(top_image)
+                    image_url = str(image.get("url") or "").strip()
+                    image_title = str(image.get("title") or "").strip() or None
+                    image_description = str(image.get("description") or "").strip() or None
+                else:
+                    image_url = str(image or "").strip()
+                    top_image_items.append({"url": image_url, "source_domain": domain})
+                    image_title = None
+                    image_description = None
+                top_level_returned_for_domain += 1
+            else:
+                if isinstance(image, dict):
+                    image_url = str(image.get("url") or "").strip()
+                    image_title = str(image.get("title") or "").strip() or None
+                    image_description = str(image.get("description") or "").strip() or None
+                else:
+                    image_url = str(image or "").strip()
+                    image_title = None
+                    image_description = None
+            add_image_candidate(
+                {
+                    "source": "top_level",
+                    "source_domain": domain,
+                    "url": image_url,
+                    "title": image_title,
+                    "description": image_description,
+                    "result_title": None,
+                    "result_url": None,
+                }
+            )
+
+        results = raw.get("results")
+        result_items = results if isinstance(results, list) else []
+        result_returned_for_domain = 0
+        for item in result_items:
+            if not isinstance(item, dict):
+                continue
+            item_images = item.get("images")
+            if not isinstance(item_images, list):
+                continue
+            for image in item_images:
+                if not isinstance(image, dict):
+                    continue
+                image_url = str(image.get("url") or "").strip()
+                if image_url:
+                    result_images_total += 1
+                    current_domain_count = result_images_by_domain.get(domain_key, 0)
+                    if current_domain_count < per_source_limit:
+                        result_images.append(
+                            {
+                                "result_title": str(item.get("title") or "").strip(),
+                                "result_url": str(item.get("url") or "").strip(),
+                                "source_domain": domain,
+                                "url": image_url,
+                                "description": str(image.get("description") or "").strip() or None,
+                            }
+                        )
+                        result_images_by_domain[domain_key] = current_domain_count + 1
+                        result_returned_for_domain += 1
+                add_image_candidate(
                     {
-                        "result_title": str(item.get("title") or "").strip(),
-                        "result_url": str(item.get("url") or "").strip(),
-                        "url": str(image.get("url") or "").strip(),
+                        "source": "result",
+                        "source_domain": domain,
+                        "url": image_url,
+                        "title": None,
                         "description": str(image.get("description") or "").strip() or None,
+                        "result_title": str(item.get("title") or "").strip() or None,
+                        "result_url": str(item.get("url") or "").strip() or None,
                     }
                 )
+
+        domain_results.append(
+            {
+                "domain": domain,
+                "images_total_count": len(top_image_items_raw),
+                "images_returned_count": top_level_returned_for_domain,
+                "images_truncated": len(top_image_items_raw) > top_level_returned_for_domain,
+                "result_images_returned_count": result_returned_for_domain,
+                "results_count": len(result_items),
+                "response_time": raw.get("response_time"),
+                "request_id": raw.get("request_id"),
+            }
+        )
+
+    if len(raw_payloads) == 1:
+        raw_result = _limit_tavily_raw_result_images(raw_payloads[0][1], DEFAULT_IMAGE_PER_DOMAIN_LIMIT if include_domains else _TAVILY_IMAGE_RESPONSE_LIMIT)
+    else:
+        raw_result = {
+            "request_mode": "per_domain",
+            "domains": include_domains,
+            "domain_results": [
+                {
+                    "domain": domain,
+                    "request": request_payload,
+                    "result": _limit_tavily_raw_result_images(raw, DEFAULT_IMAGE_PER_DOMAIN_LIMIT),
+                }
+                for domain, raw, request_payload in raw_payloads
+            ],
+        }
 
     return success_response(
         {
             "provider": "tavily",
             "base_url": endpoint,
             "request": upstream_payload,
-            "raw_result": raw,
+            "request_mode": "per_domain" if include_domains else "single",
+            "domain_results": domain_results,
+            "raw_result": raw_result,
+            "image_candidates": image_candidates,
+            "image_candidates_total": image_candidates_total,
+            "image_candidates_truncated": image_candidates_total > len(image_candidates),
             "top_level_images": top_image_items,
-            "result_images": [item for item in result_images if item["url"]],
+            "top_level_images_total": top_level_images_total,
+            "top_level_images_truncated": top_level_images_total > len(top_image_items),
+            "result_images": result_images,
+            "result_images_total": result_images_total,
+            "result_images_truncated": result_images_total > len(result_images),
         }
     )
 

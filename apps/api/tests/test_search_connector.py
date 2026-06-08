@@ -114,9 +114,64 @@ def test_tavily_gateway_calls_search_api(monkeypatch):
     )
 
     assert gateway.available_tools() == {"search"}
-    assert calls[0][0] == "https://api.tavily.com/search"
+    assert [call[0] for call in calls] == [
+        "https://api.tavily.com/search",
+        "https://api.tavily.com/search",
+        "https://api.tavily.com/search",
+    ]
+    assert [call[1]["include_domains"] for call in calls] == [["hk.trip.com"], ["pixabay.com"], ["pexels.com"]]
     assert calls[0][1]["include_images"] is True
+    assert payload["request_mode"] == "per_domain"
+    assert payload["domain_results"][0]["domain"] == "hk.trip.com"
+    assert payload["images"][0]["source_domain"] == "hk.trip.com"
     assert payload["images"][0]["url"] == "https://cdn.example.test/kyoto.jpg"
+
+
+def test_tavily_gateway_normalizes_image_include_domains(monkeypatch):
+    search_connector = _search_connector_module()
+
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, endpoint, headers=None, json=None):
+            calls.append(json or {})
+
+            class FakeResponse:
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"results": [], "images": []}
+
+            return FakeResponse()
+
+    monkeypatch.setattr(search_connector.httpx, "Client", FakeClient)
+
+    gateway = search_connector.ConfiguredSearchGateway(
+        search_connector.SearchServiceConfig(
+            provider="tavily",
+            transport="api",
+            base_url="https://api.tavily.com/search",
+            api_key="tvly-test",
+            image_include_domains=[
+                "https://pixabay.com/zh/images/search",
+                "https://www.pexels.com/zh-cn/search/",
+            ],
+        )
+    )
+
+    gateway.call_operation("search", {"query": "Kyoto temple photos", "include_images": True})
+
+    assert [call["include_domains"] for call in calls] == [["pixabay.com"], ["pexels.com"]]
 
 
 def test_tavily_config_from_env_supports_legacy_env_names(monkeypatch):
