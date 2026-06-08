@@ -236,6 +236,7 @@ class HelloAgentsCompatibleLLM:
             "temperature": temperature,
             "timeout": int(self._config.timeout_seconds),
             "wire_api": self._config.wire_api,
+            "provider_protocol": self._config.provider_protocol,
         }
         self._client = OpenAICompatibleClient(self._config)
 
@@ -295,15 +296,13 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         super().__init__(maps_provider=maps_provider)
         self._llm_config = llm_config
         self._progress_callback = progress_callback
-        self._role_search_gateway_cache: dict[str, ConfiguredSearchGateway] = {}
-        self._role_mcp_tool_cache: dict[str, set[str]] = {}
+        self._role_search_gateway_cache: dict[str, list[tuple[ConfiguredSearchGateway, set[str]]]] = {}
         self._current_xhs_source_enabled = False
         self._current_user_id: str | None = None
         self._current_search_service: SearchServiceConfig | None = None
         self._current_job_id: str | None = None
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:
         self._role_search_gateway_cache = {}
-        self._role_mcp_tool_cache = {}
         self._current_xhs_source_enabled = bool(getattr(request, "xhs_source_enabled", False))
         self._current_user_id = getattr(request, "user_id", None)
         self._current_search_service = getattr(request, "search_service", None) or SearchServiceConfig.from_env()
@@ -927,31 +926,53 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return compressed
 
 
-    def _build_role_mcp_client(self, role_name: str) -> ConfiguredSearchGateway | None:
+    def _build_role_mcp_clients(self, role_name: str) -> list[tuple[ConfiguredSearchGateway, set[str]]]:
         if role_name not in set(_SPECIALIST_PARALLEL_ROLES):
-            return None
+            return []
         cached = self._role_search_gateway_cache.get(role_name)
         if cached is not None:
             return cached
-        search_config = self._current_search_service
-        if search_config is None:
-            return None
-        client = ConfiguredSearchGateway(search_config)
-        self._role_search_gateway_cache[role_name] = client
-        return client
+        configs = self._resolve_role_search_configs()
+        resolved_clients: list[tuple[ConfiguredSearchGateway, set[str]]] = []
+        for config in configs:
+            client = ConfiguredSearchGateway(config)
+            try:
+                available_tools = client.available_tools()
+            except Exception as exc:
+                _LOGGER.warning("HelloAgents role=%s provider=%s unable_to_list_tools=%s", role_name, config.provider, exc)
+                continue
+            _LOGGER.debug("HelloAgents role=%s provider=%s available_tools=%s", role_name, config.provider, sorted(available_tools))
+            resolved_clients.append((client, available_tools))
+        self._role_search_gateway_cache[role_name] = resolved_clients
+        return resolved_clients
 
+    # Backward-compatible shim for tests and legacy internal call sites that expect
+    # a single search client instead of a provider chain.
+    def _build_role_mcp_client(self, role_name: str) -> ConfiguredSearchGateway | None:
+        clients = self._build_role_mcp_clients(role_name)
+        return clients[0][0] if clients else None
+
+    # Backward-compatible shim paired with _build_role_mcp_client.
     def _available_mcp_tools(self, role_name: str, client: ConfiguredSearchGateway) -> set[str]:
-        cached = self._role_mcp_tool_cache.get(role_name)
-        if cached is not None:
-            return cached
-        try:
-            resolved = client.available_tools()
-        except Exception as exc:
-            print(f"[HELLOAGENTS] unable to list MCP tools: {exc}")
-            return set()
-        print(f"[HELLOAGENTS] role={role_name} available_tools={sorted(resolved)}")
-        self._role_mcp_tool_cache[role_name] = resolved
-        return resolved
+        del role_name
+        return client.available_tools()
+
+    def _resolve_role_search_configs(self) -> list[SearchServiceConfig]:
+        configs: list[SearchServiceConfig] = []
+        seen: set[tuple[str, str, str, str]] = set()
+
+        def append(config: SearchServiceConfig | None) -> None:
+            if config is None:
+                return
+            identity = (config.provider, config.transport, config.base_url, config.api_key)
+            if identity in seen:
+                return
+            seen.add(identity)
+            configs.append(config)
+
+        primary = self._current_search_service
+        append(primary)
+        return configs
 
     def _pick_mcp_tool(self, available_tools: set[str], *candidates: str) -> str | None:
         for candidate in candidates:
@@ -963,7 +984,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         config = getattr(client, "config", None)
         provider = getattr(config, "provider", None)
         normalized = str(provider or "").strip().lower()
-        return normalized or "exa"
+        return normalized
 
     def _is_groksearch_provider(self, client: ConfiguredSearchGateway) -> bool:
         return self._search_provider(client) == "groksearch"
@@ -972,32 +993,47 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         if self._is_groksearch_provider(client):
             candidates = ("web_search", "answer", "search") if allow_answer else ("web_search",)
             return self._pick_mcp_tool(available_tools, *candidates)
-        candidates = ("web_search_exa", "deep_search_exa", "search", "answer") if allow_answer else ("web_search_exa", "deep_search_exa", "search")
+        candidates = ("search", "answer") if allow_answer else ("search",)
         return self._pick_mcp_tool(available_tools, *candidates)
 
     def _pick_fetch_tool(self, client: ConfiguredSearchGateway, available_tools: set[str]) -> str | None:
         if self._is_groksearch_provider(client):
             return self._pick_mcp_tool(available_tools, "web_fetch", "contents")
-        return self._pick_mcp_tool(available_tools, "crawling_exa", "contents", "web_fetch")
+        return self._pick_mcp_tool(available_tools, "contents", "web_fetch")
 
     def _augment_payload_with_tool_results(self, role_name: str, input_payload: dict[str, Any]) -> dict[str, Any]:
-        client = self._build_role_mcp_client(role_name)
-        if client is None:
+        clients = self._build_role_mcp_clients(role_name)
+        if not clients:
             return input_payload
-        available_tools = self._available_mcp_tools(role_name, client)
         started = time.perf_counter()
-        try:
-            tool_results = self._collect_role_tool_results(role_name, client, available_tools, input_payload)
-        except Exception as exc:
+        tool_results: dict[str, Any] = {}
+        last_error: Exception | None = None
+        for client, available_tools in clients:
+            try:
+                tool_results = self._collect_role_tool_results(role_name, client, available_tools, input_payload)
+            except Exception as exc:
+                last_error = exc
+                _LOGGER.warning("HelloAgents role=%s provider=%s tool_collection_failed=%s", role_name, self._search_provider(client), exc)
+                continue
+            if tool_results:
+                if self._search_provider(client) != self._search_provider(clients[0][0]):
+                    self._log_event(
+                        "helloagents_tool_collection_fallback_succeeded",
+                        message=f"Tool collection fallback succeeded for {role_name}.",
+                        role=role_name,
+                        provider=self._search_provider(client),
+                    )
+                break
+        if not tool_results and last_error is not None:
             self._log_event(
                 "helloagents_tool_collection_failed",
                 message=f"Tool collection failed for {role_name}.",
                 level="ERROR",
                 role=role_name,
                 elapsed_seconds=round(max(time.perf_counter() - started, 0.0), 3),
-                error=str(exc).strip() or exc.__class__.__name__,
+                error=str(last_error).strip() or last_error.__class__.__name__,
             )
-            print(f"[HELLOAGENTS] role={role_name} tool_collection_failed={exc}")
+            _LOGGER.warning("HelloAgents role=%s tool_collection_failed=%s", role_name, last_error)
             return input_payload
         self._log_event(
             "helloagents_tool_collection_completed",
@@ -1034,17 +1070,21 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     ) -> list[dict[str, Any]]:
         if not destination:
             return []
+        search_kwargs = {
+            "interests": interests,
+            "social_context": social_context,
+            "xhs_source_enabled": bool(getattr(self, "_current_xhs_source_enabled", False))
+            if xhs_source_enabled is None
+            else bool(xhs_source_enabled),
+            "xhs_user_id": getattr(self, "_current_user_id", None),
+        }
+        if include_remote_search:
+            search_kwargs["search_service_configs"] = self._resolve_role_search_configs()
         documents = search_documents(
             query,
             destination,
             [],
-            interests=interests,
-            social_context=social_context,
-            search_service_config=self._current_search_service if include_remote_search else None,
-            xhs_source_enabled=bool(getattr(self, "_current_xhs_source_enabled", False))
-            if xhs_source_enabled is None
-            else bool(xhs_source_enabled),
-            xhs_user_id=getattr(self, "_current_user_id", None),
+            **search_kwargs,
         )
         return [doc.model_dump(mode="json") for doc in documents[:8]]
 
@@ -1064,7 +1104,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         try:
             search_result = self._call_search_like_tool(client, search_tool, query, 6, role_name="attraction_specialist")
         except Exception as exc:
-            print(f"[HELLOAGENTS] role=attraction_specialist tool={search_tool} failed={exc}")
+            _LOGGER.warning("HelloAgents role=attraction_specialist tool=%s failed=%s", search_tool, exc)
             return {}
         payload = {"search_tool": search_tool, "search": search_result}
 
@@ -1077,12 +1117,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 try:
                     payload["crawl"] = self._call_crawling_tool(client, fetch_tool, crawl_urls, role_name="attraction_specialist")
                 except Exception as exc:
-                    print(f"[HELLOAGENTS] role=attraction_specialist tool={fetch_tool} failed={exc}")
+                    _LOGGER.warning("HelloAgents role=attraction_specialist tool=%s failed=%s", fetch_tool, exc)
 
         try:
             grounding_docs = self._collect_grounding_docs(query, destination, interests=interests, social_context="attraction")
         except Exception as exc:
-            print(f"[HELLOAGENTS] role=attraction_specialist grounding_failed={exc}")
+            _LOGGER.warning("HelloAgents role=attraction_specialist grounding_failed=%s", exc)
         else:
             if grounding_docs:
                 payload["grounding_docs"] = grounding_docs
@@ -1110,7 +1150,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             try:
                 search_result = self._call_search_like_tool(client, search_tool, search_query, 5, role_name="weather_specialist")
             except Exception as exc:
-                print(f"[HELLOAGENTS] role=weather_specialist tool={search_tool} failed={exc}")
+                _LOGGER.warning("HelloAgents role=weather_specialist tool=%s failed=%s", search_tool, exc)
                 return {}
             return {
                 "research_tool": search_tool,
@@ -1118,24 +1158,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 "citations": self._extract_urls_from_search_result(search_result),
             }
 
-        if "deep_search_exa" in available_tools:
-            try:
-                search_result = self._call_search_like_tool(client, "deep_search_exa", search_query, 5, role_name="weather_specialist")
-            except Exception as exc:
-                print(f"[HELLOAGENTS] role=weather_specialist tool=deep_search_exa failed={exc}")
-            else:
-                return {
-                    "research_tool": "deep_search_exa",
-                    "search": search_result,
-                    "citations": self._extract_urls_from_search_result(search_result),
-                }
-
         research_tool = self._pick_mcp_tool(available_tools, "deep_researcher_start", "research")
         if research_tool is not None:
             try:
                 research_result = self._call_research_like_tool(client, research_tool, available_tools, research_instructions, role_name="weather_specialist")
             except Exception as exc:
-                print(f"[HELLOAGENTS] role=weather_specialist tool={research_tool} failed={exc}")
+                _LOGGER.warning("HelloAgents role=weather_specialist tool=%s failed=%s", research_tool, exc)
             else:
                 citations = self._extract_urls_from_search_result(research_result)
                 payload = {
@@ -1144,25 +1172,25 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     "citations": citations,
                 }
                 if self._research_status(research_result) not in {"completed", "complete", "done"}:
-                    fallback_tool = self._pick_mcp_tool(available_tools, "answer", "web_search_exa", "search")
+                    fallback_tool = self._pick_mcp_tool(available_tools, "answer", "search")
                     if fallback_tool is not None:
                         try:
                             fallback_result = self._call_search_like_tool(client, fallback_tool, search_query, 5, role_name="weather_specialist")
                         except Exception as exc:
-                            print(f"[HELLOAGENTS] role=weather_specialist tool={fallback_tool} failed={exc}")
+                            _LOGGER.warning("HelloAgents role=weather_specialist tool=%s failed=%s", fallback_tool, exc)
                         else:
                             payload["fallback_search_tool"] = fallback_tool
                             payload["fallback_search"] = fallback_result
                             payload["citations"] = list(dict.fromkeys([*citations, *self._extract_urls_from_search_result(fallback_result)]))
                 return payload
 
-        answer_tool = self._pick_mcp_tool(available_tools, "answer", "web_search_exa", "search")
+        answer_tool = self._pick_mcp_tool(available_tools, "answer", "search")
         if answer_tool is None:
             return {}
         try:
             answer_result = self._call_search_like_tool(client, answer_tool, search_query, 5, role_name="weather_specialist")
         except Exception as exc:
-            print(f"[HELLOAGENTS] role=weather_specialist tool={answer_tool} failed={exc}")
+            _LOGGER.warning("HelloAgents role=weather_specialist tool=%s failed=%s", answer_tool, exc)
             return {}
         return {"research_tool": answer_tool, "answer": answer_result, "citations": self._extract_urls_from_search_result(answer_result)}
 
@@ -1192,7 +1220,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             try:
                 search_result = self._call_search_like_tool(client, search_tool, query, 6, role_name="hotel_specialist")
             except Exception as exc:
-                print(f"[HELLOAGENTS] role=hotel_specialist tool={search_tool} failed={exc}")
+                _LOGGER.warning("HelloAgents role=hotel_specialist tool=%s failed=%s", search_tool, exc)
                 return {}
             payload["search_tool"] = search_tool
             payload["search"] = search_result
@@ -1200,7 +1228,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         try:
             grounding_docs = self._collect_grounding_docs(query, destination, interests=[], social_context="hotel")
         except Exception as exc:
-            print(f"[HELLOAGENTS] role=hotel_specialist grounding_failed={exc}")
+            _LOGGER.warning("HelloAgents role=hotel_specialist grounding_failed=%s", exc)
         else:
             if grounding_docs:
                 payload["grounding_docs"] = grounding_docs
@@ -1212,7 +1240,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 try:
                     payload["crawl"] = self._call_crawling_tool(client, crawl_tool, crawl_urls, role_name="hotel_specialist")
                 except Exception as exc:
-                    print(f"[HELLOAGENTS] role=hotel_specialist tool={crawl_tool} failed={exc}")
+                    _LOGGER.warning("HelloAgents role=hotel_specialist tool=%s failed=%s", crawl_tool, exc)
                     return payload
                 payload["crawl_urls"] = crawl_urls
                 return payload
@@ -1246,7 +1274,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         try:
             search_result = self._call_search_like_tool(client, search_tool, query, 6, role_name="transport_specialist")
         except Exception as exc:
-            print(f"[HELLOAGENTS] role=transport_specialist tool={search_tool} failed={exc}")
+            _LOGGER.warning("HelloAgents role=transport_specialist tool=%s failed=%s", search_tool, exc)
             return {}
 
         payload["search_tool"] = search_tool
@@ -1260,7 +1288,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             try:
                 crawl_result = self._call_crawling_tool(client, fetch_tool, crawl_urls, role_name="transport_specialist")
             except Exception as exc:
-                print(f"[HELLOAGENTS] role=transport_specialist tool={fetch_tool} failed={exc}")
+                _LOGGER.warning("HelloAgents role=transport_specialist tool=%s failed=%s", fetch_tool, exc)
             else:
                 payload["crawl"] = crawl_result
                 citations = list(dict.fromkeys([*citations, *crawl_urls, *self._extract_urls_from_search_result(crawl_result)]))
@@ -1274,7 +1302,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 xhs_source_enabled=False,
             )
         except Exception as exc:
-            print(f"[HELLOAGENTS] role=transport_specialist grounding_failed={exc}")
+            _LOGGER.warning("HelloAgents role=transport_specialist grounding_failed=%s", exc)
         else:
             if grounding_docs:
                 payload["grounding_docs"] = grounding_docs
@@ -1323,7 +1351,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             start_result = self._call_mcp_tool(
                 client,
                 tool_name,
-                {"instructions": instructions, "model": "exa-research-fast"},
+                {"instructions": instructions},
                 role_name=role_name,
             )
             research_id = str(start_result.get("researchId") or start_result.get("id") or "").strip()
@@ -1353,7 +1381,6 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             tool_name,
             {
                 "instructions": instructions,
-                "model": "exa-research",
                 "wait_for_completion": True,
                 "poll_interval_seconds": 2.0,
                 "max_wait_seconds": 30.0,
@@ -1378,13 +1405,6 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     item["text"] = str(fetched)
                 results.append(item)
             return {"results": results}
-        if tool_name == "crawling_exa":
-            return self._call_mcp_tool(
-                client,
-                tool_name,
-                {"urls": urls, "maxCharacters": 4000, "maxAgeHours": 24},
-                role_name=role_name,
-            )
         return self._call_mcp_tool(client, tool_name, {"urls": urls, "include_text": True}, role_name=role_name)
 
     def _research_status(self, payload: dict[str, Any]) -> str:
@@ -1404,22 +1424,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return ""
 
     def _call_mcp_tool(self, client: ConfiguredSearchGateway, tool_name: str, arguments: dict[str, Any], *, role_name: str) -> dict[str, Any]:
-        print(f"[HELLOAGENTS] role={role_name} tool={tool_name} args={json.dumps(arguments, ensure_ascii=False)}")
+        _LOGGER.debug("HelloAgents role=%s tool=%s args=%s", role_name, tool_name, json.dumps(arguments, ensure_ascii=False))
         return client.call_operation(tool_name, arguments)
 
     def _call_search_like_tool(self, client: ConfiguredSearchGateway, tool_name: str, query: str, num_results: int, *, role_name: str) -> dict[str, Any]:
         if tool_name == "web_search":
             return self._call_mcp_tool(client, tool_name, {"query": query}, role_name=role_name)
-        if tool_name == "web_search_exa":
-            arguments = {"query": query, "numResults": num_results}
-            return self._call_mcp_tool(client, tool_name, arguments, role_name=role_name)
-        if tool_name == "deep_search_exa":
-            arguments = {
-                "objective": query,
-                "type": "deep",
-                "numResults": num_results,
-            }
-            return self._call_mcp_tool(client, tool_name, arguments, role_name=role_name)
         if tool_name == "answer":
             return self._call_mcp_tool(client, tool_name, {"query": query, "include_text": True}, role_name=role_name)
         return self._call_mcp_tool(client, tool_name, {"query": query, "num_results": num_results, "include_text": True}, role_name=role_name)

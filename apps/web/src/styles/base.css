@@ -1,0 +1,153 @@
+/* ============================================================
+   TravelMind Base Styles
+   Global reset + typography + foundational layout rules.
+   Depends on: tokens.css
+   ============================================================ */
+
+/* --- Reset --- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -moz-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* --- Body --- */
+body {
+  font-family: var(--tm-font-body);
+  font-size: var(--tm-text-base);
+  line-height: var(--tm-leading-normal);
+  color: var(--tm-tea);
+  background:
+    radial-gradient(circle at 10% 10%, rgba(255, 255, 255, 0.75), transparent 26rem),
+    radial-gradient(circle at 90% 4%, rgba(66, 133, 244, 0.12), transparent 24rem),
+    radial-gradient(circle at 75% 82%, rgba(52, 168, 83, 0.1), transparent 24rem),
+    var(--tm-paper);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: geometricPrecision;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* --- Typography --- */
+h1, h2, h3, h4, h5, h6 {
+  line-height: var(--tm-leading-tight);
+  color: var(--tm-tea);
+  font-weight: 700;
+}
+
+h1 {
+  font-family: var(--tm-font-display);
+  font-size: var(--tm-text-3xl);
+}
+
+h2 {
+  font-size: var(--tm-text-2xl);
+}
+
+h3 {
+  font-size: var(--tm-text-xl);
+}
+
+h4 {
+  font-size: var(--tm-text-lg);
+}
+
+p {
+  margin-bottom: var(--tm-space-4);
+}
+
+p:last-child {
+  margin-bottom: 0;
+}
+
+a {
+  color: var(--tm-moss);
+  text-decoration: none;
+  transition: color var(--tm-duration-fast) var(--tm-ease-out);
+}
+
+a:hover {
+  color: var(--tm-tea);
+}
+
+/* --- Focus visible --- */
+:focus-visible {
+  outline: 0;
+  box-shadow: var(--tm-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--tm-radius-sm);
+}
+
+/* --- Selection --- */
+::selection {
+  background: rgba(66, 133, 244, 0.22);
+  color: var(--tm-tea);
+}
+
+/* --- Images --- */
+img, svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+/* --- Lists --- */
+ul, ol {
+  padding-left: var(--tm-space-6);
+}
+
+/* --- Code --- */
+code, pre {
+  font-family: var(--tm-font-mono);
+  font-size: var(--tm-text-sm);
+}
+
+/* --- Utility: visually hidden (a11y) --- */
+.tm-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* --- Route transition --- */
+.tm-page-enter-active,
+.tm-page-leave-active {
+  transition:
+    opacity var(--tm-duration-slow) var(--tm-ease-in-out),
+    transform var(--tm-duration-slow) var(--tm-ease-in-out);
+}
+
+.tm-page-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.tm-page-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}

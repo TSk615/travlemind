@@ -1,0 +1,45 @@
+/* ============================================================
+   TravelMind Tailwind Entry
+   Tailwind v4 — config via CSS, prefix 'tw-' to avoid conflicts.
+   ============================================================ */
+
+@import "tailwindcss" prefix(tw);
+
+@theme {
+  /* Map design tokens into Tailwind theme */
+  --color-paper: var(--tm-paper);
+  --color-mist: var(--tm-mist);
+  --color-snow: var(--tm-snow);
+  --color-moss: var(--tm-moss);
+  --color-tea: var(--tm-tea);
+  --color-clay: var(--tm-clay);
+  --color-stone: var(--tm-stone);
+  --color-aurora-cyan: var(--tm-aurora-cyan);
+  --color-aurora-lilac: var(--tm-aurora-lilac);
+  --color-aurora-rose: var(--tm-aurora-rose);
+  --color-success: var(--tm-success);
+  --color-warning: var(--tm-warning);
+  --color-error: var(--tm-error);
+  --color-info: var(--tm-info);
+  --color-soft-light-bg: var(--tm-paper);
+  --color-soft-light-surface: var(--tm-snow);
+  --color-soft-light-inset: var(--tm-mist);
+  --color-soft-light-text: var(--tm-tea);
+  --color-soft-light-muted: var(--tm-stone);
+  --color-soft-light-primary: var(--tm-moss);
+  --color-soft-light-secondary: var(--tm-clay);
+
+  --radius-sm: var(--tm-radius-sm);
+  --radius-md: var(--tm-radius-md);
+  --radius-lg: var(--tm-radius-lg);
+  --radius-xl: var(--tm-radius-xl);
+  --radius-2xl: var(--tm-radius-2xl);
+  --radius-full: var(--tm-radius-full);
+
+  --font-display: var(--tm-font-display);
+  --font-body: var(--tm-font-body);
+  --font-mono: var(--tm-font-mono);
+
+  --shadow-soft-light-raised: -8px -8px 16px rgba(255, 255, 255, 0.8), 8px 8px 16px rgba(163, 177, 198, 0.3);
+  --shadow-soft-light-inset: inset 3px 3px 6px rgba(163, 177, 198, 0.3), inset -3px -3px 6px rgba(255, 255, 255, 0.8);
+}

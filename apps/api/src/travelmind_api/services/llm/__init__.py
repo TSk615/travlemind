@@ -1,5 +1,11 @@
 from travelmind_api.services.llm.client import OpenAICompatibleClient
-from travelmind_api.services.llm.config import LlmConfig, LlmEndpointConfig
+from travelmind_api.services.llm.config import (
+    LlmConfig,
+    LlmEndpointConfig,
+    default_base_url_for_protocol,
+    is_supported_provider_protocol,
+    normalize_provider_protocol,
+)
 from travelmind_api.services.llm.parser import (
     LlmPlanDay,
     LlmPlanItem,
@@ -21,6 +27,9 @@ __all__ = [
     "OpenAICompatibleClient",
     "LlmConfig",
     "LlmEndpointConfig",
+    "default_base_url_for_protocol",
+    "is_supported_provider_protocol",
+    "normalize_provider_protocol",
     "LlmPlanDay",
     "LlmPlanItem",
     "LlmPlanningPayload",

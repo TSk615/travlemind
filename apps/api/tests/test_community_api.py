@@ -129,6 +129,7 @@ def test_community_publish_snapshot_and_refresh_flow(client: TestClient):
     assert created["share_note"] == "Best for a relaxed first Kyoto visit."
     assert created["snapshot"]["title"] == trip["title"]
     assert created["snapshot"]["itinerary"]["summary"]
+    assert created["snapshot"]["latest_agent_trace"]["provider"] == "stub"
 
     duplicate_response = client.post(
         "/api/v1/community/posts",
@@ -172,6 +173,7 @@ def test_community_publish_snapshot_and_refresh_flow(client: TestClient):
     assert refreshed["snapshot"]["title"] == "Kyoto calm days refreshed"
     assert refreshed["snapshot"]["budget"] == 5300
     assert refreshed["share_note"] == "Best for a relaxed first Kyoto visit."
+    assert refreshed["snapshot"]["latest_agent_trace"]["provider"] == "stub"
 
     patch_response = client.patch(
         f"/api/v1/community/posts/{created['id']}",

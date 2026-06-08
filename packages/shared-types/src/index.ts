@@ -1,7 +1,8 @@
 export type JobStatus = "queued" | "running" | "completed" | "failed"
 export type LlmWireApi = "chat_completions" | "responses"
+export type LlmProviderProtocol = "openai" | "newapi" | "gemini" | "claude" | "neiapi"
 export type LlmAgentProvider = "standard" | "helloagents"
-export type SearchServiceProvider = "exa" | "groksearch" | "tavily"
+export type SearchServiceProvider = "groksearch" | "tavily"
 export type SearchServiceTransport = "mcp" | "api"
 export type ImageProvider = "openai_compatible" | "huggingface" | "gitee_ai" | "modelscope" | "a4f"
 export type ImageGenerationMode = "text_to_image" | "image_to_image"
@@ -222,6 +223,7 @@ export interface Trip extends TripPreferenceInput {
 
 export interface CommunityTripSnapshot extends TripPreferenceInput {
   itinerary: GeneratedItinerary
+  latest_agent_trace?: AgentRunTrace | null
 }
 
 export interface CommunityPostSummary {
@@ -264,6 +266,7 @@ export interface ScoreBreakdown {
 }
 
 export interface AgentSettings {
+  provider_protocol: LlmProviderProtocol
   base_url: string | null
   model: string | null
   api_key_masked: string | null
@@ -274,6 +277,7 @@ export interface AgentSettings {
 }
 
 export interface AgentSettingsInput {
+  provider_protocol?: LlmProviderProtocol
   base_url?: string
   model?: string
   wire_api?: LlmWireApi
@@ -327,6 +331,22 @@ export interface RuntimeSettingsInput {
   agent?: AgentSettingsInput
   search?: SearchSettingsInput
   image?: ImageSettingsInput
+}
+
+export interface LlmModelInfo {
+  id: string
+  name?: string | null
+  description?: string | null
+  owned_by?: string | null
+  created_at?: string | number | null
+  input_token_limit?: number | null
+  output_token_limit?: number | null
+}
+
+export interface LlmModelsResponse {
+  provider_protocol: LlmProviderProtocol
+  base_url: string
+  models: LlmModelInfo[]
 }
 
 export type LlmSettings = RuntimeSettings

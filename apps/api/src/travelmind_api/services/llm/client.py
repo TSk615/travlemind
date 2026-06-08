@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from travelmind_api.services.llm.config import LlmEndpointConfig
+from travelmind_api.services.llm.config import LlmEndpointConfig, normalize_provider_protocol
 
 
 class OpenAICompatibleClient:
@@ -20,6 +20,20 @@ class OpenAICompatibleClient:
         messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int | None = None,
+    ) -> str:
+        protocol = normalize_provider_protocol(self._config.provider_protocol)
+        if protocol == "gemini":
+            return self._create_gemini_completion(messages=messages, temperature=temperature, max_tokens=max_tokens)
+        if protocol == "claude":
+            return self._create_claude_completion(messages=messages, temperature=temperature, max_tokens=max_tokens)
+        return self._create_openai_compatible_completion(messages=messages, temperature=temperature, max_tokens=max_tokens)
+
+    def _create_openai_compatible_completion(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int | None,
     ) -> str:
         if self._config.wire_api == "responses":
             standard_payload = self._build_text_payload(
@@ -70,6 +84,9 @@ class OpenAICompatibleClient:
         temperature: float = 0.2,
         max_tokens: int | None = None,
     ) -> Any:
+        protocol = normalize_provider_protocol(self._config.provider_protocol)
+        if protocol not in {"openai", "newapi", "neiapi"}:
+            raise ValueError(f"Tool calling is not implemented for {protocol} protocol")
         # hello_agents Function Calling flow expects an OpenAI Chat Completions-style response
         # with choices[0].message.tool_calls, so tool-enabled roles force the compatible path.
         chat_config = self._config.model_copy(update={"wire_api": "chat_completions"})
@@ -84,6 +101,37 @@ class OpenAICompatibleClient:
             payload["max_tokens"] = max_tokens
         body = self._post_json(chat_config, payload)
         return self._to_namespace(body)
+
+    def _create_gemini_completion(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int | None,
+    ) -> str:
+        payload = self._build_gemini_payload(messages=messages, temperature=temperature, max_tokens=max_tokens)
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self._config.api_key,
+        }
+        body = self._post_json_to_url(self._config.endpoint_url, headers, payload)
+        return self._extract_gemini_content(body)
+
+    def _create_claude_completion(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int | None,
+    ) -> str:
+        payload = self._build_claude_payload(messages=messages, temperature=temperature, max_tokens=max_tokens)
+        headers = {
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": self._config.api_key,
+        }
+        body = self._post_json_to_url(self._config.endpoint_url, headers, payload)
+        return self._extract_claude_content(body)
 
     def _build_text_payload(
         self,
@@ -126,6 +174,102 @@ class OpenAICompatibleClient:
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         return payload
+
+    def _build_gemini_payload(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int | None,
+    ) -> dict[str, Any]:
+        system_parts: list[dict[str, str]] = []
+        contents: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role") or "user").strip().lower()
+            parts = self._normalize_message_content_for_gemini(message.get("content"))
+            if role == "system":
+                system_parts.extend(parts)
+                continue
+            contents.append(
+                {
+                    "role": "model" if role == "assistant" else "user",
+                    "parts": parts,
+                }
+            )
+
+        payload: dict[str, Any] = {
+            "contents": contents or [{"role": "user", "parts": [{"text": ""}]}],
+            "generationConfig": {"temperature": temperature},
+        }
+        if system_parts:
+            payload["systemInstruction"] = {"parts": system_parts}
+        if max_tokens is not None:
+            payload["generationConfig"]["maxOutputTokens"] = max_tokens
+        return payload
+
+    def _build_claude_payload(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int | None,
+    ) -> dict[str, Any]:
+        system_text: list[str] = []
+        normalized_messages: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role") or "user").strip().lower()
+            text = "\n".join(self._extract_text_parts_for_plain_provider(message.get("content")))
+            if role == "system":
+                if text.strip():
+                    system_text.append(text.strip())
+                continue
+            next_role = "assistant" if role == "assistant" else "user"
+            content = [{"type": "text", "text": text}]
+            if normalized_messages and normalized_messages[-1]["role"] == next_role:
+                normalized_messages[-1]["content"].extend(content)
+            else:
+                normalized_messages.append({"role": next_role, "content": content})
+
+        payload: dict[str, Any] = {
+            "model": self._config.model,
+            "max_tokens": max_tokens or 2048,
+            "messages": normalized_messages or [{"role": "user", "content": [{"type": "text", "text": ""}]}],
+            "temperature": temperature,
+        }
+        if system_text:
+            payload["system"] = "\n\n".join(system_text)
+        return payload
+
+    def _normalize_message_content_for_gemini(self, content: Any) -> list[dict[str, str]]:
+        parts = [{"text": text} for text in self._extract_text_parts_for_plain_provider(content) if text.strip()]
+        return parts or [{"text": ""}]
+
+    def _extract_text_parts_for_plain_provider(self, content: Any) -> list[str]:
+        if isinstance(content, str):
+            return [content]
+        blocks = content if isinstance(content, list) else [content]
+        text_parts: list[str] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                text = str(block or "").strip()
+                if text:
+                    text_parts.append(text)
+                continue
+            block_type = str(block.get("type") or "").strip()
+            if block_type in {"text", "input_text", "output_text"}:
+                text = str(block.get("text") or block.get("content") or "").strip()
+                if text:
+                    text_parts.append(text)
+                continue
+            if block_type in {"image_url", "input_image"}:
+                image_url = self._extract_image_url(block.get("image_url"))
+                if image_url:
+                    text_parts.append(f"[Image: {image_url}]")
+                continue
+            text = str(block.get("text") or block.get("content") or "").strip()
+            if text:
+                text_parts.append(text)
+        return text_parts or [""]
 
     def _normalize_message_content_for_responses(self, content: Any) -> list[dict[str, Any]]:
         if isinstance(content, str):
@@ -232,6 +376,23 @@ class OpenAICompatibleClient:
             raise ValueError("Upstream LLM response root must be an object")
         return body
 
+    def _post_json_to_url(self, url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+        if self._http_client is not None:
+            response = self._http_client.post(url, headers=headers, json=payload)
+        else:
+            with httpx.Client(timeout=self._config.timeout_seconds, follow_redirects=True) as client:
+                response = client.post(url, headers=headers, json=payload)
+
+        response.raise_for_status()
+        try:
+            body = response.json()
+        except ValueError as exc:
+            preview = response.text[:400] if hasattr(response, "text") else ""
+            raise ValueError(f"Upstream LLM response was not valid JSON: {preview or '<empty body>'}") from exc
+        if not isinstance(body, dict):
+            raise ValueError("Upstream LLM response root must be an object")
+        return body
+
     def _is_retryable_stream_eof_error(self, exc: httpx.TransportError) -> bool:
         message = str(exc).strip().lower()
         if "eof" not in message:
@@ -260,6 +421,46 @@ class OpenAICompatibleClient:
             if text_parts:
                 return "\n".join(text_parts)
         raise ValueError("OpenAI-compatible response content was empty")
+
+    def _extract_gemini_content(self, payload: dict[str, Any]) -> str:
+        candidates = payload.get("candidates")
+        if isinstance(candidates, list):
+            text_parts: list[str] = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get("content")
+                if not isinstance(content, dict):
+                    continue
+                parts = content.get("parts")
+                if not isinstance(parts, list):
+                    continue
+                for part in parts:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        text_parts.append(part["text"])
+            if text_parts:
+                return "\n".join(text_parts)
+
+        text = payload.get("text") or payload.get("output_text")
+        if isinstance(text, str) and text.strip():
+            return text
+        raise ValueError("Gemini response did not contain assistant text")
+
+    def _extract_claude_content(self, payload: dict[str, Any]) -> str:
+        content = payload.get("content")
+        if isinstance(content, list):
+            text_parts = [
+                str(block.get("text"))
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+            ]
+            if text_parts:
+                return "\n".join(text_parts)
+
+        text = payload.get("output_text")
+        if isinstance(text, str) and text.strip():
+            return text
+        raise ValueError("Claude response did not contain assistant text")
 
     def _extract_responses_text_from_sse(self, stream_text: str) -> str:
         data_lines = [

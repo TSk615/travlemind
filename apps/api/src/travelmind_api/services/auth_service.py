@@ -27,7 +27,7 @@ from travelmind_api.core.security import (
 )
 from travelmind_api.db.models import RefreshSession, User
 from travelmind_api.services.images.provider import IMAGE_PROVIDER_OPENAI_COMPATIBLE, is_supported_image_provider, normalize_image_provider
-from travelmind_api.services.llm.config import normalize_wire_api
+from travelmind_api.services.llm.config import is_supported_provider_protocol, normalize_provider_protocol, normalize_wire_api
 from travelmind_api.services.search_connector import normalize_search_service_provider, normalize_search_service_transport
 
 
@@ -95,6 +95,18 @@ def _normalize_wire_api_value(wire_api: str | None) -> str | None:
     return normalize_wire_api(normalized, default="responses")
 
 
+def _normalize_provider_protocol_value(provider_protocol: str | None) -> str | None:
+    normalized = _normalize_optional_text(provider_protocol)
+    if normalized is None:
+        return None
+    if not is_supported_provider_protocol(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_llm_provider_protocol", "message": "provider_protocol must be openai, newapi, gemini, claude, or neiapi"},
+        )
+    return normalize_provider_protocol(normalized)
+
+
 
 def _normalize_agent_provider_value(agent_provider: str | None) -> str | None:
     normalized = _normalize_optional_text(agent_provider)
@@ -113,10 +125,10 @@ def _normalize_search_provider_value(provider: str | None) -> str | None:
     normalized = _normalize_optional_text(provider)
     if normalized is None:
         return None
-    if str(normalized).strip().lower() not in {"exa", "groksearch", "grok-search", "grok_search", "grok", "tavily"}:
+    if str(normalized).strip().lower() not in {"groksearch", "grok-search", "grok_search", "grok", "tavily"}:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "invalid_search_provider", "message": "search provider must be exa, groksearch, or tavily"},
+            detail={"code": "invalid_search_provider", "message": "search provider must be groksearch or tavily"},
         )
     return normalize_search_service_provider(normalized)
 
@@ -185,8 +197,22 @@ def serialize_user(user: User) -> UserResponse:
 
 
 def serialize_runtime_settings(user: User, settings: Settings) -> RuntimeSettingsResponse:
+    search_provider_raw = str(getattr(user, "search_service_provider", None) or "").strip().lower()
+    search_transport_raw = str(getattr(user, "search_service_transport", None) or "").strip().lower()
+    search_provider = normalize_search_service_provider(search_provider_raw or None, default="groksearch")
+    search_transport = normalize_search_service_transport(search_transport_raw or None, default="mcp")
+    provider_supported = not search_provider_raw or search_provider_raw in {"groksearch", "grok-search", "grok_search", "grok", "tavily"}
+    transport_supported = not search_transport_raw or search_transport_raw in {"mcp", "api", "rest", "http"}
+    search_supported = provider_supported and transport_supported and (
+        (search_provider == "groksearch" and search_transport == "mcp") or (search_provider == "tavily" and search_transport == "api")
+    )
+    if not search_supported:
+        search_provider = "groksearch"
+        search_transport = "mcp"
+
     return RuntimeSettingsResponse(
         agent=AgentSettingsResponse(
+            provider_protocol=normalize_provider_protocol(getattr(user, "llm_provider_protocol", None)),
             base_url=user.llm_base_url,
             api_key_masked=mask_api_key(user.llm_api_key),
             has_api_key=bool(user.llm_api_key),
@@ -196,14 +222,14 @@ def serialize_runtime_settings(user: User, settings: Settings) -> RuntimeSetting
             configured=bool(user.llm_base_url and user.llm_api_key and user.llm_model),
         ),
         search=SearchSettingsResponse(
-            provider=normalize_search_service_provider(getattr(user, "search_service_provider", None), default="exa"),
-            transport=normalize_search_service_transport(getattr(user, "search_service_transport", None), default="mcp"),
-            base_url=getattr(user, "search_service_base_url", None),
-            api_key_masked=mask_api_key(getattr(user, "search_service_api_key", None)),
-            has_api_key=bool(getattr(user, "search_service_api_key", None)),
+            provider=search_provider,
+            transport=search_transport,
+            base_url=getattr(user, "search_service_base_url", None) if search_supported else None,
+            api_key_masked=mask_api_key(getattr(user, "search_service_api_key", None)) if search_supported else None,
+            has_api_key=bool(getattr(user, "search_service_api_key", None)) if search_supported else False,
             timeout_seconds=float(getattr(user, "search_service_timeout_seconds", 30.0) or 30.0),
             xhs_source_enabled=bool(getattr(user, "xhs_source_enabled", False)),
-            configured=bool(getattr(user, "search_service_base_url", None) and getattr(user, "search_service_api_key", None)),
+            configured=search_supported and bool(getattr(user, "search_service_base_url", None) and getattr(user, "search_service_api_key", None)),
         ),
         image=ImageSettingsResponse(
             base_url=getattr(user, "image_base_url", None),
@@ -368,6 +394,8 @@ def update_user_runtime_settings(session: Session, user: User, payload: RuntimeS
 
     if "base_url" in agent_updates:
         user.llm_base_url = _normalize_base_url(agent_updates["base_url"])
+    if "provider_protocol" in agent_updates:
+        user.llm_provider_protocol = _normalize_provider_protocol_value(agent_updates["provider_protocol"])
     if "api_key" in agent_updates:
         user.llm_api_key = _normalize_api_key(agent_updates["api_key"])
     if "model" in agent_updates:
@@ -377,48 +405,55 @@ def update_user_runtime_settings(session: Session, user: User, payload: RuntimeS
     if "agent_provider" in agent_updates:
         user.llm_agent_provider = _normalize_agent_provider_value(agent_updates["agent_provider"])
 
-    next_search_provider = normalize_search_service_provider(getattr(user, "search_service_provider", None), default="exa")
-    next_search_transport = normalize_search_service_transport(getattr(user, "search_service_transport", None), default="mcp")
-    next_search_base_url = getattr(user, "search_service_base_url", None)
-    next_search_api_key = getattr(user, "search_service_api_key", None)
-    next_search_timeout = float(getattr(user, "search_service_timeout_seconds", 30.0) or 30.0)
-    next_xhs_source_enabled = bool(getattr(user, "xhs_source_enabled", False))
+    normalized_llm_protocol = normalize_provider_protocol(getattr(user, "llm_provider_protocol", None))
+    if normalized_llm_protocol == "openai":
+        user.llm_wire_api = "responses"
+    elif "provider_protocol" in agent_updates and "wire_api" not in agent_updates and normalized_llm_protocol in {"newapi", "neiapi"}:
+        user.llm_wire_api = "chat_completions"
 
-    if "provider" in search_updates:
-        normalized_provider = _normalize_search_provider_value(search_updates["provider"])
-        if normalized_provider is not None:
-            next_search_provider = normalized_provider
-    if "transport" in search_updates:
-        normalized_transport = _normalize_search_transport_value(search_updates["transport"])
-        if normalized_transport is not None:
-            next_search_transport = normalized_transport
-    if next_search_provider == "groksearch" and next_search_transport != "mcp":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "invalid_search_transport", "message": "groksearch currently only supports mcp transport"},
-        )
-    if next_search_provider == "tavily" and next_search_transport != "api":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "invalid_search_transport", "message": "tavily currently only supports api transport"},
-        )
-    if "base_url" in search_updates:
-        next_search_base_url = _normalize_base_url(search_updates["base_url"])
-    if "api_key" in search_updates:
-        next_search_api_key = _normalize_api_key(search_updates["api_key"])
-    if "timeout_seconds" in search_updates:
-        normalized_timeout = _normalize_timeout_seconds(search_updates["timeout_seconds"])
-        if normalized_timeout is not None:
-            next_search_timeout = normalized_timeout
-    if "xhs_source_enabled" in search_updates and search_updates["xhs_source_enabled"] is not None:
-        next_xhs_source_enabled = bool(search_updates["xhs_source_enabled"])
+    if search_updates:
+        next_search_provider = normalize_search_service_provider(getattr(user, "search_service_provider", None), default="groksearch")
+        next_search_transport = normalize_search_service_transport(getattr(user, "search_service_transport", None), default="mcp")
+        next_search_base_url = getattr(user, "search_service_base_url", None)
+        next_search_api_key = getattr(user, "search_service_api_key", None)
+        next_search_timeout = float(getattr(user, "search_service_timeout_seconds", 30.0) or 30.0)
+        next_xhs_source_enabled = bool(getattr(user, "xhs_source_enabled", False))
 
-    user.search_service_provider = next_search_provider
-    user.search_service_transport = next_search_transport
-    user.search_service_base_url = next_search_base_url
-    user.search_service_api_key = next_search_api_key
-    user.search_service_timeout_seconds = next_search_timeout
-    user.xhs_source_enabled = next_xhs_source_enabled
+        if "provider" in search_updates:
+            normalized_provider = _normalize_search_provider_value(search_updates["provider"])
+            if normalized_provider is not None:
+                next_search_provider = normalized_provider
+        if "transport" in search_updates:
+            normalized_transport = _normalize_search_transport_value(search_updates["transport"])
+            if normalized_transport is not None:
+                next_search_transport = normalized_transport
+        if next_search_provider == "groksearch" and next_search_transport != "mcp":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "invalid_search_transport", "message": "groksearch currently only supports mcp transport"},
+            )
+        if next_search_provider == "tavily" and next_search_transport != "api":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "invalid_search_transport", "message": "tavily currently only supports api transport"},
+            )
+        if "base_url" in search_updates:
+            next_search_base_url = _normalize_base_url(search_updates["base_url"])
+        if "api_key" in search_updates:
+            next_search_api_key = _normalize_api_key(search_updates["api_key"])
+        if "timeout_seconds" in search_updates:
+            normalized_timeout = _normalize_timeout_seconds(search_updates["timeout_seconds"])
+            if normalized_timeout is not None:
+                next_search_timeout = normalized_timeout
+        if "xhs_source_enabled" in search_updates and search_updates["xhs_source_enabled"] is not None:
+            next_xhs_source_enabled = bool(search_updates["xhs_source_enabled"])
+
+        user.search_service_provider = next_search_provider
+        user.search_service_transport = next_search_transport
+        user.search_service_base_url = next_search_base_url
+        user.search_service_api_key = next_search_api_key
+        user.search_service_timeout_seconds = next_search_timeout
+        user.xhs_source_enabled = next_xhs_source_enabled
 
     if "base_url" in image_updates:
         user.image_base_url = _normalize_base_url(image_updates["base_url"])

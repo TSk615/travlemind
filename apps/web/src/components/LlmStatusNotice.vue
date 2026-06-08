@@ -63,8 +63,9 @@ const message = computed(() => {
 
   const model = settingsStore.settings?.agent.model?.trim()
   const wireApi = settingsStore.settings?.agent.wire_api ?? "responses"
+  const protocol = settingsStore.settings?.agent.provider_protocol ?? "openai"
   const prefix = usesHelloAgents.value ? copy.value.helloConfiguredMessage : copy.value.standardConfiguredMessage
-  return model ? `${prefix} ${copy.value.configuredDetailPrefix}: ${model} (${wireApi}).` : prefix
+  return model ? `${prefix} ${copy.value.configuredDetailPrefix}: ${model} (${protocol}/${wireApi}).` : prefix
 })
 </script>
 

@@ -89,7 +89,6 @@ SEED_DOCUMENTS: list[dict[str, Any]] = [
 
 _PLATFORM_PRIORITY = {
     "official-tourism": 0,
-    "exa": 1,
     "groksearch": 1,
     "tavily": 1,
     "xiaohongshu": 2,
@@ -147,6 +146,7 @@ def search_documents(
     interests: list[str] | None = None,
     social_context: str = "general",
     search_service_config: SearchServiceConfig | None = None,
+    search_service_configs: list[SearchServiceConfig] | None = None,
     xhs_source_enabled: bool = True,
     xhs_user_id: str | None = None,
 ) -> list[SearchDocumentResponse]:
@@ -162,8 +162,9 @@ def search_documents(
         if normalized_destination or _query_matches_document(document, query_text.casefold()):
             results.append(_build_seed_document(query_text, clean_destination, document))
 
-    if search_service_config is not None:
-        results.extend(_search_remote_documents(query_text, clean_destination, search_service_config))
+    remote_configs = _normalize_search_service_configs(search_service_configs, search_service_config)
+    if remote_configs:
+        results.extend(_search_remote_documents(query_text, clean_destination, remote_configs))
 
     if xhs_source_enabled:
         results.extend(_search_xhs_documents(query_text, clean_destination, interests or [], social_context=social_context, xhs_user_id=xhs_user_id))
@@ -196,7 +197,37 @@ def _build_seed_document(query: str, destination: str | None, document: dict[str
 
 
 
-def _search_remote_documents(query: str, destination: str | None, config: SearchServiceConfig) -> list[SearchDocumentResponse]:
+def _normalize_search_service_configs(
+    configs: list[SearchServiceConfig] | None,
+    fallback_config: SearchServiceConfig | None,
+) -> list[SearchServiceConfig]:
+    results: list[SearchServiceConfig] = []
+    seen: set[tuple[str, str, str, str]] = set()
+
+    for config in (configs or []):
+        identity = (config.provider, config.transport, config.base_url, config.api_key)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        results.append(config)
+
+    if fallback_config is not None:
+        identity = (
+            fallback_config.provider,
+            fallback_config.transport,
+            fallback_config.base_url,
+            fallback_config.api_key,
+        )
+        if identity not in seen:
+            results.append(fallback_config)
+    return results
+
+
+def _search_remote_documents(
+    query: str,
+    destination: str | None,
+    configs: SearchServiceConfig | list[SearchServiceConfig],
+) -> list[SearchDocumentResponse]:
     normalized_query = _clean_text(query)
     if not normalized_query:
         return []
@@ -204,27 +235,59 @@ def _search_remote_documents(query: str, destination: str | None, config: Search
     if destination and destination.casefold() not in normalized_query.casefold():
         remote_query = f"{destination} {normalized_query}".strip()
 
-    try:
-        gateway = ConfiguredSearchGateway(config)
-        available_tools = gateway.available_tools()
-        if config.provider == "groksearch" and "web_search" in available_tools:
-            payload = gateway.call_operation("web_search", {"query": remote_query})
-        elif "web_search_exa" in available_tools:
-            payload = gateway.call_operation("web_search_exa", {"query": remote_query, "numResults": 8})
-        elif "search" in available_tools:
-            payload = gateway.call_operation("search", {"query": remote_query, "num_results": 8, "include_text": True})
-        elif "deep_search_exa" in available_tools:
-            payload = gateway.call_operation("deep_search_exa", {"objective": remote_query, "type": "deep", "numResults": 8})
-        elif "answer" in available_tools:
-            payload = gateway.call_operation("answer", {"query": remote_query, "include_text": True})
-        else:
-            return []
-    except Exception as exc:
-        _LOGGER.warning("Configured search service lookup failed: %s", exc)
-        return []
+    config_list = configs if isinstance(configs, list) else [configs]
+    for config in config_list:
+        try:
+            gateway = ConfiguredSearchGateway(config)
+            available_tools = gateway.available_tools()
+            if config.provider == "groksearch" and "web_search" in available_tools:
+                payload = gateway.call_operation("web_search", {"query": remote_query})
+            elif "search" in available_tools:
+                payload = gateway.call_operation("search", {"query": remote_query, "num_results": 8, "include_text": True})
+            elif "answer" in available_tools:
+                payload = gateway.call_operation("answer", {"query": remote_query, "include_text": True})
+            else:
+                _LOGGER.info(
+                    "Configured search service has no compatible search tools: provider=%s transport=%s",
+                    config.provider,
+                    config.transport,
+                )
+                continue
+        except Exception as exc:
+            _LOGGER.warning(
+                "Configured search service lookup failed: provider=%s transport=%s error=%s",
+                config.provider,
+                config.transport,
+                exc,
+            )
+            continue
 
+        results = _build_remote_documents_from_payload(
+            payload,
+            query=normalized_query,
+            destination=destination,
+            config=config,
+        )
+        if results:
+            return results
+        _LOGGER.info(
+            "Configured search service returned no usable documents: provider=%s transport=%s",
+            config.provider,
+            config.transport,
+        )
+
+    return []
+
+
+def _build_remote_documents_from_payload(
+    payload: dict[str, Any],
+    *,
+    query: str,
+    destination: str | None,
+    config: SearchServiceConfig,
+) -> list[SearchDocumentResponse]:
     results: list[SearchDocumentResponse] = []
-    remote_platform = "groksearch" if config.provider == "groksearch" else "tavily" if config.provider == "tavily" else "exa"
+    remote_platform = config.provider
     for item in _extract_remote_search_items(payload):
         url = _extract_remote_search_url(item)
         if not url:
@@ -260,7 +323,7 @@ def _search_remote_documents(query: str, destination: str | None, config: Search
                 image_urls=[],
                 source_type=f"search-service-{config.transport}",
                 scores=_score_document(
-                    normalized_query,
+                    query,
                     remote_platform,
                     destination,
                     title=title,
@@ -442,8 +505,10 @@ def _score_document(
     normalized_platform = platform.strip().lower()
     if normalized_platform == "official-tourism":
         trust = 0.92
-    elif normalized_platform in {"exa", "groksearch"}:
+    elif normalized_platform == "groksearch":
         trust = 0.84
+    elif normalized_platform == "tavily":
+        trust = 0.82
     elif normalized_platform == "xiaohongshu":
         trust = 0.78
     else:
@@ -455,15 +520,17 @@ def _score_document(
     reasons: list[str] = []
     if normalized_platform == "official-tourism":
         reasons.append("Official tourism source")
-    elif normalized_platform == "exa":
-        reasons.append("Configured Exa search service")
+    elif normalized_platform == "groksearch":
+        reasons.append("Configured GrokSearch service")
+    elif normalized_platform == "tavily":
+        reasons.append("Configured Tavily search service")
     elif normalized_platform == "xiaohongshu":
         reasons.append("Local traveler-generated guide")
     else:
         reasons.append("User-supplied source")
     if destination:
         reasons.append(f"Scoped to {destination}")
-    if published_at and normalized_platform in {"xiaohongshu", "exa"}:
+    if published_at and normalized_platform in {"xiaohongshu", "tavily"}:
         reasons.append("Freshness score uses post publish time")
     if ad_score >= 0.3:
         reasons.append("Possible promotional tone lowered the score")
@@ -491,7 +558,7 @@ def _quality_score(query: str, title: str | None, summary: str | None, engagemen
 def _freshness_score(platform: str, published_at: str | None) -> float:
     if platform == "official-tourism":
         return 0.7
-    if platform not in {"xiaohongshu", "exa"}:
+    if platform not in {"xiaohongshu", "tavily"}:
         return 0.55
     normalized = _normalize_published_at(published_at)
     if not normalized:
@@ -520,7 +587,7 @@ def _ad_score(platform: str, title: str | None, summary: str | None, source_tags
     marker_hits = sum(1 for marker in _XHS_AD_MARKERS if marker in combined)
     if platform == "xiaohongshu":
         return min(0.5, 0.14 + (marker_hits * 0.08))
-    if platform == "exa":
+    if platform == "tavily":
         return min(0.24, 0.1 + (marker_hits * 0.04))
     return 0.2
 

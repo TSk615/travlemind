@@ -93,29 +93,41 @@ onMounted(() => {
       :message="copy.emptyMessage"
     />
 
-    <div v-else class="card-grid">
-      <article v-for="post in posts" :key="post.id" class="trip-card community-card">
-        <img v-if="post.cover_image_url" class="community-cover" :src="post.cover_image_url" :alt="post.title" />
-        <p class="kicker">{{ post.destination }}</p>
-        <h3>{{ post.title }}</h3>
-        <p>{{ post.itinerary_summary }}</p>
-        <p v-if="post.share_note" class="community-note">“{{ post.share_note }}”</p>
-        <div class="community-meta">
-          <span>{{ copy.authorLabel }}: {{ post.author_name }}</span>
-          <span>{{ copy.publishedLabel }}: {{ formatDateTime(post.published_at) }}</span>
+    <div v-else class="community-feed-grid">
+      <RouterLink v-for="post in posts" :key="post.id" class="community-feed-card" :to="`/community/${post.id}`">
+        <div class="community-feed-card__cover">
+          <img v-if="post.cover_image_url" :src="post.cover_image_url" :alt="post.title" />
+          <span v-else>{{ post.destination }}</span>
         </div>
-        <div class="community-meta">
-          <span>{{ formatDateRange(post.start_date, post.end_date) }}</span>
-          <span>{{ copy.daysLabel }}: {{ post.day_count }}</span>
-          <span>{{ formatCurrency(post.budget) }}</span>
+
+        <div class="community-feed-card__body">
+          <div>
+            <p class="kicker">{{ post.destination }}</p>
+            <h3>{{ post.title }}</h3>
+            <p class="community-feed-card__summary">{{ post.itinerary_summary }}</p>
+          </div>
+
+          <p v-if="post.share_note" class="community-note community-feed-card__note">“{{ post.share_note }}”</p>
+
+          <div class="community-feed-card__facts">
+            <span>{{ formatDateRange(post.start_date, post.end_date) }}</span>
+            <span>{{ copy.daysLabel }}: {{ post.day_count }}</span>
+            <span>{{ formatCurrency(post.budget) }}</span>
+          </div>
+
+          <div v-if="interestPreview(post).length" class="chip-list community-feed-card__chips">
+            <span v-for="interest in interestPreview(post)" :key="interest" class="detail-chip detail-chip--soft">{{ interest }}</span>
+          </div>
+
+          <div class="community-feed-card__footer">
+            <div class="community-meta">
+              <span>{{ copy.authorLabel }}: {{ post.author_name }}</span>
+              <span>{{ copy.publishedLabel }}: {{ formatDateTime(post.published_at) }}</span>
+            </div>
+            <span class="community-feed-card__action">{{ copy.openLabel }}</span>
+          </div>
         </div>
-        <div v-if="interestPreview(post).length" class="chip-list">
-          <span v-for="interest in interestPreview(post)" :key="interest" class="detail-chip detail-chip--soft">{{ interest }}</span>
-        </div>
-        <div class="inline-actions">
-          <RouterLink class="button-link primary" :to="`/community/${post.id}`">{{ copy.openLabel }}</RouterLink>
-        </div>
-      </article>
+      </RouterLink>
     </div>
   </section>
 </template>

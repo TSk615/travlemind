@@ -39,6 +39,7 @@ def _community_snapshot_from_trip(trip: Trip) -> dict[str, object]:
         "pace": trip.pace,
         "transport_mode": trip.transport_mode,
         "itinerary": itinerary,
+        "latest_agent_trace": trip.latest_agent_trace_json,
     }
 
 

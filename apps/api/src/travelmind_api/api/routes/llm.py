@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -11,12 +12,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from travelmind_api.api.schemas.common import success_response
-from travelmind_api.api.schemas.llm import LlmProxyRequest
+from travelmind_api.api.schemas.llm import LlmConnectionTestRequest, LlmConnectionTestResponse, LlmModelsRequest, LlmProxyRequest
 from travelmind_api.core.deps import get_current_user
 from travelmind_api.db.models import User
-from travelmind_api.services.llm import LlmConfig
-from travelmind_api.services.llm.config import normalize_wire_api
-from travelmind_api.services.search_connector import ConfiguredSearchGateway, SearchServiceConfig, SearchServiceGatewayError
+from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
+from travelmind_api.services.llm.config import default_base_url_for_protocol, normalize_provider_protocol, normalize_wire_api
+from travelmind_api.services.llm.models import fetch_llm_models
+from travelmind_api.services.search_connector import (
+    ConfiguredSearchGateway,
+    SearchServiceConfig,
+    SearchServiceGatewayError,
+)
 from travelmind_api.services.xhs_account import load_xhs_search_state, mark_xhs_session_available, mark_xhs_session_expired
 from travelmind_api.services.xhs_crawler import XhsCrawlerClient, XhsCrawlerClientError, XhsCrawlerConfig, XhsCrawlerSessionExpiredError
 
@@ -73,8 +79,11 @@ def _infer_wire_api(payload: dict[str, Any], user: User) -> str:
 
 def _resolve_proxy_config(payload: LlmProxyRequest, user: User) -> LlmConfig:
     upstream_payload = payload.payload if isinstance(payload.payload, dict) else {}
+    provider_protocol = payload.provider_protocol or getattr(user, "llm_provider_protocol", None)
+    normalized_protocol = normalize_provider_protocol(provider_protocol)
     merged = {
-        "base_url": payload.base_url or user.llm_base_url,
+        "provider_protocol": normalized_protocol,
+        "base_url": payload.base_url or user.llm_base_url or default_base_url_for_protocol(normalized_protocol),
         "api_key": payload.api_key or user.llm_api_key,
         "model": upstream_payload.get("model") or user.llm_model,
         "wire_api": payload.wire_api or _infer_wire_api(upstream_payload, user),
@@ -88,10 +97,83 @@ def _resolve_proxy_config(payload: LlmProxyRequest, user: User) -> LlmConfig:
     return config
 
 
+def _resolve_connection_test_config(payload: LlmConnectionTestRequest, user: User) -> LlmConfig:
+    provider_protocol = normalize_provider_protocol(payload.provider_protocol or getattr(user, "llm_provider_protocol", None))
+    config = LlmConfig.from_mapping(
+        {
+            "provider_protocol": provider_protocol,
+            "base_url": payload.base_url or getattr(user, "llm_base_url", None) or default_base_url_for_protocol(provider_protocol),
+            "api_key": payload.api_key or getattr(user, "llm_api_key", None),
+            "model": payload.model or getattr(user, "llm_model", None),
+            "wire_api": payload.wire_api or getattr(user, "llm_wire_api", None),
+            "timeout_seconds": payload.timeout_seconds or 30.0,
+        }
+    )
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "llm_test_not_configured", "message": "Configure base_url, api_key, model, and API format before testing the model connection."},
+        )
+    return config
+
+
+def _extract_proxy_messages(upstream_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_messages = upstream_payload.get("messages")
+    if isinstance(raw_messages, list):
+        return [
+            {"role": str(message.get("role") or "user"), "content": message.get("content", "")}
+            for message in raw_messages
+            if isinstance(message, dict)
+        ]
+
+    raw_input = upstream_payload.get("input")
+    if isinstance(raw_input, str):
+        return [{"role": "user", "content": raw_input}]
+    if isinstance(raw_input, list):
+        messages: list[dict[str, Any]] = []
+        for item in raw_input:
+            if not isinstance(item, dict):
+                continue
+            messages.append({"role": str(item.get("role") or "user"), "content": item.get("content", "")})
+        if messages:
+            return messages
+    return [{"role": "user", "content": json.dumps(upstream_payload, ensure_ascii=False)}]
+
+
+def _proxy_native_protocol_request(upstream_payload: dict[str, Any], config: LlmConfig) -> Response:
+    messages = _extract_proxy_messages(upstream_payload)
+    temperature = upstream_payload.get("temperature")
+    try:
+        resolved_temperature = float(temperature) if temperature is not None else 0.2
+    except (TypeError, ValueError):
+        resolved_temperature = 0.2
+    max_tokens_raw = upstream_payload.get("max_tokens") or upstream_payload.get("max_output_tokens")
+    try:
+        max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else None
+    except (TypeError, ValueError):
+        max_tokens = None
+    content = OpenAICompatibleClient(config).create_chat_completion(messages=messages, temperature=resolved_temperature, max_tokens=max_tokens)
+    if config.wire_api == "responses":
+        body = {"output_text": content}
+    else:
+        body = {"choices": [{"message": {"role": "assistant", "content": content}}]}
+    return Response(content=json.dumps(body, ensure_ascii=False), status_code=200, media_type="application/json")
+
+
 def _prepare_payload(payload: dict[str, Any], config: LlmConfig) -> dict[str, Any]:
     prepared = dict(payload)
     prepared.setdefault("model", config.model)
     prepared.setdefault("stream", False)
+    if config.wire_api == "responses" and "input" not in prepared and isinstance(prepared.get("messages"), list):
+        prepared["input"] = [
+            {
+                "role": str(message.get("role") or "user"),
+                "content": [{"type": "input_text", "text": str(message.get("content") or "")}],
+            }
+            for message in prepared["messages"]
+            if isinstance(message, dict)
+        ]
+        prepared.pop("messages", None)
     return prepared
 
 
@@ -165,12 +247,8 @@ def _pick_search_operation(config: SearchServiceConfig, available_tools: set[str
         if "answer" in available_tools:
             return ("answer", {"query": normalized_query, "include_text": True})
     else:
-        if "web_search_exa" in available_tools:
-            return ("web_search_exa", {"query": normalized_query, "numResults": 8})
         if "search" in available_tools:
             return ("search", {"query": normalized_query, "num_results": 8, "include_text": True})
-        if "deep_search_exa" in available_tools:
-            return ("deep_search_exa", {"objective": normalized_query, "type": "deep", "numResults": 8})
         if "answer" in available_tools:
             return ("answer", {"query": normalized_query, "include_text": True})
 
@@ -369,6 +447,9 @@ def proxy_llm_request(payload: LlmProxyRequest, current_user: User = Depends(get
     }
 
     try:
+        if normalize_provider_protocol(config.provider_protocol) not in {"openai", "newapi", "neiapi"}:
+            return _proxy_native_protocol_request(upstream_payload, config)
+
         timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=60.0)
         should_stream = bool(upstream_payload.get("stream"))
 
@@ -395,6 +476,77 @@ def proxy_llm_request(payload: LlmProxyRequest, current_user: User = Depends(get
     except httpx.HTTPError as exc:
         body = json.dumps({"error": {"message": str(exc)}})
         return Response(content=body, status_code=502, media_type="application/json")
+
+
+@router.post("/models")
+def list_llm_models(payload: LlmModelsRequest, current_user: User = Depends(get_current_user)):
+    provider_protocol = normalize_provider_protocol(payload.provider_protocol or getattr(current_user, "llm_provider_protocol", None))
+    api_key = str(payload.api_key or getattr(current_user, "llm_api_key", None) or "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "llm_models_api_key_required", "message": "Provide or save an API key before fetching models."},
+        )
+    base_url = str(payload.base_url or getattr(current_user, "llm_base_url", None) or default_base_url_for_protocol(provider_protocol)).strip().rstrip("/")
+    timeout_seconds = float(payload.timeout_seconds or 30.0)
+    try:
+        result = fetch_llm_models(
+            provider_protocol=provider_protocol,
+            base_url=base_url,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+        )
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "llm_models_upstream_failed", "message": f"Model list request failed with upstream status {status_code}."},
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "llm_models_request_failed", "message": str(exc) or "Model list request failed."},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "llm_models_invalid_response", "message": str(exc) or "Model list response was invalid."},
+        ) from exc
+    return success_response(result.model_dump(mode="json"))
+
+
+@router.post("/test")
+def test_llm_connection(payload: LlmConnectionTestRequest, current_user: User = Depends(get_current_user)):
+    config = _resolve_connection_test_config(payload, current_user)
+    started = perf_counter()
+    try:
+        reply = OpenAICompatibleClient(config).create_chat_completion(
+            messages=[{"role": "user", "content": "Reply with exactly: ok"}],
+            temperature=0,
+            max_tokens=16,
+        )
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "llm_test_upstream_failed", "message": f"Model test request failed with upstream status {status_code}."},
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "llm_test_request_failed", "message": str(exc) or "Model test request failed."},
+        ) from exc
+
+    result = LlmConnectionTestResponse(
+        provider_protocol=config.provider_protocol,
+        base_url=config.base_url,
+        model=config.model,
+        wire_api=config.wire_api,
+        ok=bool(reply.strip()),
+        reply=reply.strip(),
+        latency_ms=int((perf_counter() - started) * 1000),
+    )
+    return success_response(result.model_dump(mode="json"))
 
 
 @router.post("/search-proxy")

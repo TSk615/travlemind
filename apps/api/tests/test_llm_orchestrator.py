@@ -168,6 +168,7 @@ def test_openai_compatible_orchestrator_uses_chat_completions(monkeypatch):
     monkeypatch.setenv("TRAVELMIND_LLM_API_KEY", "test-key")
     monkeypatch.setenv("TRAVELMIND_LLM_MODEL", "gpt-test")
     monkeypatch.setenv("TRAVELMIND_LLM_WIRE_API", "chat_completions")
+    monkeypatch.setenv("TRAVELMIND_LLM_PROVIDER_PROTOCOL", "newapi")
 
     captured: dict[str, object] = {}
 
@@ -1492,13 +1493,8 @@ def test_helloagents_orchestrator_attaches_weather_citations(monkeypatch):
     monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
     monkeypatch.setattr(
         HelloAgentsOrchestrator,
-        "_build_role_mcp_client",
-        lambda self, role_name: object() if role_name == "weather_specialist" else None,
-    )
-    monkeypatch.setattr(
-        HelloAgentsOrchestrator,
-        "_available_mcp_tools",
-        lambda self, role_name, client: {"answer"} if role_name == "weather_specialist" else set(),
+        "_build_role_mcp_clients",
+        lambda self, role_name: [(object(), {"answer"})] if role_name == "weather_specialist" else [],
     )
     monkeypatch.setattr(
         HelloAgentsOrchestrator,
@@ -1666,54 +1662,20 @@ def test_helloagents_weather_tool_results_use_deep_research_when_available(monke
 
 
 
-def test_helloagents_deep_search_uses_official_objective_schema(monkeypatch):
-    calls: list[tuple[str, dict[str, object]]] = []
-
-    def fake_call(self, client, tool_name, arguments, *, role_name):
-        del self, client, role_name
-        calls.append((tool_name, arguments))
-        return {"answer": "mock deep search"}
-
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    orchestrator._call_search_like_tool(
-        object(),
-        "deep_search_exa",
-        "Travel weather guidance for Kyoto between 2026-04-14 and 2026-04-15",
-        5,
-        role_name="weather_specialist",
-    )
-
-    assert calls == [
-        (
-            "deep_search_exa",
-            {
-                "objective": "Travel weather guidance for Kyoto between 2026-04-14 and 2026-04-15",
-                "type": "deep",
-                "numResults": 5,
-            },
-        )
-    ]
-
-
 def test_helloagents_hotel_tool_results_crawl_top_search_urls_when_available(monkeypatch):
     calls: list[tuple[str, dict[str, object]]] = []
 
     def fake_call(self, client, tool_name, arguments, *, role_name):
         del self, client, role_name
         calls.append((tool_name, arguments))
-        if tool_name == "web_search_exa":
+        if tool_name == "search":
             return {
                 "results": [
                     {"url": "https://stay.example.test/hotel-alpha", "title": "Hotel Alpha"},
                     {"url": "https://stay.example.test/hotel-beta", "title": "Hotel Beta"},
                 ]
             }
-        if tool_name == "crawling_exa":
+        if tool_name == "contents":
             return {
                 "results": [
                     {"url": "https://stay.example.test/hotel-alpha", "text": "Transit-friendly stay."},
@@ -1730,7 +1692,7 @@ def test_helloagents_hotel_tool_results_crawl_top_search_urls_when_available(mon
 
     result = orchestrator._collect_hotel_tool_results(
         object(),
-        {"web_search_exa", "crawling_exa"},
+        {"search", "contents"},
         {
             "trip_request": {"destination": "Kyoto", "accommodation_preference": "Quiet boutique hotel"},
             "planning_brief": {"destination": "Kyoto", "accommodation": "Quiet boutique hotel"},
@@ -1738,13 +1700,13 @@ def test_helloagents_hotel_tool_results_crawl_top_search_urls_when_available(mon
         },
     )
 
-    assert result["search_tool"] == "web_search_exa"
-    assert result["crawl_tool"] == "crawling_exa"
+    assert result["search_tool"] == "search"
+    assert result["crawl_tool"] == "contents"
     assert result["crawl_urls"] == [
         "https://stay.example.test/hotel-alpha",
         "https://stay.example.test/hotel-beta",
     ]
-    assert [name for name, _ in calls] == ["web_search_exa", "crawling_exa"]
+    assert [name for name, _ in calls] == ["search", "contents"]
 
 
 
@@ -1786,7 +1748,7 @@ def test_helloagents_attraction_tool_results_include_grounding_docs(monkeypatch)
 
     result = orchestrator._collect_attraction_tool_results(
         object(),
-        {"web_search_exa"},
+        {"search"},
         {
             "trip_request": {"destination": "Kyoto", "pace": "balanced"},
             "planning_brief": {"destination": "Kyoto", "must_have": ["coffee"]},
@@ -1835,7 +1797,7 @@ def test_helloagents_hotel_tool_results_include_grounding_docs(monkeypatch):
 
     result = orchestrator._collect_hotel_tool_results(
         object(),
-        {"web_search_exa", "crawling_exa"},
+        {"search", "contents"},
         {
             "trip_request": {"destination": "Kyoto", "accommodation_preference": "Quiet boutique hotel"},
             "planning_brief": {"destination": "Kyoto", "accommodation": "Quiet boutique hotel"},
@@ -2046,7 +2008,6 @@ def test_helloagents_transport_tool_results_use_groksearch_web_fetch(monkeypatch
         "https://transport.example.test/local-pass",
     ]
     assert [name for name, _ in calls] == ["web_search", "web_fetch", "web_fetch"]
-
 
 
 def test_helloagents_extract_urls_from_text_payload():

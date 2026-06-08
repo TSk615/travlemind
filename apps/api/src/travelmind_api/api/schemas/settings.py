@@ -4,11 +4,19 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class AgentSettingsUpdateRequest(BaseModel):
+    provider_protocol: str | None = Field(default=None, max_length=64)
     base_url: str | None = Field(default=None, max_length=512)
     api_key: str | None = Field(default=None, max_length=2048)
     model: str | None = Field(default=None, max_length=255)
     wire_api: str | None = Field(default=None, max_length=64)
     agent_provider: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_protocol_alias(cls, value: object) -> object:
+        if isinstance(value, dict) and "protocol" in value and "provider_protocol" not in value:
+            return {**value, "provider_protocol": value["protocol"]}
+        return value
 
 
 class SearchSettingsUpdateRequest(BaseModel):
@@ -40,7 +48,7 @@ class RuntimeSettingsUpdateRequest(BaseModel):
         if "agent" in value or "search" in value:
             return value
 
-        agent_keys = {"base_url", "api_key", "model", "wire_api", "agent_provider"}
+        agent_keys = {"provider_protocol", "base_url", "api_key", "model", "wire_api", "agent_provider"}
         search_keys = {"provider", "transport", "timeout_seconds", "xhs_source_enabled"}
         image_keys = {"image_base_url", "image_api_key", "image_model", "image_provider"}
         agent_payload = {key: value[key] for key in agent_keys if key in value}
@@ -49,6 +57,8 @@ class RuntimeSettingsUpdateRequest(BaseModel):
 
         if "search_base_url" in value:
             search_payload["base_url"] = value["search_base_url"]
+        if "protocol" in value and "provider_protocol" not in agent_payload:
+            agent_payload["provider_protocol"] = value["protocol"]
         if "search_api_key" in value:
             search_payload["api_key"] = value["search_api_key"]
         if "search_provider" in value:
@@ -77,6 +87,7 @@ class RuntimeSettingsUpdateRequest(BaseModel):
 
 
 class AgentSettingsResponse(BaseModel):
+    provider_protocol: str = "openai"
     base_url: str | None = None
     api_key_masked: str | None = None
     has_api_key: bool = False
@@ -87,7 +98,7 @@ class AgentSettingsResponse(BaseModel):
 
 
 class SearchSettingsResponse(BaseModel):
-    provider: str = "exa"
+    provider: str = "groksearch"
     transport: str = "mcp"
     base_url: str | None = None
     api_key_masked: str | None = None

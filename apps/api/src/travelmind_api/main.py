@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +9,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from travelmind_api.api.router import router
-from travelmind_api.api.routes import mcp as mcp_route
 from travelmind_api.api.schemas.common import Envelope, ErrorPayload
 from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import init_db
@@ -18,9 +19,24 @@ from travelmind_api.services.image_storage import IMAGE_FILES_ROUTE
 settings = get_settings()
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    del app
+    configure_application_logging(settings)
+    log_job_event(
+        "api_startup",
+        logger_name="travelmind_api.main",
+        message="TravelMind API startup initialized.",
+        queue_mode=settings.queue_mode,
+        agent_provider=settings.agent_provider,
+    )
+    init_db()
+    yield
+
+
 def create_app() -> FastAPI:
     configure_application_logging(settings)
-    app = FastAPI(title=settings.app_name)
+    app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -31,20 +47,7 @@ def create_app() -> FastAPI:
 
     app.mount("/exports/files", StaticFiles(directory=settings.resolved_export_root), name="exports-files")
     app.mount(IMAGE_FILES_ROUTE, StaticFiles(directory=settings.resolved_image_root), name="image-files")
-    app.include_router(mcp_route.router)
     app.include_router(router, prefix=settings.api_prefix)
-
-    @app.on_event("startup")
-    def on_startup() -> None:
-        configure_application_logging(settings)
-        log_job_event(
-            "api_startup",
-            logger_name="travelmind_api.main",
-            message="TravelMind API startup initialized.",
-            queue_mode=settings.queue_mode,
-            agent_provider=settings.agent_provider,
-        )
-        init_db()
 
     @app.get("/health")
     def health() -> dict[str, str]:

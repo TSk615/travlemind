@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from "vue"
 import type {
   ImageProvider,
   LlmAgentProvider,
+  LlmModelInfo,
+  LlmProviderProtocol,
   LlmSettingsInput,
   LlmWireApi,
   SearchServiceProvider,
@@ -22,10 +24,17 @@ const xhsStatus = ref<XhsAccountStatus | null>(null)
 const xhsBinding = ref<XhsBindingStatus | null>(null)
 const xhsPending = ref(false)
 const xhsError = ref<string | null>(null)
+const agentModelOptions = ref<LlmModelInfo[]>([])
+const agentModelsLoading = ref(false)
+const agentModelsError = ref<string | null>(null)
+const agentTestLoading = ref(false)
+const agentTestMessage = ref<string | null>(null)
+const agentTestError = ref<string | null>(null)
 let xhsPollTimer: number | null = null
 void settingsStore.bootstrap()
 
 const form = reactive<{
+  agent_provider_protocol: LlmProviderProtocol
   agent_base_url: string
   agent_api_key: string
   agent_model: string
@@ -42,12 +51,13 @@ const form = reactive<{
   image_model: string
   image_provider: ImageProvider
 }>({
+  agent_provider_protocol: "openai",
   agent_base_url: "",
   agent_api_key: "",
   agent_model: "",
   agent_wire_api: "responses",
   agent_provider: "standard",
-  search_provider: "exa",
+  search_provider: "groksearch",
   search_transport: "mcp",
   search_base_url: "",
   search_api_key: "",
@@ -73,6 +83,12 @@ const enCopy = {
   saveErrorTitle: "Unable to save settings",
   agentSection: "Agent model",
   agentSectionHint: "Controls the model endpoint used for generation and refinement.",
+  protocolLabel: "Model protocol",
+  protocolOpenAI: "OpenAI",
+  protocolNewApi: "New API",
+  protocolGemini: "Gemini",
+  protocolClaude: "Claude",
+  protocolNeiApi: "NEI API",
   providerLabel: "Planning provider",
   providerStandard: "Standard",
   providerHelloAgents: "HelloAgents (PoC)",
@@ -80,6 +96,17 @@ const enCopy = {
   baseUrlPlaceholder: "https://api.example.com/v1",
   modelLabel: "Model",
   modelPlaceholder: "gpt-5.4",
+  fetchModels: "Fetch models",
+  fetchingModels: "Fetching...",
+  modelFetchSuccess: "Models loaded. Choose one from the model field.",
+  modelFetchEmpty: "The provider returned no selectable models.",
+  modelFetchError: "Unable to fetch models",
+  testConnection: "Test connection",
+  testingConnection: "Testing...",
+  testConnectionSuccessTitle: "Connection test passed",
+  testConnectionSuccess: "Model replied in {latency} ms.",
+  testConnectionError: "Unable to test connection",
+  endpointPreviewLabel: "Endpoint preview",
   wireApiLabel: "API format",
   wireApiResponses: "Responses API",
   wireApiChat: "Chat Completions API",
@@ -92,7 +119,6 @@ const enCopy = {
   searchSectionHint:
     "Controls the search grounding service used by backend search and HelloAgents. You can switch between MCP access and direct API access.",
   searchProviderLabel: "Search provider",
-  searchProviderExa: "Exa",
   searchProviderGrokSearch: "GrokSearch bridge",
   searchProviderTavily: "Tavily",
   searchProviderHint: "GrokSearch currently works through the MCP bridge only. Tavily currently works through the API only.",
@@ -152,7 +178,6 @@ const zhCopy = {
   searchSectionHint:
     "控制后端搜索与 HelloAgents 使用的搜索服务。你可以在 MCP 访问和直接 API 访问之间切换。",
   searchProviderLabel: "搜索提供方",
-  searchProviderExa: "Exa",
   searchProviderGrokSearch: "GrokSearch 桥接",
   searchProviderTavily: "Tavily",
   searchProviderHint: "GrokSearch 目前仅支持通过 MCP 桥接使用；Tavily 目前仅支持 API 传输。",
@@ -238,6 +263,34 @@ const searchStoredKeyText = computed(() => settingsStore.settings?.search.api_ke
 const imageStoredKeyText = computed(() => settingsStore.settings?.image.api_key_masked?.trim() || copy.value.noStoredKey)
 const isGrokSearchProvider = computed(() => form.search_provider === "groksearch")
 const isTavilyProvider = computed(() => form.search_provider === "tavily")
+const agentProtocolDefaultBaseUrls: Record<LlmProviderProtocol, string> = {
+  openai: "https://api.openai.com/v1",
+  newapi: "http://localhost:3000/v1",
+  gemini: "https://generativelanguage.googleapis.com/v1beta",
+  claude: "https://api.anthropic.com/v1",
+  neiapi: "https://api.neiapi.com/v1"
+}
+const agentBaseUrlPlaceholder = computed(() => agentProtocolDefaultBaseUrls[form.agent_provider_protocol])
+const openAiWireApiLocked = computed(() => form.agent_provider_protocol === "openai")
+const agentEndpointPreview = computed(() => {
+  const base = (form.agent_base_url.trim() || agentBaseUrlPlaceholder.value).replace(/\/+$/, "")
+  if (form.agent_provider_protocol === "claude") {
+    return base.endsWith("/messages") ? base : `${base}/messages`
+  }
+  if (form.agent_provider_protocol === "gemini") {
+    const model = form.agent_model.trim() || "{model}"
+    const normalized = base.endsWith("/models") ? base : `${base}/models`
+    return `${normalized}/${model.startsWith("models/") ? model.slice("models/".length) : model}:generateContent`
+  }
+  if (form.agent_wire_api === "responses") {
+    return base.endsWith("/responses") ? base : `${base}/responses`
+  }
+  return base.endsWith("/chat/completions") ? base : `${base}/chat/completions`
+})
+
+function defaultWireApiForProtocol(protocol: LlmProviderProtocol): LlmWireApi {
+  return protocol === "newapi" || protocol === "neiapi" ? "chat_completions" : "responses"
+}
 const searchBaseUrlPlaceholder = computed(() =>
   isGrokSearchProvider.value || form.search_transport === "mcp"
     ? copy.value.searchBaseUrlMcpPlaceholder
@@ -282,9 +335,13 @@ watch(
     form.agent_base_url = settings?.agent.base_url ?? ""
     form.agent_model = settings?.agent.model ?? ""
     form.agent_api_key = ""
-    form.agent_wire_api = settings?.agent.wire_api ?? "responses"
+    form.agent_provider_protocol = settings?.agent.provider_protocol ?? "openai"
+    form.agent_wire_api = settings?.agent.wire_api ?? defaultWireApiForProtocol(form.agent_provider_protocol)
+    if (form.agent_provider_protocol === "openai") {
+      form.agent_wire_api = "responses"
+    }
     form.agent_provider = settings?.agent.agent_provider ?? "standard"
-    form.search_provider = settings?.search.provider ?? "exa"
+    form.search_provider = settings?.search.provider ?? "groksearch"
     form.search_transport =
       settings?.search.provider === "groksearch"
         ? "mcp"
@@ -299,8 +356,30 @@ watch(
     form.image_api_key = ""
     form.image_model = settings?.image.model ?? ""
     form.image_provider = settings?.image.provider ?? "openai_compatible"
+    agentModelOptions.value = []
+    agentModelsError.value = null
+    agentTestMessage.value = null
+    agentTestError.value = null
   },
   { immediate: true }
+)
+
+watch(
+  () => form.agent_provider_protocol,
+  (provider, previousProvider) => {
+    const previousDefault = previousProvider ? agentProtocolDefaultBaseUrls[previousProvider] : ""
+    if (!form.agent_base_url.trim() || form.agent_base_url.trim() === previousDefault) {
+      form.agent_base_url = agentProtocolDefaultBaseUrls[provider]
+    }
+    const previousWireDefault = previousProvider ? defaultWireApiForProtocol(previousProvider) : null
+    if (provider === "openai" || !form.agent_wire_api || form.agent_wire_api === previousWireDefault) {
+      form.agent_wire_api = defaultWireApiForProtocol(provider)
+    }
+    agentModelOptions.value = []
+    agentModelsError.value = null
+    agentTestMessage.value = null
+    agentTestError.value = null
+  }
 )
 
 watch(
@@ -410,11 +489,58 @@ async function refresh() {
   await refreshXhsStatus()
 }
 
+async function fetchAgentModels() {
+  agentModelsLoading.value = true
+  agentModelsError.value = null
+  agentTestMessage.value = null
+  agentTestError.value = null
+  saveSuccess.value = null
+  try {
+    const result = await api.listLlmModels({
+      provider_protocol: form.agent_provider_protocol,
+      base_url: form.agent_base_url.trim() || undefined,
+      api_key: form.agent_api_key.trim() || undefined
+    })
+    form.agent_base_url = result.base_url || form.agent_base_url
+    agentModelOptions.value = result.models
+    if (result.models.length > 0 && !form.agent_model.trim()) {
+      form.agent_model = result.models[0].id
+    }
+    saveSuccess.value = result.models.length > 0 ? copy.value.modelFetchSuccess : copy.value.modelFetchEmpty
+  } catch (error) {
+    agentModelsError.value = getErrorMessage(error, copy.value.modelFetchError)
+  } finally {
+    agentModelsLoading.value = false
+  }
+}
+
+async function testAgentConnection() {
+  agentTestLoading.value = true
+  agentTestMessage.value = null
+  agentTestError.value = null
+  saveSuccess.value = null
+  try {
+    const result = await api.testLlmConnection({
+      provider_protocol: form.agent_provider_protocol,
+      base_url: form.agent_base_url.trim() || undefined,
+      api_key: form.agent_api_key.trim() || undefined,
+      model: form.agent_model.trim() || undefined,
+      wire_api: form.agent_wire_api
+    })
+    agentTestMessage.value = copy.value.testConnectionSuccess.replace("{latency}", String(result.latency_ms))
+  } catch (error) {
+    agentTestError.value = getErrorMessage(error, copy.value.testConnectionError)
+  } finally {
+    agentTestLoading.value = false
+  }
+}
+
 async function save() {
   saveSuccess.value = null
 
   const payload: LlmSettingsInput = {
     agent: {
+      provider_protocol: form.agent_provider_protocol,
       base_url: form.agent_base_url.trim(),
       model: form.agent_model.trim(),
       wire_api: form.agent_wire_api,
@@ -463,6 +589,8 @@ async function save() {
     form.agent_api_key = ""
     form.search_api_key = ""
     form.image_api_key = ""
+    agentTestMessage.value = null
+    agentTestError.value = null
     saveSuccess.value = copy.value.saveSuccessMessage
   } catch {
     // The store already exposes a user-facing save error state.
@@ -522,7 +650,18 @@ void refreshXhsStatus()
           <p class="muted">{{ copy.agentSectionHint }}</p>
         </div>
 
-        <div class="field field--full">
+        <div class="field">
+          <label for="agent-provider-protocol">{{ copy.protocolLabel }}</label>
+          <select id="agent-provider-protocol" v-model="form.agent_provider_protocol">
+            <option value="openai">{{ copy.protocolOpenAI }}</option>
+            <option value="newapi">{{ copy.protocolNewApi }}</option>
+            <option value="gemini">{{ copy.protocolGemini }}</option>
+            <option value="claude">{{ copy.protocolClaude }}</option>
+            <option value="neiapi">{{ copy.protocolNeiApi }}</option>
+          </select>
+        </div>
+
+        <div class="field">
           <label for="agent-provider">{{ copy.providerLabel }}</label>
           <select id="agent-provider" v-model="form.agent_provider">
             <option value="standard">{{ copy.providerStandard }}</option>
@@ -532,17 +671,67 @@ void refreshXhsStatus()
 
         <div class="field field--full">
           <label for="agent-base-url">{{ copy.baseUrlLabel }}</label>
-          <input id="agent-base-url" v-model="form.agent_base_url" :placeholder="copy.baseUrlPlaceholder" />
+          <input id="agent-base-url" v-model="form.agent_base_url" :placeholder="agentBaseUrlPlaceholder" />
+          <p class="muted"><strong>{{ copy.endpointPreviewLabel }}:</strong> {{ agentEndpointPreview }}</p>
         </div>
+
+        <StatePanel
+          v-if="agentModelsError"
+          class="field field--full"
+          kind="error"
+          :title="copy.modelFetchError"
+          :message="agentModelsError"
+          compact
+        />
+        <StatePanel
+          v-if="agentTestMessage"
+          class="field field--full"
+          kind="info"
+          :title="copy.testConnectionSuccessTitle"
+          :message="agentTestMessage"
+          compact
+        />
+        <StatePanel
+          v-if="agentTestError"
+          class="field field--full"
+          kind="error"
+          :title="copy.testConnectionError"
+          :message="agentTestError"
+          compact
+        />
 
         <div class="field">
           <label for="agent-model">{{ copy.modelLabel }}</label>
-          <input id="agent-model" v-model="form.agent_model" :placeholder="copy.modelPlaceholder" />
+          <input
+            id="agent-model"
+            v-model="form.agent_model"
+            list="agent-model-options"
+            :placeholder="copy.modelPlaceholder"
+          />
+          <datalist id="agent-model-options">
+            <option v-for="model in agentModelOptions" :key="model.id" :value="model.id">
+              {{ model.name || model.id }}
+            </option>
+          </datalist>
+        </div>
+
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" :disabled="agentModelsLoading || settingsStore.pending" @click="fetchAgentModels">
+            {{ agentModelsLoading ? copy.fetchingModels : copy.fetchModels }}
+          </button>
+        </div>
+
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" :disabled="agentTestLoading || settingsStore.pending" @click="testAgentConnection">
+            {{ agentTestLoading ? copy.testingConnection : copy.testConnection }}
+          </button>
         </div>
 
         <div class="field">
           <label for="agent-wire-api">{{ copy.wireApiLabel }}</label>
-          <select id="agent-wire-api" v-model="form.agent_wire_api">
+          <select id="agent-wire-api" v-model="form.agent_wire_api" :disabled="openAiWireApiLocked">
             <option value="responses">{{ copy.wireApiResponses }}</option>
             <option value="chat_completions">{{ copy.wireApiChat }}</option>
           </select>
@@ -566,7 +755,6 @@ void refreshXhsStatus()
         <div class="field">
           <label for="search-provider">{{ copy.searchProviderLabel }}</label>
           <select id="search-provider" v-model="form.search_provider">
-            <option value="exa">{{ copy.searchProviderExa }}</option>
             <option value="groksearch">{{ copy.searchProviderGrokSearch }}</option>
             <option value="tavily">{{ copy.searchProviderTavily }}</option>
           </select>
