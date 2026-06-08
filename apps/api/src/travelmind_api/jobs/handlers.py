@@ -12,6 +12,7 @@ from travelmind_api.agents.provider import normalize_agent_provider
 from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import session_scope
 from travelmind_api.core.logging_utils import job_log_path, log_job_event, reset_current_job_id, set_current_job_id
+from travelmind_api.core.upstream_urls import normalize_upstream_base_url
 from travelmind_api.db.models import ImageGeneration, JobRecord, Trip, User
 from travelmind_api.services.image_prompt_service import ImagePromptComposePayload, compose_image_prompt
 from travelmind_api.services.image_storage import persist_bytes
@@ -183,12 +184,13 @@ def _resolve_llm_config(user: User | None, payload: dict) -> LlmConfig | None:
     if isinstance(payload_value, dict):
         payload_config = LlmConfig.from_mapping(payload_value)
         if payload_config is not None:
-            return payload_config
+            normalized_base_url = normalize_upstream_base_url(payload_config.base_url, settings)
+            return payload_config.model_copy(update={"base_url": normalized_base_url}) if normalized_base_url else None
 
     if user is None:
         return None
 
-    return LlmConfig.from_mapping(
+    config = LlmConfig.from_mapping(
         {
             "base_url": user.llm_base_url,
             "api_key": user.llm_api_key,
@@ -197,6 +199,10 @@ def _resolve_llm_config(user: User | None, payload: dict) -> LlmConfig | None:
             "provider_protocol": getattr(user, "llm_provider_protocol", None),
         }
     )
+    if config is None:
+        return None
+    normalized_base_url = normalize_upstream_base_url(config.base_url, settings)
+    return config.model_copy(update={"base_url": normalized_base_url}) if normalized_base_url else None
 
 
 
@@ -290,7 +296,7 @@ def _image_enrichment_targets(plan: PlanningResult | None) -> list[dict[str, obj
 def _resolve_image_config(user: User | None) -> ImageModelConfig | None:
     if user is None:
         return None
-    return ImageModelConfig.from_mapping(
+    config = ImageModelConfig.from_mapping(
         {
             "base_url": getattr(user, "image_base_url", None),
             "api_key": getattr(user, "image_api_key", None),
@@ -298,6 +304,10 @@ def _resolve_image_config(user: User | None) -> ImageModelConfig | None:
             "provider": getattr(user, "image_provider", None),
         }
     )
+    if config is None:
+        return None
+    normalized_base_url = normalize_upstream_base_url(config.base_url, settings)
+    return config.model_copy(update={"base_url": normalized_base_url}) if normalized_base_url else None
 
 
 def _read_local_asset_bytes(path_value: str) -> bytes:

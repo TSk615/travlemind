@@ -13,8 +13,10 @@ from pydantic import BaseModel, Field
 
 from travelmind_api.api.schemas.common import success_response
 from travelmind_api.api.schemas.llm import LlmConnectionTestRequest, LlmConnectionTestResponse, LlmModelsRequest, LlmProxyRequest
-from travelmind_api.core.env import get_env
+from travelmind_api.core.config import get_settings
 from travelmind_api.core.deps import get_current_user
+from travelmind_api.core.env import get_env
+from travelmind_api.core.upstream_urls import UpstreamUrlError, normalize_upstream_base_url
 from travelmind_api.db.models import User
 from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
 from travelmind_api.services.llm.config import default_base_url_for_protocol, normalize_provider_protocol, normalize_wire_api
@@ -68,6 +70,22 @@ _OG_IMAGE_PATTERN = re.compile(r"(?:og:image|twitter:image)[^\"'>]*[\"'](https?:
 _TAVILY_IMAGE_RESPONSE_LIMIT = 24
 
 
+def _validate_upstream_base_url(base_url: str) -> str:
+    try:
+        normalized = normalize_upstream_base_url(base_url, get_settings())
+    except UpstreamUrlError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_upstream_base_url", "message": str(exc)},
+        ) from exc
+    if normalized is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_upstream_base_url", "message": "base_url must be a valid http or https URL"},
+        )
+    return normalized
+
+
 def _build_endpoint(base_url: str, wire_api: str) -> str:
     base = base_url.strip().rstrip("/")
     mode = normalize_wire_api(wire_api, default="responses")
@@ -100,7 +118,7 @@ def _resolve_proxy_config(payload: LlmProxyRequest, user: User) -> LlmConfig:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "llm_proxy_not_configured", "message": "Configure base_url, api_key, model, and API format before using the relay."},
         )
-    return config
+    return config.model_copy(update={"base_url": _validate_upstream_base_url(config.base_url)})
 
 
 def _resolve_connection_test_config(payload: LlmConnectionTestRequest, user: User) -> LlmConfig:
@@ -120,7 +138,7 @@ def _resolve_connection_test_config(payload: LlmConnectionTestRequest, user: Use
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "llm_test_not_configured", "message": "Configure base_url, api_key, model, and API format before testing the model connection."},
         )
-    return config
+    return config.model_copy(update={"base_url": _validate_upstream_base_url(config.base_url)})
 
 
 def _extract_proxy_messages(upstream_payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -234,7 +252,7 @@ def _resolve_search_proxy_config(payload: SearchProxyRequest, user: User) -> Sea
                 "message": "Configure provider, base_url, api_key, and transport before testing the search service.",
             },
         )
-    return config
+    return config.model_copy(update={"base_url": _validate_upstream_base_url(config.base_url)})
 
 
 def _pick_search_operation(config: SearchServiceConfig, available_tools: set[str], query: str) -> tuple[str, dict[str, Any]]:
@@ -422,7 +440,7 @@ def _build_streaming_proxy_response(client: httpx.Client, upstream: httpx.Respon
 
 
 def _resolve_tavily_endpoint(payload: TavilyImagesProxyRequest) -> str:
-    base = str(payload.base_url or "https://api.tavily.com/search").strip().rstrip("/")
+    base = _validate_upstream_base_url(str(payload.base_url or "https://api.tavily.com/search").strip().rstrip("/"))
     if base.endswith("/search"):
         return base
     return f"{base}/search"
@@ -526,7 +544,9 @@ def list_llm_models(payload: LlmModelsRequest, current_user: User = Depends(get_
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "llm_models_api_key_required", "message": "Provide or save an API key before fetching models."},
         )
-    base_url = str(payload.base_url or getattr(current_user, "llm_base_url", None) or default_base_url_for_protocol(provider_protocol)).strip().rstrip("/")
+    base_url = _validate_upstream_base_url(
+        str(payload.base_url or getattr(current_user, "llm_base_url", None) or default_base_url_for_protocol(provider_protocol)).strip().rstrip("/")
+    )
     timeout_seconds = float(payload.timeout_seconds or 30.0)
     try:
         result = fetch_llm_models(

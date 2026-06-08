@@ -125,13 +125,25 @@ def normalize_export_formats(formats: list[str] | tuple[str, ...] | None) -> lis
 
 
 def _build_file_url(settings: Settings, filename: str) -> str:
-    return urljoin(f"{settings.public_api_url.rstrip('/')}/", f"{EXPORT_FILES_ROUTE}/{quote(filename)}")
+    return urljoin(f"{settings.public_api_url.rstrip('/')}/", f"{settings.api_prefix.strip('/')}/{EXPORT_FILES_ROUTE.strip('/')}/{quote(filename)}")
 
 
 def _resolve_export_path(settings: Settings, filename: str) -> Path:
     export_root = settings.resolved_export_root.resolve()
     export_root.mkdir(parents=True, exist_ok=True)
-    return (export_root / filename).resolve()
+    path = (export_root / filename).resolve()
+    try:
+        path.relative_to(export_root)
+    except ValueError as exc:
+        raise ValueError("Export path escapes export root") from exc
+    return path
+
+
+def resolve_export_file_path(settings: Settings, filename: str) -> Path:
+    normalized = str(filename or "").strip()
+    if not normalized or ":" in normalized or "/" in normalized or "\\" in normalized or Path(normalized).name != normalized:
+        raise ValueError("Invalid export filename")
+    return _resolve_export_path(settings, normalized)
 
 
 def _build_export_labels(zh_output: bool) -> dict[str, str]:

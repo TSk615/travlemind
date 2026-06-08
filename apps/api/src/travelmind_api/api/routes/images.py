@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.common import success_response
@@ -16,7 +18,8 @@ from travelmind_api.api.schemas.images import (
 from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import get_db
 from travelmind_api.core.deps import get_current_user
-from travelmind_api.db.models import User
+from travelmind_api.core.upstream_urls import UpstreamUrlError, normalize_upstream_base_url
+from travelmind_api.db.models import ImageGeneration, User
 from travelmind_api.services.image_generation import (
     create_image_generation,
     create_image_remix,
@@ -28,11 +31,45 @@ from travelmind_api.services.image_generation import (
     update_image_generation,
 )
 from travelmind_api.services.image_prompt_service import ImagePromptComposePayload, compose_image_prompt
-from travelmind_api.services.image_storage import persist_upload_file
+from travelmind_api.services.image_storage import (
+    image_asset_owner_user_id,
+    normalize_image_asset_path,
+    persist_upload_file,
+    resolve_image_asset_path,
+)
 from travelmind_api.services.job_service import create_job, dispatch_job, serialize_job
 from travelmind_api.services.llm import LlmConfig
 
 router = APIRouter(prefix="/images", tags=["images"])
+
+
+def _image_file_not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "image_file_not_found", "message": "Image file not found"})
+
+
+def _asset_list_contains_path(assets: list[dict[str, Any]] | None, normalized_path: str) -> bool:
+    for asset in assets or []:
+        if not isinstance(asset, dict):
+            continue
+        raw_path = str(asset.get("path") or "").strip()
+        if not raw_path:
+            continue
+        try:
+            if normalize_image_asset_path(raw_path) == normalized_path:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _public_result_asset_exists(db: Session, normalized_path: str, owner_user_id: str | None) -> bool:
+    query = db.query(ImageGeneration).filter(ImageGeneration.visibility == "public", ImageGeneration.status == "completed")
+    if owner_user_id:
+        query = query.filter(ImageGeneration.user_id == owner_user_id)
+    for record in query.all():
+        if _asset_list_contains_path(record.result_images_json or [], normalized_path):
+            return True
+    return False
 
 
 def _parse_json_list(value: str | None) -> list[Any]:
@@ -46,7 +83,7 @@ def _parse_json_list(value: str | None) -> list[Any]:
 
 
 def _resolve_text_llm_config(user: User) -> LlmConfig | None:
-    return LlmConfig.from_mapping(
+    config = LlmConfig.from_mapping(
         {
             "base_url": user.llm_base_url,
             "api_key": user.llm_api_key,
@@ -55,6 +92,16 @@ def _resolve_text_llm_config(user: User) -> LlmConfig | None:
             "provider_protocol": getattr(user, "llm_provider_protocol", None),
         }
     )
+    if config is None:
+        return None
+    try:
+        normalized_base_url = normalize_upstream_base_url(config.base_url, get_settings())
+    except UpstreamUrlError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_upstream_base_url", "message": str(exc)},
+        ) from exc
+    return config.model_copy(update={"base_url": normalized_base_url}) if normalized_base_url else None
 
 
 @router.post("/prompts/compose")
@@ -189,6 +236,28 @@ def get_prompt_trends(
     del destination
     del limit
     return success_response([], meta={"implemented": False, "source": "reserved", "platform": platform})
+
+
+@router.get("/files/{asset_path:path}")
+def get_image_file(
+    asset_path: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        normalized_path = normalize_image_asset_path(asset_path)
+        path = resolve_image_asset_path(settings, normalized_path)
+    except ValueError as exc:
+        raise _image_file_not_found() from exc
+
+    owner_user_id = image_asset_owner_user_id(normalized_path)
+    allowed = owner_user_id == current_user.id or _public_result_asset_exists(db, normalized_path, owner_user_id)
+    if not allowed or not path.is_file():
+        raise _image_file_not_found()
+
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @router.get("/{generation_id}")

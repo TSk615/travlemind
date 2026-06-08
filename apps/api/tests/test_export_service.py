@@ -250,7 +250,7 @@ def test_write_pdf_export_generates_multi_page_pdf_with_cjk_font():
 
         pdf_path = Path(result["file_path"])
         assert pdf_path.exists()
-        assert result["file_url"].endswith("/exports/files/job_pdf_test.pdf")
+        assert result["file_url"].endswith("/api/v1/exports/files/job_pdf_test.pdf")
 
         payload = pdf_path.read_bytes()
         assert payload.startswith(b"%PDF-")

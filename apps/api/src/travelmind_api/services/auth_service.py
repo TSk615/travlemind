@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-from urllib.parse import urlparse
 
 from fastapi import HTTPException, Response, status
 from sqlalchemy import select
@@ -16,7 +15,7 @@ from travelmind_api.api.schemas.settings import (
     RuntimeSettingsUpdateRequest,
     SearchSettingsResponse,
 )
-from travelmind_api.core.config import Settings
+from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.security import (
     create_access_token,
     generate_identifier,
@@ -25,6 +24,7 @@ from travelmind_api.core.security import (
     hash_refresh_token,
     verify_password,
 )
+from travelmind_api.core.upstream_urls import UpstreamUrlError, normalize_upstream_base_url
 from travelmind_api.db.models import RefreshSession, User
 from travelmind_api.services.images.provider import IMAGE_PROVIDER_OPENAI_COMPATIBLE, is_supported_image_provider, normalize_image_provider
 from travelmind_api.services.llm.config import is_supported_provider_protocol, normalize_provider_protocol, normalize_wire_api
@@ -67,14 +67,13 @@ def _normalize_base_url(base_url: str | None) -> str | None:
     normalized = _normalize_optional_text(base_url)
     if normalized is None:
         return None
-    normalized = normalized.rstrip("/")
-    parsed = urlparse(normalized)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    try:
+        return normalize_upstream_base_url(normalized, get_settings())
+    except UpstreamUrlError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "invalid_llm_base_url", "message": "base_url must be a valid http or https URL"},
-        )
-    return normalized
+            detail={"code": "invalid_upstream_base_url", "message": str(exc)},
+        ) from exc
 
 
 

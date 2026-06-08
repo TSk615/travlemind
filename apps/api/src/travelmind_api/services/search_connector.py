@@ -9,7 +9,9 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
+from travelmind_api.core.config import get_settings
 from travelmind_api.core.env import get_env
+from travelmind_api.core.upstream_urls import normalize_upstream_base_url
 from travelmind_api.services.mcp import McpClientConfig, McpHttpClient
 
 SearchServiceProvider = Literal["groksearch", "tavily"]
@@ -220,7 +222,13 @@ def search_service_config_from_user(user: object | None) -> SearchServiceConfig 
 
 
 def resolve_search_service_config(user: object | None) -> SearchServiceConfig | None:
-    return search_service_config_from_user(user) or SearchServiceConfig.from_env()
+    config = search_service_config_from_user(user) or SearchServiceConfig.from_env()
+    if config is None:
+        return None
+    normalized_base_url = normalize_upstream_base_url(config.base_url, get_settings())
+    if normalized_base_url is None:
+        return None
+    return config.model_copy(update={"base_url": normalized_base_url})
 
 
 class SearchServiceGatewayError(RuntimeError):

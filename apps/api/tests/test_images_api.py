@@ -1,5 +1,6 @@
 import json
 import time
+from urllib.parse import urlparse
 
 from fastapi.testclient import TestClient
 
@@ -125,6 +126,14 @@ def test_image_generate_and_remix_flow(client: TestClient, monkeypatch):
     assert detail["status"] == "completed"
     assert detail["visibility"] == "public"
     assert len(detail["result_images"]) == 1
+    image_path = urlparse(detail["result_images"][0]["url"]).path
+    assert image_path.startswith("/api/v1/images/files/")
+    image_response = client.get(image_path)
+    assert image_response.status_code == 200, image_response.text
+    assert image_response.headers["content-type"].startswith("image/png")
+    assert image_response.content == b"fake-image-bytes"
+    legacy_image_path = image_path.removeprefix("/api/v1")
+    assert client.get(legacy_image_path).status_code == 200
 
     remix_response = client.post(f"/api/v1/images/{detail['id']}/remix")
     assert remix_response.status_code == 200, remix_response.text
@@ -138,6 +147,47 @@ def test_image_generate_and_remix_flow(client: TestClient, monkeypatch):
     assert len(feed) == 1
     assert feed[0]["id"] == detail["id"]
     assert feed[0]["remix_count"] == 1
+
+
+def test_private_generated_image_file_is_owner_only(client: TestClient, monkeypatch):
+    import travelmind_api.jobs.handlers as job_handlers
+
+    monkeypatch.setattr(job_handlers, "build_image_provider", lambda config: _StubImageProvider())
+
+    _register(client, email="private-image-owner@example.com")
+    _save_image_settings(client)
+
+    response = client.post(
+        "/api/v1/images/generate",
+        data={
+            "title": "Private cover",
+            "destination": "Kyoto",
+            "scene_prompt": "quiet path",
+            "mode": "text_to_image",
+            "visibility": "private",
+            "prompt": "quiet path",
+            "optimized_prompt": "",
+            "negative_prompt": "",
+            "style_tags_json": "[]",
+            "reference_urls_json": "[]",
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    job = _wait_for_terminal_job(client, payload["job"]["job_id"])
+    assert job["status"] == "completed", job
+
+    detail_response = client.get(f"/api/v1/images/{payload['generation']['id']}")
+    assert detail_response.status_code == 200, detail_response.text
+    image_path = urlparse(detail_response.json()["data"]["result_images"][0]["url"]).path
+    assert client.get(image_path).status_code == 200
+    legacy_image_path = image_path.removeprefix("/api/v1")
+    assert client.get(legacy_image_path).status_code == 200
+
+    _register(client, email="private-image-other@example.com")
+    other_response = client.get(image_path)
+    assert other_response.status_code == 404
+    assert client.get(legacy_image_path).status_code == 404
 
 
 def test_image_to_image_requires_source_upload(client: TestClient):

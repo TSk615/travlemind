@@ -6,6 +6,8 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+from travelmind_api.core.config import get_settings
+from travelmind_api.core.upstream_urls import UpstreamUrlError, normalize_upstream_base_url
 from travelmind_api.db.models import User
 from travelmind_api.prompts.trip_intake import build_trip_intake_initial_prompt, build_trip_intake_system_prompt
 from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
@@ -185,7 +187,14 @@ def _resolve_llm_config(user: User) -> LlmConfig:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "trip_intake_llm_not_configured", "message": "Configure base_url, api_key, model, and API format before using guided chat intake."},
         )
-    return config
+    try:
+        normalized_base_url = normalize_upstream_base_url(config.base_url, get_settings())
+    except UpstreamUrlError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_upstream_base_url", "message": str(exc)},
+        ) from exc
+    return config.model_copy(update={"base_url": normalized_base_url}) if normalized_base_url else config
 
 
 

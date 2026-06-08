@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.common import success_response
 from travelmind_api.api.schemas.search import SearchRequest
 from travelmind_api.core.database import get_db
 from travelmind_api.core.deps import get_current_user
+from travelmind_api.core.upstream_urls import UpstreamUrlError
 from travelmind_api.db.models import User
 from travelmind_api.services.search_connector import resolve_search_service_config
 from travelmind_api.services.search_service import search_documents
@@ -17,6 +18,14 @@ router = APIRouter(prefix="/search", tags=["search"])
 
 @router.post("")
 def search_endpoint(payload: SearchRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        search_service_config = resolve_search_service_config(current_user)
+    except UpstreamUrlError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "invalid_upstream_base_url", "message": str(exc)},
+        ) from exc
+
     documents = [
         doc.model_dump(mode="json")
         for doc in search_documents(
@@ -24,7 +33,7 @@ def search_endpoint(payload: SearchRequest, current_user: User = Depends(get_cur
             payload.destination,
             payload.manual_links,
             interests=payload.interests,
-            search_service_config=resolve_search_service_config(current_user),
+            search_service_config=search_service_config,
             xhs_source_enabled=bool(getattr(current_user, "xhs_source_enabled", False)),
             xhs_user_id=current_user.id,
         )

@@ -188,6 +188,26 @@ def test_llm_proxy_requires_saved_or_explicit_configuration(client):
     assert payload["error"]["code"] == "llm_proxy_not_configured"
 
 
+def test_llm_proxy_rejects_restricted_upstream_base_url(client):
+    _register(client)
+
+    response = client.post(
+        "/api/v1/llm/proxy",
+        json={
+            "base_url": "http://10.0.0.5/v1",
+            "api_key": "test-key",
+            "wire_api": "responses",
+            "payload": {
+                "model": "gpt-test",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_upstream_base_url"
+
+
 
 def test_llm_proxy_preserves_partial_upstream_body_when_stream_breaks(client, monkeypatch):
     _register(client)

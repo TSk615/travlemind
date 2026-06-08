@@ -6,14 +6,18 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from travelmind_api.api.router import router
+from travelmind_api.api.routes.exports import get_export_file
 from travelmind_api.api.schemas.common import Envelope, ErrorPayload
 from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import init_db
 from travelmind_api.core.logging_utils import configure_application_logging, log_job_event
-from travelmind_api.services.image_storage import IMAGE_FILES_ROUTE
+
+try:
+    from travelmind_api.api.routes.images import get_image_file
+except RuntimeError:  # Optional multipart/image dependencies are not always installed in MVP environments.
+    get_image_file = None
 
 
 settings = get_settings()
@@ -45,8 +49,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.mount("/exports/files", StaticFiles(directory=settings.resolved_export_root), name="exports-files")
-    app.mount(IMAGE_FILES_ROUTE, StaticFiles(directory=settings.resolved_image_root), name="image-files")
+    app.add_api_route("/exports/files/{filename}", get_export_file, methods=["GET"], tags=["exports"])
+    if get_image_file is not None:
+        app.add_api_route("/images/files/{asset_path:path}", get_image_file, methods=["GET"], tags=["images"])
     app.include_router(router, prefix=settings.api_prefix)
 
     @app.get("/health")

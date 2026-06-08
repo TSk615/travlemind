@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urljoin
 
 from fastapi import UploadFile
@@ -24,7 +24,35 @@ def _guess_extension(filename: str | None, mime_type: str | None) -> str:
 
 def _build_file_url(settings: Settings, relative_path: str) -> str:
     normalized = relative_path.replace("\\", "/")
-    return urljoin(f"{settings.public_api_url.rstrip('/')}/", f"{IMAGE_FILES_ROUTE}/{quote(normalized)}")
+    return urljoin(f"{settings.public_api_url.rstrip('/')}/", f"{settings.api_prefix.strip('/')}/{IMAGE_FILES_ROUTE.strip('/')}/{quote(normalized, safe='/')}")
+
+
+def normalize_image_asset_path(relative_path: str) -> str:
+    normalized = str(relative_path or "").replace("\\", "/").strip("/")
+    parts = PurePosixPath(normalized).parts
+    if not parts or any(part in {"", ".", ".."} or ":" in part for part in parts):
+        raise ValueError("Invalid image asset path")
+    return PurePosixPath(*parts).as_posix()
+
+
+def resolve_image_asset_path(settings: Settings, relative_path: str) -> Path:
+    normalized = normalize_image_asset_path(relative_path)
+    root = settings.resolved_image_root.resolve()
+    candidate = root.joinpath(*PurePosixPath(normalized).parts).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Invalid image asset path") from exc
+    return candidate
+
+
+def image_asset_owner_user_id(relative_path: str) -> str | None:
+    try:
+        normalized = normalize_image_asset_path(relative_path)
+    except ValueError:
+        return None
+    parts = PurePosixPath(normalized).parts
+    return parts[1] if len(parts) >= 3 else None
 
 
 def persist_bytes(

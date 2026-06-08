@@ -224,7 +224,7 @@ def test_trip_generation_and_export_flow(client: TestClient):
     assert export_job["result"]["primary_artifact"] == "pdf"
     assert [artifact["type"] for artifact in export_job["result"]["artifacts"]] == ["md", "pdf", "json"]
     assert Path(export_job["result"]["file_path"]).exists()
-    assert export_job["result"]["file_url"].endswith(f"/exports/files/{export_job['result']['file_name']}")
+    assert export_job["result"]["file_url"].endswith(f"/api/v1/exports/files/{export_job['result']['file_name']}")
 
     artifact_map = {artifact["type"]: artifact for artifact in export_job["result"]["artifacts"]}
 
@@ -233,6 +233,8 @@ def test_trip_generation_and_export_flow(client: TestClient):
     assert pdf_response.headers["content-type"].startswith("application/pdf")
     assert pdf_response.content.startswith(b"%PDF-")
     assert len(PdfReader(BytesIO(pdf_response.content)).pages) >= 2
+    legacy_pdf_path = f"/exports/files/{artifact_map['pdf']['file_name']}"
+    assert client.get(legacy_pdf_path).status_code == 200
 
     markdown_response = client.get(urlparse(artifact_map["md"]["file_url"]).path)
     assert markdown_response.status_code == 200
@@ -243,6 +245,11 @@ def test_trip_generation_and_export_flow(client: TestClient):
     assert json_response.status_code == 200
     assert json_response.headers["content-type"].startswith("application/json")
     assert json_response.json()["job_id"] == export_job["job_id"]
+
+    client.post("/api/v1/auth/logout")
+    anonymous_pdf_response = client.get(urlparse(artifact_map["pdf"]["file_url"]).path)
+    assert anonymous_pdf_response.status_code == 401
+    assert client.get(legacy_pdf_path).status_code == 401
 
 
 

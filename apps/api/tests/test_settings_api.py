@@ -253,6 +253,37 @@ def test_search_settings_accept_groksearch_mcp_and_reject_api_transport(client: 
     assert invalid_response.json()["error"]["code"] == "invalid_search_transport"
 
 
+def test_runtime_settings_reject_restricted_upstream_base_urls(client: TestClient):
+    _register(client)
+
+    localhost_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "agent": {
+                "provider_protocol": "newapi",
+                "base_url": "http://localhost:3000/v1",
+                "api_key": "local-key",
+                "model": "local-model",
+            }
+        },
+    )
+    assert localhost_response.status_code == 200, localhost_response.text
+
+    private_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "search": {
+                "provider": "tavily",
+                "transport": "api",
+                "base_url": "http://169.254.169.254/latest",
+                "api_key": "tvly-test-key",
+            }
+        },
+    )
+    assert private_response.status_code == 422, private_response.text
+    assert private_response.json()["error"]["code"] == "invalid_upstream_base_url"
+
+
 def test_search_settings_accept_tavily_api_and_reject_mcp_transport(client: TestClient):
     _register(client)
 
