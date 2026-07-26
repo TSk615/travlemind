@@ -1,31 +1,25 @@
 ﻿from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
 from arq.connections import RedisSettings, create_pool
 from fastapi import BackgroundTasks
-from sqlalchemy import inspect, text
+from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.jobs import JobResponse
-from travelmind_api.core.config import Settings
+from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import session_scope
 from travelmind_api.core.security import generate_identifier
 from travelmind_api.db.models import JobRecord
 
 
-TERMINAL_JOB_STATUSES = {"completed", "failed"}
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 UNSET = object()
-_JOB_SCHEMA_CACHE: set[str] = set()
-_JOB_SCHEMA_COLUMNS = {
-    "stage": "VARCHAR(64)",
-    "stage_message": "TEXT",
-    "progress_percent": "INTEGER",
-    "timeline_json": "JSON",
-}
 
 
 def _utcnow() -> datetime:
@@ -36,12 +30,6 @@ def _normalize_progress(progress_percent: int | float | None) -> int | None:
     if progress_percent is None:
         return None
     return max(0, min(100, int(round(progress_percent))))
-
-
-def _cache_key(session: Session) -> str:
-    bind = session.get_bind()
-    url = getattr(bind, "url", None)
-    return str(url) if url is not None else repr(bind)
 
 
 def _build_timeline_entry(job: JobRecord, recorded_at: datetime) -> dict[str, Any]:
@@ -60,50 +48,76 @@ def _append_timeline_entry(job: JobRecord, recorded_at: datetime) -> None:
     job.timeline_json = timeline
 
 
+def extract_resume_checkpoint(job: JobRecord) -> dict[str, Any] | None:
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    checkpoint = payload.get("resume_checkpoint")
+    return checkpoint if isinstance(checkpoint, dict) else None
+
+
+def _resume_metadata(job: JobRecord) -> dict[str, Any]:
+    checkpoint = extract_resume_checkpoint(job)
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    return {
+        "can_resume": bool(job.status == "failed" and job.type == "trip.generate" and checkpoint),
+        "resume_from_job_id": str(payload.get("resume_from_job_id") or "").strip() or None,
+        "resume_failed_role": str((checkpoint or {}).get("failed_role") or "").strip() or None,
+        "resume_reason": str((checkpoint or {}).get("failure_message") or "").strip() or None,
+    }
+
+
 def ensure_job_record_schema(session: Session) -> None:
-    cache_key = _cache_key(session)
-    if cache_key in _JOB_SCHEMA_CACHE:
-        return
-
-    bind = session.get_bind()
-    inspector = inspect(bind)
-    if "job_records" not in inspector.get_table_names():
-        _JOB_SCHEMA_CACHE.add(cache_key)
-        return
-
-    existing_columns = {column["name"] for column in inspector.get_columns("job_records")}
-    statements = [
-        f"ALTER TABLE job_records ADD COLUMN {column_name} {column_type}"
-        for column_name, column_type in _JOB_SCHEMA_COLUMNS.items()
-        if column_name not in existing_columns
-    ]
-    if statements:
-        with bind.begin() as connection:
-            for statement in statements:
-                connection.execute(text(statement))
-    _JOB_SCHEMA_CACHE.add(cache_key)
+    # Kept as a temporary compatibility shim for callers in long-lived worker
+    # processes. Schema evolution is now exclusively handled by Alembic.
+    del session
 
 
 def serialize_job(job: JobRecord) -> JobResponse:
+    resume_metadata = _resume_metadata(job)
     return JobResponse(
         job_id=job.id,
         status=job.status,
         type=job.type,
         trip_id=job.trip_id,
+        **resume_metadata,
         created_at=job.created_at,
         updated_at=job.updated_at,
         stage=job.stage,
         stage_message=job.stage_message,
         progress_percent=job.progress_percent,
+        attempt_count=job.attempt_count,
+        max_attempts=job.max_attempts,
         timeline_json=job.timeline_json or [],
         result=job.result_json,
         error_message=job.error_message,
     )
 
 
-def create_job(session: Session, *, job_type: str, owner_user_id: str, trip_id: str | None, payload: dict) -> JobRecord:
-    ensure_job_record_schema(session)
+def create_job(
+    session: Session,
+    *,
+    job_type: str,
+    owner_user_id: str,
+    trip_id: str | None,
+    payload: dict,
+    idempotency_key: str | None = None,
+    max_attempts: int | None = None,
+) -> JobRecord:
+    normalized_idempotency_key = str(idempotency_key or "").strip()[:128] or None
+    if normalized_idempotency_key:
+        existing = (
+            session.query(JobRecord)
+            .filter(
+                JobRecord.owner_user_id == owner_user_id,
+                JobRecord.type == job_type,
+                JobRecord.idempotency_key == normalized_idempotency_key,
+            )
+            .one_or_none()
+        )
+        if existing is not None:
+            return existing
+
     now = _utcnow()
+    configured_attempts = max_attempts if max_attempts is not None else get_settings().job_max_attempts
     job = JobRecord(
         id=generate_identifier("job"),
         type=job_type,
@@ -115,12 +129,31 @@ def create_job(session: Session, *, job_type: str, owner_user_id: str, trip_id: 
         stage_message="Job queued for execution.",
         progress_percent=0,
         timeline_json=[],
+        idempotency_key=normalized_idempotency_key,
+        attempt_count=0,
+        max_attempts=max(1, int(configured_attempts)),
         created_at=now,
         updated_at=now,
     )
     _append_timeline_entry(job, now)
     session.add(job)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        if normalized_idempotency_key:
+            existing = (
+                session.query(JobRecord)
+                .filter(
+                    JobRecord.owner_user_id == owner_user_id,
+                    JobRecord.type == job_type,
+                    JobRecord.idempotency_key == normalized_idempotency_key,
+                )
+                .one_or_none()
+            )
+            if existing is not None:
+                return existing
+        raise
     session.refresh(job)
     return job
 
@@ -128,6 +161,27 @@ def create_job(session: Session, *, job_type: str, owner_user_id: str, trip_id: 
 def get_job(session: Session, job_id: str, owner_user_id: str) -> JobRecord | None:
     ensure_job_record_schema(session)
     return session.query(JobRecord).filter(JobRecord.id == job_id, JobRecord.owner_user_id == owner_user_id).one_or_none()
+
+
+def get_job_by_idempotency_key(
+    session: Session,
+    *,
+    owner_user_id: str,
+    job_type: str,
+    idempotency_key: str | None,
+) -> JobRecord | None:
+    normalized = str(idempotency_key or "").strip()[:128]
+    if not normalized:
+        return None
+    return (
+        session.query(JobRecord)
+        .filter(
+            JobRecord.owner_user_id == owner_user_id,
+            JobRecord.type == job_type,
+            JobRecord.idempotency_key == normalized,
+        )
+        .one_or_none()
+    )
 
 
 def update_job_state(
@@ -143,11 +197,14 @@ def update_job_state(
     set_started: bool = False,
     set_finished: bool = False,
     clear_finished: bool = False,
+    skip_if_terminal: bool = False,
 ) -> JobRecord | None:
     ensure_job_record_schema(session)
     job = session.query(JobRecord).filter(JobRecord.id == job_id).one_or_none()
     if not job:
         return None
+    if skip_if_terminal and job.status in TERMINAL_JOB_STATUSES:
+        return job
 
     now = _utcnow()
     if status is not UNSET:
@@ -168,10 +225,84 @@ def update_job_state(
         job.finished_at = None
     if set_finished:
         job.finished_at = now
+    if job.status == "running":
+        job.heartbeat_at = now
+    if job.status in TERMINAL_JOB_STATUSES:
+        job.locked_at = None
+        job.heartbeat_at = None
+        job.available_at = None
     job.updated_at = now
     _append_timeline_entry(job, now)
     session.add(job)
     return job
+
+
+def cancel_job(session: Session, job_id: str, owner_user_id: str, *, message: str = "Job cancelled by user.") -> JobRecord | None:
+    ensure_job_record_schema(session)
+    job = get_job(session, job_id, owner_user_id)
+    if job is None:
+        return None
+    if job.status in TERMINAL_JOB_STATUSES:
+        return job
+    return update_job_state(
+        session,
+        job_id,
+        status="cancelled",
+        stage="cancelled",
+        stage_message=message,
+        progress_percent=job.progress_percent,
+        error_message=None,
+        set_finished=True,
+    )
+
+
+def touch_job_heartbeat(job_id: str) -> bool:
+    with session_scope() as session:
+        now = _utcnow()
+        updated = (
+            session.query(JobRecord)
+            .filter(JobRecord.id == job_id, JobRecord.status == "running")
+            .update({JobRecord.heartbeat_at: now, JobRecord.updated_at: now}, synchronize_session=False)
+        )
+        return bool(updated)
+
+
+def recover_stale_jobs(*, stale_after_seconds: int) -> list[str]:
+    cutoff = _utcnow() - timedelta(seconds=max(int(stale_after_seconds), 1))
+    with session_scope() as session:
+        stale_jobs = (
+            session.query(JobRecord)
+            .filter(
+                JobRecord.status == "running",
+                or_(
+                    JobRecord.heartbeat_at < cutoff,
+                    (JobRecord.heartbeat_at.is_(None) & (JobRecord.locked_at < cutoff)),
+                    (JobRecord.heartbeat_at.is_(None) & JobRecord.locked_at.is_(None) & (JobRecord.started_at < cutoff)),
+                ),
+            )
+            .all()
+        )
+        recovered: list[str] = []
+        now = _utcnow()
+        for job in stale_jobs:
+            if job.attempt_count >= job.max_attempts:
+                job.status = "failed"
+                job.stage = "failed"
+                job.stage_message = "Job exceeded its maximum attempts after a stale worker lock."
+                job.error_message = job.stage_message
+                job.finished_at = now
+            else:
+                job.status = "retrying"
+                job.stage = "retry_wait"
+                job.stage_message = "Recovered after a stale worker lock."
+                job.available_at = now
+                recovered.append(job.id)
+            job.locked_at = None
+            job.heartbeat_at = None
+            job.updated_at = now
+            _append_timeline_entry(job, now)
+            session.add(job)
+        return recovered
 
 
 def _redis_settings(redis_url: str) -> RedisSettings:
@@ -187,7 +318,7 @@ def _redis_settings(redis_url: str) -> RedisSettings:
 async def _enqueue_via_arq(redis_url: str, job_id: str) -> None:
     pool = await create_pool(_redis_settings(redis_url))
     try:
-        await pool.enqueue_job("process_job", job_id=job_id)
+        await pool.enqueue_job("process_job", job_id=job_id, _job_id=f"travelmind:{job_id}")
     finally:
         await pool.close()
 

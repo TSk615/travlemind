@@ -13,6 +13,7 @@ from travelmind_api.api.schemas.common import Envelope, ErrorPayload
 from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import init_db
 from travelmind_api.core.logging_utils import configure_application_logging, log_job_event
+from travelmind_api.core.request_security import RequestSecurityMiddleware
 
 try:
     from travelmind_api.api.routes.images import get_image_file
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     configure_application_logging(settings)
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    app.add_middleware(RequestSecurityMiddleware, settings=settings)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

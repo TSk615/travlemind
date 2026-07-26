@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
+import httpx
 from fastapi import HTTPException, status
 
 from travelmind_api.agents.base import PlanningRequest, PlanningResult
@@ -18,8 +21,9 @@ from travelmind_api.services.image_prompt_service import ImagePromptComposePaylo
 from travelmind_api.services.image_storage import persist_bytes
 from travelmind_api.services.images import ImageModelConfig, ImageProviderRequest, build_image_provider
 from travelmind_api.services.export_service import normalize_export_formats, write_export_bundle
-from travelmind_api.services.job_service import create_job, dispatch_job_now, ensure_job_record_schema, update_job_state
+from travelmind_api.services.job_service import create_job, dispatch_job_now, update_job_state
 from travelmind_api.services.llm import LlmConfig
+from travelmind_api.services.llm.user_config import build_user_poi_role_overrides, user_poi_role_override_missing_fields
 from travelmind_api.services.search_connector import resolve_search_service_config
 from travelmind_api.services.trip_image_enrichment import enrich_plan_images, prepare_plan_images_for_async_enrichment
 
@@ -28,12 +32,24 @@ settings = get_settings()
 _LOGGER = logging.getLogger(__name__)
 
 
+class JobCancelledError(RuntimeError):
+    pass
+
+
+class JobRetryRequested(RuntimeError):
+    def __init__(self, delay_seconds: int):
+        super().__init__(f"Retry job after {delay_seconds} seconds")
+        self.delay_seconds = delay_seconds
+
+
 @dataclass(frozen=True)
 class JobExecution:
     id: str
     type: str
     trip_id: str | None
     payload: dict
+    attempt_count: int
+    max_attempts: int
 
 
 
@@ -56,8 +72,74 @@ def _extract_error_message(exc: Exception) -> str:
     return message or exc.__class__.__name__
 
 
+def _is_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, HTTPException):
+        return exc.status_code == 429 or exc.status_code >= 500
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    message = _extract_error_message(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "429",
+            "rate limit",
+            "too many requests",
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "connection reset",
+            "connection refused",
+            "bad gateway",
+            "service unavailable",
+        )
+    )
+
+
+def _schedule_retry(job_id: str, exc: Exception) -> int | None:
+    if not _is_retryable_error(exc):
+        return None
+    with session_scope() as session:
+        job = session.query(JobRecord).filter(JobRecord.id == job_id).one_or_none()
+        if job is None or job.status in {"cancelled", "completed"} or job.attempt_count >= job.max_attempts:
+            return None
+        delay_seconds = min(
+            max(settings.job_retry_base_seconds, 1) * (2 ** max(job.attempt_count - 1, 0)),
+            300,
+        )
+        message = _extract_error_message(exc)
+        updated = update_job_state(
+            session,
+            job_id,
+            status="retrying",
+            stage="retry_wait",
+            stage_message=f"Transient failure; retrying in {delay_seconds} seconds: {message}",
+            error_message=message,
+            clear_finished=True,
+        )
+        if updated is not None:
+            updated.locked_at = None
+            updated.heartbeat_at = None
+            updated.available_at = _utcnow()
+            session.add(updated)
+        return delay_seconds
+
+
+def _job_status(job_id: str) -> str | None:
+    with session_scope() as session:
+        job = session.query(JobRecord).filter(JobRecord.id == job_id).one_or_none()
+        return str(job.status) if job is not None else None
+
+
+def _raise_if_cancelled(job_id: str) -> None:
+    if _job_status(job_id) == "cancelled":
+        raise JobCancelledError(f"Job {job_id} was cancelled.")
+
+
 
 def _transition_job(job_id: str, *, stage: str, stage_message: str, progress_percent: int) -> None:
+    _raise_if_cancelled(job_id)
     log_job_event(
         "job_transition",
         job_id=job_id,
@@ -78,6 +160,7 @@ def _transition_job(job_id: str, *, stage: str, stage_message: str, progress_per
             result=None,
             set_started=True,
             clear_finished=True,
+            skip_if_terminal=True,
         )
 
 
@@ -104,6 +187,7 @@ def _mark_complete(job_id: str, result: dict, *, stage: str, stage_message: str)
             error_message=None,
             set_started=True,
             set_finished=True,
+            skip_if_terminal=True,
         )
 
 
@@ -127,21 +211,55 @@ def _mark_failed(job_id: str, message: str) -> None:
             stage_message=failure_message,
             error_message=failure_message,
             set_finished=True,
+            skip_if_terminal=True,
         )
+
+
+def _record_trip_generation_resume_checkpoint(job_id: str, checkpoint: dict[str, Any] | None, exc: Exception) -> None:
+    if not isinstance(checkpoint, dict):
+        return
+    checkpoint_payload = deepcopy(checkpoint)
+    checkpoint_payload["source_job_id"] = job_id
+    checkpoint_payload.setdefault("failure_message", _extract_error_message(exc))
+    roles = checkpoint_payload.get("roles") if isinstance(checkpoint_payload.get("roles"), dict) else {}
+    completed_roles = [
+        role_name
+        for role_name, role_payload in roles.items()
+        if isinstance(role_payload, dict) and role_payload.get("status") == "completed"
+    ]
+    checkpoint_payload["completed_roles"] = completed_roles
+    failed_role = str(checkpoint_payload.get("failed_role") or "").strip() or None
+    with session_scope() as session:
+        job = session.query(JobRecord).filter(JobRecord.id == job_id).one_or_none()
+        if job is None:
+            return
+        payload = dict(job.payload_json or {})
+        payload["resume_checkpoint"] = checkpoint_payload
+        job.payload_json = payload
+        job.result_json = {
+            "resume_available": True,
+            "resume_failed_role": failed_role,
+            "resume_completed_roles": completed_roles,
+            "resume_reason": checkpoint_payload.get("failure_message"),
+        }
+        session.add(job)
 
 
 
 def _claim_job(job_id: str) -> JobExecution | None:
     now = _utcnow()
     with session_scope() as session:
-        ensure_job_record_schema(session)
         claimed = (
             session.query(JobRecord)
-            .filter(JobRecord.id == job_id, JobRecord.status == "queued")
+            .filter(JobRecord.id == job_id, JobRecord.status.in_(("queued", "retrying")))
             .update(
                 {
                     JobRecord.status: "running",
                     JobRecord.started_at: now,
+                    JobRecord.attempt_count: JobRecord.attempt_count + 1,
+                    JobRecord.locked_at: now,
+                    JobRecord.heartbeat_at: now,
+                    JobRecord.available_at: None,
                     JobRecord.finished_at: None,
                     JobRecord.result_json: None,
                     JobRecord.error_message: None,
@@ -153,7 +271,14 @@ def _claim_job(job_id: str) -> JobExecution | None:
         if claimed == 0:
             return None
         job = session.query(JobRecord).filter(JobRecord.id == job_id).one()
-        return JobExecution(id=job.id, type=job.type, trip_id=job.trip_id, payload=job.payload_json or {})
+        return JobExecution(
+            id=job.id,
+            type=job.type,
+            trip_id=job.trip_id,
+            payload=job.payload_json or {},
+            attempt_count=job.attempt_count,
+            max_attempts=job.max_attempts,
+        )
 
 
 
@@ -197,6 +322,7 @@ def _resolve_llm_config(user: User | None, payload: dict) -> LlmConfig | None:
             "model": user.llm_model,
             "wire_api": user.llm_wire_api,
             "provider_protocol": getattr(user, "llm_provider_protocol", None),
+            "role_overrides": build_user_poi_role_overrides(user),
         }
     )
     if config is None:
@@ -323,6 +449,17 @@ def _process_trip_generation(job: JobExecution) -> dict:
         if not trip:
             raise HTTPException(status_code=404, detail="Trip not found for job")
         user = session.query(User).filter(User.id == trip.user_id).one_or_none()
+        if _resolve_agent_provider(user) == "helloagents":
+            missing_poi_fields = user_poi_role_override_missing_fields(user)
+            if missing_poi_fields:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={
+                        "code": "poi_llm_override_incomplete",
+                        "message": "Complete POI base URL, API key, and model, or clear all POI model fields before generating with HelloAgents.",
+                        "missing_fields": missing_poi_fields,
+                    },
+                )
         request = _build_request(trip, user)
         orchestrator = build_orchestrator(
             settings,
@@ -338,14 +475,28 @@ def _process_trip_generation(job: JobExecution) -> dict:
             ),
         )
         setattr(orchestrator, "_current_job_id", job.id)
+        resume_checkpoint = job.payload.get("resume_checkpoint")
+        set_resume_checkpoint = getattr(orchestrator, "set_resume_checkpoint", None)
+        if callable(set_resume_checkpoint) and isinstance(resume_checkpoint, dict):
+            set_resume_checkpoint(resume_checkpoint)
 
         _transition_job(job.id, stage="source_search", stage_message="Collecting grounded source inputs.", progress_percent=25)
         _transition_job(job.id, stage="source_scoring", stage_message="Scoring grounded source inputs.", progress_percent=45)
         _transition_job(job.id, stage="route_planning", stage_message="Drafting the itinerary route.", progress_percent=72)
-        result = orchestrator.plan_trip(request)
+        try:
+            result = orchestrator.plan_trip(request)
+        except JobCancelledError:
+            raise
+        except Exception as exc:
+            get_resume_checkpoint = getattr(orchestrator, "get_resume_checkpoint", None)
+            checkpoint = get_resume_checkpoint() if callable(get_resume_checkpoint) else None
+            _record_trip_generation_resume_checkpoint(job.id, checkpoint, exc)
+            raise
+        _raise_if_cancelled(job.id)
         _transition_job(job.id, stage="hotel_matching", stage_message="Filling accommodation placeholders.", progress_percent=88)
         _transition_job(job.id, stage="export_ready", stage_message="Finalizing itinerary payload.", progress_percent=96)
         result = prepare_plan_images_for_async_enrichment(result)
+        _raise_if_cancelled(job.id)
         agent_trace = _persist_trip_plan(trip, result)
         session.add(trip)
         session.flush()
@@ -411,9 +562,11 @@ def _process_trip_refine(job: JobExecution) -> dict:
             scope=scope,
             day_index=day_index,
         )
+        _raise_if_cancelled(job.id)
         _transition_job(job.id, stage="hotel_matching", stage_message="Rebalancing stay placeholders after refinement.", progress_percent=86)
         _transition_job(job.id, stage="export_ready", stage_message="Finalizing refined itinerary payload.", progress_percent=96)
         refined_plan = prepare_plan_images_for_async_enrichment(refined_plan)
+        _raise_if_cancelled(job.id)
         agent_trace = _persist_trip_plan(trip, refined_plan)
         session.add(trip)
         session.flush()
@@ -454,9 +607,9 @@ def _process_trip_image_enrichment(job: JobExecution) -> dict:
         enriched_plan = enrich_plan_images(
             plan,
             request,
-            llm_config=_resolve_llm_config(user, job.payload),
             search_service=request.search_service,
         )
+        _raise_if_cancelled(job.id)
         _transition_job(job.id, stage="export_ready", stage_message="Persisting enriched itinerary images.", progress_percent=96)
         agent_trace = _persist_trip_plan(trip, enriched_plan)
         session.add(trip)
@@ -496,7 +649,9 @@ def _process_pdf_export(job: JobExecution) -> dict:
         formats = normalize_export_formats(list(job.payload.get("formats") or []))
         _transition_job(job.id, stage="export_ready", stage_message="Rendering export artifacts.", progress_percent=82)
         draft = orchestrator.draft_export_payload(request, plan)
+        _raise_if_cancelled(job.id)
         export_result = write_export_bundle(job.id, request, plan, draft, settings, formats=formats)
+        _raise_if_cancelled(job.id)
         return export_result
 
 
@@ -571,6 +726,7 @@ def _process_image_generation(job: JobExecution) -> dict:
             )
         )
 
+        _raise_if_cancelled(job.id)
         _transition_job(job.id, stage="asset_persist", stage_message="Persisting generated image assets.", progress_percent=90)
         persisted_assets = [
             persist_bytes(
@@ -597,7 +753,7 @@ def _process_image_generation(job: JobExecution) -> dict:
 
 
 
-def process_job(job_id: str) -> None:
+def process_job(job_id: str, *, retry_transient: bool = False) -> None:
     job = _claim_job(job_id)
     if not job:
         return
@@ -625,10 +781,26 @@ def process_job(job_id: str) -> None:
             raise RuntimeError(f"Unsupported job type: {job.type}")
         if isinstance(result, dict):
             followup_job_id = str(result.get("followup_job_id") or "").strip() or None
+        _raise_if_cancelled(job.id)
         _mark_complete(job.id, result, stage="export_ready", stage_message=completion_message)
         if followup_job_id:
+            _raise_if_cancelled(job.id)
             dispatch_job_now(followup_job_id, settings)
+    except JobCancelledError:
+        log_job_event("job_cancelled_observed", job_id=job.id, logger_name=__name__, message="Job processing stopped because the job was cancelled.")
     except Exception as exc:  # pragma: no cover
+        if retry_transient:
+            retry_delay = _schedule_retry(job.id, exc)
+            if retry_delay is not None:
+                log_job_event(
+                    "job_retry_scheduled",
+                    job_id=job.id,
+                    logger_name=__name__,
+                    message=f"Retrying transient job failure in {retry_delay} seconds.",
+                    attempt_count=job.attempt_count,
+                    max_attempts=job.max_attempts,
+                )
+                raise JobRetryRequested(retry_delay) from exc
         _mark_failed(job.id, _extract_error_message(exc))
         _LOGGER.exception("Job processing failed", extra={"job_id": job.id})
     finally:

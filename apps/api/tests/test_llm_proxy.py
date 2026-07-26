@@ -1,7 +1,11 @@
 import json
+import logging
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
+
+from travelmind_api.services.llm import LlmEndpointConfig, OpenAICompatibleClient
 
 
 class BrokenJsonStream(httpx.SyncByteStream):
@@ -164,6 +168,280 @@ def test_llm_connection_test_supports_newapi_chat_completions(client, monkeypatc
     assert captured["authorization"] == "Bearer newapi-key"
     assert captured["payload"]["messages"][0]["content"] == "Reply with exactly: ok"
 
+
+def test_llm_connection_test_can_use_saved_poi_settings(client, monkeypatch):
+    _register(client)
+    settings_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "agent": {
+                "provider_protocol": "newapi",
+                "base_url": "https://main.example.test/v1",
+                "api_key": "main-key",
+                "model": "main-model",
+                "wire_api": "chat_completions",
+                "poi_provider_protocol": "newapi",
+                "poi_base_url": "https://poi.example.test/v1",
+                "poi_api_key": "poi-key",
+                "poi_model": "poi-model",
+                "poi_wire_api": "chat_completions",
+            }
+        },
+    )
+    assert settings_response.status_code == 200, settings_response.text
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
+
+    response = client.post("/api/v1/llm/test", json={"scope": "poi"})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["base_url"] == "https://poi.example.test/v1"
+    assert payload["model"] == "poi-model"
+    assert captured["url"] == "https://poi.example.test/v1/chat/completions"
+    assert captured["authorization"] == "Bearer poi-key"
+    assert captured["payload"]["model"] == "poi-model"
+    assert captured["payload"]["stream"] is True
+
+
+def test_openai_compatible_client_extracts_chat_sse_reasoning_content_fallback():
+    client = OpenAICompatibleClient(LlmEndpointConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test"))
+    stream_text = "\n\n".join(
+        [
+            'data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"{\\"title\\":\\"Core"}}]}',
+            'data: {"choices":[{"delta":{"reasoning_content":" Dali POIs\\"}"}}]}',
+            "data: [DONE]",
+        ]
+    )
+
+    assert client._extract_chat_completions_text_from_sse(stream_text) == '{"title":"Core Dali POIs"}'
+
+
+def test_openai_compatible_client_reports_chat_sse_shape_when_text_is_missing():
+    client = OpenAICompatibleClient(LlmEndpointConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test"))
+    stream_text = "\n\n".join(
+        [
+            'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        client._extract_chat_completions_text_from_sse(stream_text)
+
+    message = str(exc_info.value)
+    assert "did not contain assistant text" in message
+    assert "delta_keys=role" in message
+    assert "finish_reason=stop" in message
+
+
+
+def _build_direct_client(handler, *, wire_api: str = "chat_completions", timeout_seconds: float = 30.0):
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(transport=transport)
+    config = LlmEndpointConfig(
+        base_url="https://llm.example.test/v1",
+        api_key="test-key",
+        model="gpt-test",
+        wire_api=wire_api,
+        timeout_seconds=timeout_seconds,
+    )
+    return OpenAICompatibleClient(config, http_client=http_client), http_client
+
+
+def test_openai_compatible_client_does_not_retry_or_fallback_on_http_400():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(400, json={"error": {"message": "bad request"}})
+
+    llm_client, http_client = _build_direct_client(handler, wire_api="responses")
+    llm_client._sleep = lambda seconds: pytest.fail(f"unexpected retry sleep of {seconds}s for HTTP 400")
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert exc_info.value.response.status_code == 400
+    assert len(calls) == 1
+
+
+def test_openai_compatible_client_retries_503_with_exponential_backoff():
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        attempts.append(1)
+        if len(attempts) < 3:
+            return httpx.Response(503, json={"error": "upstream busy"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "recovered"}}]})
+
+    llm_client, http_client = _build_direct_client(handler)
+    llm_client._sleep = sleeps.append
+
+    try:
+        reply = llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert reply == "recovered"
+    assert len(attempts) == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_openai_compatible_client_prefers_retry_after_header_on_429():
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(429, headers={"Retry-After": "3"}, json={"error": "rate limited"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "after backoff"}}]})
+
+    llm_client, http_client = _build_direct_client(handler)
+    llm_client._sleep = sleeps.append
+
+    try:
+        reply = llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert reply == "after backoff"
+    assert len(attempts) == 2
+    assert sleeps == [3.0]
+
+
+def test_openai_compatible_client_gives_up_after_bounded_retries():
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        attempts.append(1)
+        return httpx.Response(500, json={"error": "boom"})
+
+    llm_client, http_client = _build_direct_client(handler)
+    llm_client._sleep = sleeps.append
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert exc_info.value.response.status_code == 500
+    assert len(attempts) == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_openai_compatible_client_retries_network_errors_with_backoff():
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "network recovered"}}]})
+
+    llm_client, http_client = _build_direct_client(handler)
+    llm_client._sleep = sleeps.append
+
+    try:
+        reply = llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert reply == "network recovered"
+    assert len(attempts) == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_openai_compatible_client_streaming_request_retries_retryable_status():
+    attempts: list[dict[str, object]] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(json.loads(request.content.decode("utf-8")))
+        if len(attempts) == 1:
+            return httpx.Response(502, json={"error": "bad gateway"})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text='data: {"choices":[{"delta":{"content":"stream"}}]}\n\ndata: {"choices":[{"delta":{"content":" ok"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    llm_client, http_client = _build_direct_client(handler)
+    llm_client._sleep = sleeps.append
+
+    try:
+        reply = llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}], stream=True)
+    finally:
+        http_client.close()
+
+    assert reply == "stream ok"
+    assert attempts[0]["stream"] is True
+    assert attempts[1]["stream"] is True
+    assert sleeps == [1.0]
+
+
+def test_openai_compatible_client_honors_timeout_with_injected_http_client():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    llm_client, http_client = _build_direct_client(handler, timeout_seconds=7.5)
+
+    try:
+        reply = llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert reply == "ok"
+    timeout = captured["timeout"]
+    assert isinstance(timeout, dict)
+    assert timeout["read"] == 7.5
+    assert timeout["connect"] == 7.5
+
+
+def test_openai_compatible_client_logs_usage_tokens(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46},
+            },
+        )
+
+    llm_client, http_client = _build_direct_client(handler)
+
+    try:
+        with caplog.at_level(logging.INFO, logger="travelmind_api.services.llm.client"):
+            reply = llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert reply == "ok"
+    assert "prompt_tokens=12" in caplog.text
+    assert "completion_tokens=34" in caplog.text
 
 
 def test_llm_proxy_requires_saved_or_explicit_configuration(client):
@@ -487,6 +765,45 @@ def test_llm_models_endpoint_normalizes_openai_and_claude_models(client, monkeyp
     ]
 
 
+def test_llm_models_endpoint_can_use_saved_poi_key(client, monkeypatch):
+    _register(client)
+    settings_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "agent": {
+                "provider_protocol": "newapi",
+                "base_url": "https://main.example.test/v1",
+                "api_key": "main-key",
+                "model": "main-model",
+                "wire_api": "chat_completions",
+                "poi_provider_protocol": "newapi",
+                "poi_base_url": "https://poi.example.test/v1",
+                "poi_api_key": "poi-key",
+                "poi_model": "poi-model",
+                "poi_wire_api": "chat_completions",
+            }
+        },
+    )
+    assert settings_response.status_code == 200, settings_response.text
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"data": [{"id": "poi-model"}]})
+
+    _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
+
+    response = client.post("/api/v1/llm/models", json={"scope": "poi"})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["base_url"] == "https://poi.example.test/v1"
+    assert payload["models"][0]["id"] == "poi-model"
+    assert captured["url"] == "https://poi.example.test/v1/models"
+    assert captured["authorization"] == "Bearer poi-key"
+
+
 def test_search_proxy_runs_groksearch_web_search_and_returns_hits(client, monkeypatch):
     _register(client)
 
@@ -624,6 +941,93 @@ def test_search_images_proxy_extracts_image_urls_via_web_fetch(client, monkeypat
     assert payload["strategy"] == "search-fallback"
     assert "https://cdn.example.test/kyoto-hero.jpg" in payload["image_urls"]
     assert payload["fetch_payloads"][0]["url"] == "https://groksearch.example.test/kyoto-photo-spot"
+
+
+def test_poi_specialist_probe_is_prompt_only_even_when_search_requested(client, monkeypatch):
+    _register(client)
+
+    import travelmind_api.api.routes.llm as llm_route
+
+    captured: dict[str, object] = {}
+
+    def forbidden_search_config(*args, **kwargs):
+        raise AssertionError("POI probe should not resolve or call a search service")
+
+    def fake_create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
+        del self
+        captured["messages"] = messages
+        captured["temperature"] = temperature
+        captured["max_tokens"] = max_tokens
+        captured["stream"] = stream
+        return json.dumps(
+            {
+                "title": "Core Dali POIs",
+                "best_season": "spring and autumn",
+                "recommended_duration": "3 to 5 days",
+                "general_tips": "Keep the pace slow and group nearby areas.",
+                "top_pois": [
+                    {
+                        "name": "Dali Ancient City",
+                        "kind": "district",
+                        "area": "old town",
+                        "highlights": ["South Gate", "Wuhua Tower", "local cafes"],
+                        "reason": "It anchors the first-time Dali experience.",
+                        "suggested_time": "half day",
+                        "confidence": "high",
+                        "source_url": "https://example.test/dali-ancient-city",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(llm_route, "_resolve_poi_probe_search_config", forbidden_search_config)
+    monkeypatch.setattr(llm_route.OpenAICompatibleClient, "create_chat_completion", fake_create_chat_completion)
+
+    response = client.post(
+        "/api/v1/llm/poi-specialist-probe",
+        json={
+            "provider_protocol": "openai",
+            "base_url": "https://llm.example.test/v1",
+            "api_key": "llm-key",
+            "wire_api": "responses",
+            "payload": {"model": "gpt-test", "temperature": 0.2, "max_tokens": 6000},
+            "search_provider": "groksearch",
+            "search_transport": "mcp",
+            "search_base_url": "https://groksearch.example.test/mcp",
+            "search_api_key": "grok-key",
+            "destination": "Dali",
+            "interests": ["city walk", "local food"],
+            "user_input": "I want city walk, nearby food, and lakeside wandering ideas.",
+            "use_search": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert "全网公开信息" in payload["system_prompt"]
+    assert "小红书" in payload["system_prompt"]
+    assert "知乎" in payload["system_prompt"]
+    assert "不要调用外部工具" in payload["system_prompt"]
+    assert payload["parsed_json"]["featured_pois"][0]["name"] == "Dali Ancient City"
+    assert payload["search"]["enabled"] is False
+    assert payload["search"]["requested"] is True
+    assert payload["search"]["skipped"] is True
+    assert payload["search"]["native_search_allowed"] is True
+    assert payload["search"]["external_tool_collection"] is False
+    assert payload["search"]["tool_result_keys"] == []
+    assert payload["citations"] == []
+    assert payload["warnings"] == [payload["search"]["reason"]]
+    prompt_payload = json.loads(captured["messages"][1]["content"])
+    assert prompt_payload["trip_request"]["destination"] == "Dali"
+    assert "planning_brief" in prompt_payload
+    assert "poi_context" in prompt_payload
+    assert "poi_request" not in prompt_payload
+    assert "candidate_pois" not in prompt_payload
+    assert "candidate_food_pois" not in prompt_payload
+    assert "tool_results" not in prompt_payload
+    assert captured["max_tokens"] == 6000
+    assert captured["stream"] is True
 
 
 def test_search_images_proxy_limits_tavily_image_domains(client, monkeypatch):

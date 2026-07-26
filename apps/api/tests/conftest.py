@@ -53,6 +53,16 @@ INTEGRATION_ENV_VARS = [
     "TRAVELMIND_XHS_MAX_RESULTS",
     "TRAVELMIND_UPSTREAM_PRIVATE_URL_POLICY",
     "TRAVELMIND_UPSTREAM_URL_ALLOWED_HOSTS",
+    "TRAVELMIND_GROK_LLM_BASE_URL",
+    "TRAVELMIND_GROK_LLM_API_KEY",
+    "TRAVELMIND_GROK_LLM_MODEL",
+    "TRAVELMIND_GROK_LLM_PROVIDER_PROTOCOL",
+    "TRAVELMIND_GROK_LLM_PROTOCOL",
+    "TRAVELMIND_GROK_LLM_WIRE_API",
+    "TRAVELMIND_GROK_LLM_TIMEOUT_SECONDS",
+    "GROK_API_URL",
+    "GROK_API_KEY",
+    "GROK_MODEL",
 ]
 @pytest.fixture(autouse=True)
 def clear_integration_env(monkeypatch):
@@ -65,6 +75,9 @@ def client(monkeypatch):
     export_root = case_root / "exports"
     export_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("TRAVELMIND_DATABASE_URL", f"sqlite:///{(case_root / 'travelmind.db').as_posix()}")
+    monkeypatch.setenv("TRAVELMIND_ENVIRONMENT", "test")
+    monkeypatch.setenv("TRAVELMIND_CSRF_ENABLED", "false")
+    monkeypatch.setenv("TRAVELMIND_RATE_LIMIT_ENABLED", "false")
     monkeypatch.setenv("TRAVELMIND_EXPORT_ROOT", str(export_root))
     monkeypatch.setenv("TRAVELMIND_QUEUE_MODE", "inline")
     monkeypatch.setenv("TRAVELMIND_AGENT_PROVIDER", "stub")

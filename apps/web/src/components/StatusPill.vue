@@ -37,7 +37,8 @@ const statusLabel = computed(() => {
   color: var(--tm-warning, #D4A054);
 }
 
-.status-pill--running {
+.status-pill--running,
+.status-pill--retrying {
   background-color: var(--tm-info-bg, rgba(107, 157, 173, 0.08));
   border: 1px solid var(--tm-info-border, rgba(107, 157, 173, 0.12));
   color: var(--tm-info, #6B9DAD);
@@ -59,5 +60,11 @@ const statusLabel = computed(() => {
   background-color: var(--tm-error-bg, rgba(199, 91, 74, 0.08));
   border: 1px solid var(--tm-error-border, rgba(199, 91, 74, 0.12));
   color: var(--tm-error, #C75B4A);
+}
+
+.status-pill--cancelled {
+  background-color: rgba(120, 123, 128, 0.08);
+  border: 1px solid rgba(120, 123, 128, 0.12);
+  color: #787B80;
 }
 </style>

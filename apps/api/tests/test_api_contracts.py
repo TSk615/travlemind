@@ -66,7 +66,7 @@ def _wait_for_terminal_job(client: TestClient, job_id: str) -> dict:
         response = client.get(f"/api/v1/jobs/{job_id}")
         assert response.status_code == 200, response.text
         payload = response.json()["data"]
-        if payload["status"] in {"completed", "failed"}:
+        if payload["status"] in {"completed", "failed", "cancelled"}:
             return payload
         time.sleep(0.05)
     assert payload is not None
@@ -553,9 +553,65 @@ def test_job_detail_and_stream_return_consistent_structure(client: TestClient):
     assert stream_payload["meta"] == {"stream": True}
     assert set(stream_payload["data"]) == set(detail_payload["data"])
     assert stream_payload["data"]["job_id"] == job_id
-    assert stream_payload["data"]["status"] in {"queued", "running", "completed", "failed"}
+    assert stream_payload["data"]["status"] in {"queued", "running", "completed", "failed", "cancelled"}
     assert isinstance(stream_payload["data"]["timeline_json"], list)
     assert stream_payload["data"]["timeline_json"][-1]["status"] == stream_payload["data"]["status"]
+
+
+def test_job_cancel_endpoint_marks_running_job_cancelled(client: TestClient):
+    from travelmind_api.core.database import SessionLocal
+    from travelmind_api.services.job_service import create_job, update_job_state
+
+    user_id = _register(client).json()["data"]["id"]
+    trip = _create_trip(client).json()["data"]
+
+    with SessionLocal() as session:
+        job = create_job(
+            session,
+            job_type="trip.generate",
+            owner_user_id=user_id,
+            trip_id=trip["id"],
+            payload={"trip_id": trip["id"]},
+        )
+        update_job_state(
+            session,
+            job.id,
+            status="running",
+            stage="route_planning",
+            stage_message="Calling upstream model.",
+            progress_percent=68,
+            set_started=True,
+            clear_finished=True,
+        )
+        session.commit()
+        job_id = job.id
+
+    cancel_response = client.post(f"/api/v1/jobs/{job_id}/cancel")
+    assert cancel_response.status_code == 200, cancel_response.text
+    cancelled_job = cancel_response.json()["data"]
+    assert cancelled_job["status"] == "cancelled"
+    assert cancelled_job["stage"] == "cancelled"
+    assert cancelled_job["progress_percent"] == 68
+    assert cancelled_job["timeline_json"][-1]["status"] == "cancelled"
+
+    with SessionLocal() as session:
+        update_job_state(
+            session,
+            job_id,
+            status="completed",
+            stage="export_ready",
+            stage_message="Late completion should not overwrite cancellation.",
+            progress_percent=100,
+            set_finished=True,
+            skip_if_terminal=True,
+        )
+        session.commit()
+
+    detail_response = client.get(f"/api/v1/jobs/{job_id}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()["data"]
+    assert detail["status"] == "cancelled"
+    assert detail["stage"] == "cancelled"
 
 
 

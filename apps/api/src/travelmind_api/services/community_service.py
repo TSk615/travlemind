@@ -32,7 +32,7 @@ def _community_snapshot_from_trip(trip: Trip) -> dict[str, object]:
         "destination": trip.destination,
         "start_date": trip.start_date.isoformat(),
         "end_date": trip.end_date.isoformat(),
-        "budget": trip.budget,
+        "budget": float(trip.budget),
         "travelers": trip.travelers,
         "interests": list(trip.interests or []),
         "accommodation_preference": trip.accommodation_preference,

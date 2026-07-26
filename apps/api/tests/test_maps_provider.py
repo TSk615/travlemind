@@ -1,8 +1,98 @@
 from datetime import date
 
+import httpx
+import pytest
+
 from travelmind_api.agents.base import PlanningRequest
 from travelmind_api.agents.stub import StubOrchestrator
-from travelmind_api.services.maps import StubMapsPoiProvider, poi_to_route_stop
+from travelmind_api.services.maps import AmapMapsPoiProvider, StubMapsPoiProvider, build_maps_provider, poi_to_route_stop
+
+
+def test_build_maps_provider_defaults_to_stub(monkeypatch):
+    monkeypatch.delenv("TRAVELMIND_MAPS_PROVIDER", raising=False)
+
+    provider = build_maps_provider()
+
+    assert isinstance(provider, StubMapsPoiProvider)
+
+
+def test_build_maps_provider_returns_amap_when_configured(monkeypatch):
+    monkeypatch.setenv("TRAVELMIND_MAPS_PROVIDER", "amap")
+    monkeypatch.setenv("TRAVELMIND_AMAP_API_KEY", "test-amap-key")
+    monkeypatch.setenv("TRAVELMIND_AMAP_BASE_URL", "https://maps.example.test")
+    monkeypatch.setenv("TRAVELMIND_AMAP_TIMEOUT_SECONDS", "3")
+
+    provider = build_maps_provider()
+
+    assert isinstance(provider, AmapMapsPoiProvider)
+
+
+def test_build_maps_provider_requires_amap_key(monkeypatch):
+    monkeypatch.setenv("TRAVELMIND_MAPS_PROVIDER", "amap")
+    monkeypatch.delenv("TRAVELMIND_AMAP_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="TRAVELMIND_AMAP_API_KEY"):
+        build_maps_provider()
+
+
+def test_amap_maps_provider_maps_poi_search_payload():
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        assert request.url.params["key"] == "test-amap-key"
+        assert request.url.params["keywords"] == "小公园历史文化街区"
+        assert request.url.params["city"] == "汕头"
+        return httpx.Response(
+            200,
+            json={
+                "status": "1",
+                "pois": [
+                    {
+                        "id": "B0TEST001",
+                        "name": "小公园历史文化街区",
+                        "type": "风景名胜;风景名胜相关;旅游景点",
+                        "typecode": "110000",
+                        "pname": "广东省",
+                        "cityname": "汕头市",
+                        "adname": "金平区",
+                        "address": "升平路与国平路交叉口附近",
+                        "location": "116.681972,23.354091",
+                        "tel": "0754-12345678",
+                        "website": "https://example.test/xiaogongyuan",
+                        "opentime_today": "全天开放",
+                    }
+                ],
+            },
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = AmapMapsPoiProvider(api_key="test-amap-key", base_url="https://maps.example.test", http_client=http_client)
+    try:
+        results = provider.search_pois("小公园历史文化街区", "汕头", limit=3)
+    finally:
+        http_client.close()
+
+    assert len(seen_requests) == 1
+    assert len(results) == 1
+    first = results[0]
+    assert first.provider == "amap"
+    assert first.name == "小公园历史文化街区"
+    assert first.city == "汕头市"
+    assert first.location.address.district == "金平区"
+    assert first.location.coordinates.lat == 23.354091
+    assert first.location.coordinates.lng == 116.681972
+
+    detail = provider.get_poi_detail(first.id)
+    assert detail is not None
+    assert detail.raw_payload["source"] == "amap"
+    assert detail.official_url == "https://example.test/xiaogongyuan"
+
+    origin = poi_to_route_stop(first)
+    destination = poi_to_route_stop(first.model_copy(update={"id": "B0TEST002", "name": "西堤公园"}))
+    estimate = provider.estimate_route(origin, destination, "walking")
+    assert estimate.provider == "amap"
+    assert estimate.duration_minutes >= 3
 
 
 

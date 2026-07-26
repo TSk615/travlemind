@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue"
-import type { LlmWireApi, SearchServiceProvider, SearchServiceTransport } from "@travelmind/shared-types"
+import type { LlmProviderProtocol, LlmWireApi, SearchServiceProvider, SearchServiceTransport } from "@travelmind/shared-types"
 import { apiFetch, handleUnauthorizedStatus } from "@/lib/api"
 import { useI18n } from "@/lib/useI18n"
 import { useLlmSettingsStore } from "@/stores/llmSettings"
@@ -11,6 +11,7 @@ interface ChatMessage {
 }
 
 interface DemoConfig {
+  provider_protocol: LlmProviderProtocol
   base_url: string
   api_key: string
   model: string
@@ -162,6 +163,28 @@ interface TavilyImagesProbeEnvelope {
   data?: TavilyImagesProbeResult | null
 }
 
+interface PoiSpecialistProbeResult {
+  prompt_version: string
+  system_prompt: string
+  model: string
+  provider_protocol: string
+  wire_api: string
+  latency_ms: number
+  payload_bytes: number
+  input_snapshot: Record<string, unknown>
+  prompt_payload: Record<string, unknown>
+  search: Record<string, unknown>
+  warnings: string[]
+  citations: string[]
+  raw_text: string
+  parsed_json?: Record<string, unknown> | null
+  parse_error?: string | null
+}
+
+interface PoiSpecialistProbeEnvelope {
+  data?: PoiSpecialistProbeResult | null
+}
+
 interface XhsImageProbeEnvelope {
   data?: XhsImageProbeResult | null
 }
@@ -195,6 +218,36 @@ const enCopy = {
   probeSearch: "Probe search",
   probingSearch: "Probing...",
   clearSearch: "Clear search",
+  poiSectionTitle: "POI specialist probe",
+  poiDescription: "Run only the prompt-only HelloAgents POI specialist and inspect the payload and returned JSON.",
+  poiDestinationLabel: "Destination",
+  poiOriginLabel: "Origin",
+  poiStartDateLabel: "Start date",
+  poiEndDateLabel: "End date",
+  poiBudgetLabel: "Budget",
+  poiTravelersLabel: "Travelers",
+  poiPaceLabel: "Pace",
+  poiTransportLabel: "Transport",
+  poiAccommodationLabel: "Stay preference",
+  poiInterestsLabel: "Interests (one per line)",
+  poiUserInputLabel: "User request",
+  poiUseSearchLabel: "Show prompt-only search skip metadata",
+  probePoi: "Run POI specialist",
+  probingPoi: "Running POI...",
+  clearPoi: "Clear POI probe",
+  poiResultsTitle: "POI specialist result",
+  poiResultsEmpty: "No POI specialist probe yet.",
+  poiFeaturedPoisTitle: "featured_pois",
+  poiFeaturedPoisEmpty: "No featured_pois were parsed.",
+  poiParsedJsonTitle: "Parsed JSON",
+  poiSystemPromptTitle: "System prompt",
+  poiPromptPayloadTitle: "Prompt payload",
+  poiRawTextTitle: "Model raw text",
+  poiSearchTitle: "Search status",
+  poiRequestTitle: "POI request",
+  poiRequestEmpty: "No POI request yet.",
+  poiResponseTitle: "POI response",
+  poiResponseEmpty: "No POI response yet.",
   imageSectionTitle: "Image capability test",
   imageDescription: "Test whether the configured search service returns images directly or only after page fetch extraction.",
   imageToolLabel: "Preferred tool",
@@ -319,6 +372,36 @@ const zhCopy = {
   probeSearch: "测试搜索",
   probingSearch: "搜索中...",
   clearSearch: "清空搜索",
+  poiSectionTitle: "POI 专家测试",
+  poiDescription: "只运行 prompt-only 的 HelloAgents POI 专家，直接查看提示词 payload 和返回 JSON。",
+  poiDestinationLabel: "目的地",
+  poiOriginLabel: "出发地",
+  poiStartDateLabel: "开始日期",
+  poiEndDateLabel: "结束日期",
+  poiBudgetLabel: "预算",
+  poiTravelersLabel: "人数",
+  poiPaceLabel: "节奏",
+  poiTransportLabel: "交通方式",
+  poiAccommodationLabel: "住宿偏好",
+  poiInterestsLabel: "兴趣点（每行一个）",
+  poiUserInputLabel: "用户原始需求",
+  poiUseSearchLabel: "显示 prompt-only 搜索跳过信息",
+  probePoi: "运行 POI 专家",
+  probingPoi: "POI 运行中...",
+  clearPoi: "清空 POI 测试",
+  poiResultsTitle: "POI 专家结果",
+  poiResultsEmpty: "还没有 POI 专家测试。",
+  poiFeaturedPoisTitle: "featured_pois",
+  poiFeaturedPoisEmpty: "没有解析出 featured_pois。",
+  poiParsedJsonTitle: "解析后的 JSON",
+  poiSystemPromptTitle: "系统提示词",
+  poiPromptPayloadTitle: "实际调用 payload",
+  poiRawTextTitle: "模型原文",
+  poiSearchTitle: "搜索状态",
+  poiRequestTitle: "POI 请求",
+  poiRequestEmpty: "还没有 POI 请求。",
+  poiResponseTitle: "POI 响应",
+  poiResponseEmpty: "还没有 POI 响应。",
   imageSectionTitle: "图片能力测试",
   imageDescription: "单独验证搜索服务是直接返回图片，还是需要页面抓取后才能提取图片 URL。",
   imageToolLabel: "指定工具",
@@ -421,6 +504,7 @@ const zhCopy = {
 const copy = computed(() => (locale.value === "zh-CN" ? zhCopy : enCopy))
 
 const form = reactive<DemoConfig>({
+  provider_protocol: "openai",
   base_url: "",
   api_key: "",
   model: "",
@@ -436,6 +520,20 @@ const searchForm = reactive<SearchProbeConfig>({
   api_key: "",
   timeout_seconds: 30,
   query: ""
+})
+const poiProbeForm = reactive({
+  destination: "大理",
+  origin: "",
+  start_date: "",
+  end_date: "",
+  budget: 3000,
+  travelers: 2,
+  interests_text: "",
+  accommodation_preference: "",
+  pace: "balanced",
+  transport_mode: "public_transport",
+  user_input: "我要去大理旅行，请结合全网的旅游攻略以及网络信息给我一些值得去的 POI",
+  use_search: false
 })
 const imageProbeForm = reactive({
   preferred_tool: "",
@@ -467,6 +565,11 @@ const searchErrorText = ref("")
 const searchRawRequest = ref("")
 const searchRawResponse = ref("")
 const searchResult = ref<SearchProbeResult | null>(null)
+const poiProbePending = ref(false)
+const poiProbeErrorText = ref("")
+const poiProbeRawRequest = ref("")
+const poiProbeRawResponse = ref("")
+const poiProbeResult = ref<PoiSpecialistProbeResult | null>(null)
 const imageProbePending = ref(false)
 const imageProbeErrorText = ref("")
 const imageProbeRawRequest = ref("")
@@ -482,6 +585,20 @@ const tavilyErrorText = ref("")
 const tavilyRawRequest = ref("")
 const tavilyRawResponse = ref("")
 const tavilyResult = ref<TavilyImagesProbeResult | null>(null)
+const llmFormHydrated = ref(false)
+const searchFormHydrated = ref(false)
+
+const llmProtocolDefaultBaseUrls: Record<LlmProviderProtocol, string> = {
+  openai: "https://api.openai.com/v1",
+  newapi: "http://localhost:3000/v1",
+  gemini: "https://generativelanguage.googleapis.com/v1beta",
+  claude: "https://api.anthropic.com/v1",
+  neiapi: "https://api.neiapi.com/v1"
+}
+
+function defaultWireApiForProtocol(protocol: LlmProviderProtocol): LlmWireApi {
+  return protocol === "newapi" || protocol === "neiapi" ? "chat_completions" : "responses"
+}
 
 watch(
   () => locale.value,
@@ -514,26 +631,47 @@ watch(
 watch(
   () => settingsStore.settings,
   (settings) => {
-    form.base_url = settings?.agent.base_url ?? form.base_url
-    form.model = settings?.agent.model ?? form.model
-    form.wire_api = settings?.agent.wire_api ?? form.wire_api
+    if (settings && !llmFormHydrated.value) {
+      form.provider_protocol = settings.agent.provider_protocol ?? form.provider_protocol
+      form.base_url = settings.agent.base_url ?? form.base_url
+      form.model = settings.agent.model ?? form.model
+      form.wire_api = settings.agent.wire_api ?? form.wire_api
+      llmFormHydrated.value = true
+    }
     form.api_key = ""
 
-    searchForm.provider = settings?.search.provider ?? searchForm.provider
-    searchForm.transport =
-      settings?.search.provider === "groksearch"
-        ? "mcp"
-        : settings?.search.provider === "tavily"
-          ? "api"
-          : (settings?.search.transport ?? searchForm.transport)
-    searchForm.base_url = settings?.search.base_url ?? searchForm.base_url
-    searchForm.api_key = ""
-    searchForm.timeout_seconds = Number(settings?.search.timeout_seconds ?? searchForm.timeout_seconds)
-    if (settings?.search.provider === "tavily" && settings.search.base_url) {
-      tavilyForm.base_url = settings.search.base_url
+    if (settings && !searchFormHydrated.value) {
+      searchForm.provider = settings.search.provider ?? searchForm.provider
+      searchForm.transport =
+        settings.search.provider === "groksearch"
+          ? "mcp"
+          : settings.search.provider === "tavily"
+            ? "api"
+            : (settings.search.transport ?? searchForm.transport)
+      searchForm.base_url = settings.search.base_url ?? searchForm.base_url
+      searchForm.timeout_seconds = Number(settings.search.timeout_seconds ?? searchForm.timeout_seconds)
+      if (settings.search.provider === "tavily" && settings.search.base_url) {
+        tavilyForm.base_url = settings.search.base_url
+      }
+      searchFormHydrated.value = true
     }
+    searchForm.api_key = ""
   },
   { immediate: true }
+)
+
+watch(
+  () => form.provider_protocol,
+  (protocol, previousProtocol) => {
+    const previousDefaultBaseUrl = previousProtocol ? llmProtocolDefaultBaseUrls[previousProtocol] : ""
+    if (!form.base_url.trim() || form.base_url.trim() === previousDefaultBaseUrl) {
+      form.base_url = llmProtocolDefaultBaseUrls[protocol]
+    }
+    const previousDefaultWireApi = previousProtocol ? defaultWireApiForProtocol(previousProtocol) : null
+    if (protocol === "openai" || !form.wire_api || form.wire_api === previousDefaultWireApi) {
+      form.wire_api = defaultWireApiForProtocol(protocol)
+    }
+  }
 )
 
 watch(
@@ -562,6 +700,16 @@ const canProbeSearch = computed(() => {
   )
 })
 
+const canProbePoi = computed(() => {
+  return Boolean(
+    !poiProbePending.value &&
+      form.base_url.trim() &&
+      form.model.trim() &&
+      poiProbeForm.destination.trim() &&
+      poiProbeForm.user_input.trim()
+  )
+})
+
 const canProbeImages = computed(() => {
   return Boolean(
     !imageProbePending.value &&
@@ -577,6 +725,7 @@ const canProbeXhsImages = computed(() => {
 const canProbeTavily = computed(() => {
   return Boolean(!tavilyPending.value && tavilyForm.base_url.trim() && (tavilyForm.api_key.trim() || hasStoredTavilyConfig.value) && tavilyForm.query.trim())
 })
+const openAiWireApiLocked = computed(() => form.provider_protocol === "openai")
 
 const tavilyImageCandidates = computed<TavilyImageCandidateItem[]>(() => {
   const result = tavilyResult.value
@@ -645,6 +794,11 @@ const tavilyResultImagesCountText = computed(() =>
   formatLimitedCount(tavilyResult.value?.result_images.length ?? 0, tavilyResult.value?.result_images_total, tavilyResult.value?.result_images_truncated)
 )
 
+const poiFeaturedPois = computed<Record<string, any>[]>(() => {
+  const featured = poiProbeResult.value?.parsed_json?.featured_pois
+  return Array.isArray(featured) ? featured.filter((item): item is Record<string, any> => item && typeof item === "object" && !Array.isArray(item)) : []
+})
+
 function clearChat() {
   messages.value = []
   errorText.value = ""
@@ -657,6 +811,13 @@ function clearSearch() {
   searchRawRequest.value = ""
   searchRawResponse.value = ""
   searchResult.value = null
+}
+
+function clearPoiProbe() {
+  poiProbeErrorText.value = ""
+  poiProbeRawRequest.value = ""
+  poiProbeRawResponse.value = ""
+  poiProbeResult.value = null
 }
 
 function clearImageProbe() {
@@ -736,25 +897,22 @@ async function send() {
   messages.value.push({ role: "user", content: userText })
 
   try {
-    await settingsStore.save({
-      agent: {
-        base_url: form.base_url.trim(),
-        model: form.model.trim(),
-        wire_api: form.wire_api,
-        agent_provider: settingsStore.settings?.agent.agent_provider ?? "standard",
-        ...(form.api_key.trim() ? { api_key: form.api_key.trim() } : {})
-      }
-    })
-
     const upstreamPayload = buildUpstreamPayload(userText)
-    rawRequest.value = JSON.stringify({ url: "/api/v1/llm/proxy", payload: { payload: upstreamPayload } }, null, 2)
+    const requestPayload = {
+      provider_protocol: form.provider_protocol,
+      base_url: form.base_url.trim(),
+      api_key: form.api_key.trim() || undefined,
+      wire_api: form.wire_api,
+      payload: upstreamPayload
+    }
+    rawRequest.value = JSON.stringify({ url: "/api/v1/llm/proxy", payload: requestPayload }, null, 2)
 
     const response = await apiFetch("/api/v1/llm/proxy", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ payload: upstreamPayload })
+      body: JSON.stringify(requestPayload)
     })
 
     if (!response.ok) {
@@ -830,6 +988,79 @@ async function probeSearch() {
     searchErrorText.value = error instanceof Error ? error.message : copy.value.unknownRequestFailure
   } finally {
     searchPending.value = false
+  }
+}
+
+async function probePoiSpecialist() {
+  if (!canProbePoi.value) {
+    return
+  }
+
+  poiProbePending.value = true
+  poiProbeErrorText.value = ""
+  poiProbeResult.value = null
+  poiProbeRawResponse.value = ""
+
+  try {
+    const payload = {
+      provider_protocol: form.provider_protocol,
+      base_url: form.base_url.trim() || undefined,
+      api_key: form.api_key.trim() || undefined,
+      wire_api: form.wire_api,
+      payload: {
+        model: form.model.trim(),
+        temperature: 0.2,
+        max_tokens: 6000
+      },
+      search_provider: searchForm.provider,
+      search_transport: searchForm.provider === "groksearch" ? "mcp" : searchForm.provider === "tavily" ? "api" : searchForm.transport,
+      search_base_url: searchForm.base_url.trim() || undefined,
+      search_api_key: searchForm.api_key.trim() || undefined,
+      search_timeout_seconds: Number.isFinite(searchForm.timeout_seconds) && searchForm.timeout_seconds > 0 ? searchForm.timeout_seconds : 30,
+      destination: poiProbeForm.destination.trim(),
+      origin: poiProbeForm.origin.trim() || undefined,
+      start_date: poiProbeForm.start_date.trim() || undefined,
+      end_date: poiProbeForm.end_date.trim() || undefined,
+      budget: Number.isFinite(poiProbeForm.budget) && poiProbeForm.budget > 0 ? poiProbeForm.budget : undefined,
+      travelers: Number.isFinite(poiProbeForm.travelers) && poiProbeForm.travelers > 0 ? poiProbeForm.travelers : 2,
+      interests: splitProbeLines(poiProbeForm.interests_text),
+      accommodation_preference: poiProbeForm.accommodation_preference.trim() || undefined,
+      pace: poiProbeForm.pace.trim() || "balanced",
+      transport_mode: poiProbeForm.transport_mode.trim() || undefined,
+      user_input: poiProbeForm.user_input.trim(),
+      use_search: poiProbeForm.use_search
+    }
+
+    poiProbeRawRequest.value = JSON.stringify({ url: "/api/v1/llm/poi-specialist-probe", payload }, null, 2)
+
+    const response = await apiFetch("/api/v1/llm/poi-specialist-probe", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    })
+
+    const rawBody = await response.text()
+    poiProbeRawResponse.value = rawBody
+
+    if (!response.ok) {
+      handleUnauthorizedStatus(response.status)
+      throw new Error(extractErrorMessage(rawBody, response.status))
+    }
+
+    const parsed = JSON.parse(rawBody) as PoiSpecialistProbeEnvelope
+    if (!parsed.data) {
+      throw new Error(copy.value.invalidSearchEnvelope)
+    }
+
+    poiProbeResult.value = parsed.data
+    form.api_key = ""
+    searchForm.api_key = ""
+  } catch (error) {
+    poiProbeErrorText.value = error instanceof Error ? error.message : copy.value.unknownRequestFailure
+  } finally {
+    poiProbePending.value = false
   }
 }
 
@@ -970,9 +1201,8 @@ async function probeTavily() {
     }
 
     tavilyRawRequest.value = JSON.stringify({ url: "/api/v1/llm/tavily-images-proxy", payload }, null, 2)
-    const response = await fetch("/api/v1/llm/tavily-images-proxy", {
+    const response = await apiFetch("/api/v1/llm/tavily-images-proxy", {
       method: "POST",
-      credentials: "include",
       headers: {
         "Content-Type": "application/json"
       },
@@ -1278,6 +1508,21 @@ function summarizeText(value?: string | null, maxLength = 96): string {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
 }
 
+function formatPoiMeta(poi: Record<string, any>): string {
+  return [poi.kind, poi.category, poi.area, poi.confidence].map((value) => String(value || "").trim()).filter(Boolean).join(" / ")
+}
+
+function formatPoiEvidence(poi: Record<string, any>): string {
+  return [poi.price_hint, poi.review_score, poi.review_count, poi.queue_hint].map((value) => String(value || "").trim()).filter(Boolean).join(" / ")
+}
+
+function formatStringList(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean).join(", ")
+  }
+  return String(value || "").trim()
+}
+
 function formatPrettyJson(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2)
@@ -1300,6 +1545,16 @@ function formatPrettyJson(value: unknown): string {
         <div class="llm-demo-form">
           <p class="llm-demo-section-title">LLM</p>
           <label>
+            Protocol
+            <select v-model="form.provider_protocol">
+              <option value="openai">OpenAI</option>
+              <option value="newapi">New API</option>
+              <option value="gemini">Gemini</option>
+              <option value="claude">Claude</option>
+              <option value="neiapi">NEI API</option>
+            </select>
+          </label>
+          <label>
             {{ copy.baseUrlLabel }}
             <input v-model="form.base_url" placeholder="https://api.example.com/v1" />
           </label>
@@ -1309,7 +1564,7 @@ function formatPrettyJson(value: unknown): string {
           </label>
           <label>
             {{ copy.apiFormatLabel }}
-            <select v-model="form.wire_api">
+            <select v-model="form.wire_api" :disabled="openAiWireApiLocked">
               <option value="responses">Responses API</option>
               <option value="chat_completions">Chat Completions API</option>
             </select>
@@ -1383,6 +1638,70 @@ function formatPrettyJson(value: unknown): string {
         </div>
 
         <p v-if="searchErrorText" class="llm-demo-error">{{ searchErrorText }}</p>
+
+        <div class="llm-demo-divider"></div>
+
+        <div class="llm-demo-form">
+          <p class="llm-demo-section-title">{{ copy.poiSectionTitle }}</p>
+          <p class="llm-demo-muted">{{ copy.poiDescription }}</p>
+          <label>
+            {{ copy.poiDestinationLabel }}
+            <input v-model="poiProbeForm.destination" placeholder="大理" />
+          </label>
+          <label>
+            {{ copy.poiOriginLabel }}
+            <input v-model="poiProbeForm.origin" placeholder="上海" />
+          </label>
+          <label>
+            {{ copy.poiStartDateLabel }}
+            <input v-model="poiProbeForm.start_date" type="date" />
+          </label>
+          <label>
+            {{ copy.poiEndDateLabel }}
+            <input v-model="poiProbeForm.end_date" type="date" />
+          </label>
+          <label>
+            {{ copy.poiBudgetLabel }}
+            <input v-model.number="poiProbeForm.budget" type="number" min="0" step="100" />
+          </label>
+          <label>
+            {{ copy.poiTravelersLabel }}
+            <input v-model.number="poiProbeForm.travelers" type="number" min="1" max="20" step="1" />
+          </label>
+          <label>
+            {{ copy.poiPaceLabel }}
+            <input v-model="poiProbeForm.pace" placeholder="balanced" />
+          </label>
+          <label>
+            {{ copy.poiTransportLabel }}
+            <input v-model="poiProbeForm.transport_mode" placeholder="public_transport" />
+          </label>
+          <label>
+            {{ copy.poiAccommodationLabel }}
+            <input v-model="poiProbeForm.accommodation_preference" placeholder="古城附近安静酒店" />
+          </label>
+          <label>
+            {{ copy.poiInterestsLabel }}
+            <textarea v-model="poiProbeForm.interests_text"></textarea>
+          </label>
+          <label>
+            {{ copy.poiUserInputLabel }}
+            <textarea v-model="poiProbeForm.user_input"></textarea>
+          </label>
+          <label class="llm-demo-toggle">
+            <input v-model="poiProbeForm.use_search" type="checkbox" />
+            <span>{{ copy.poiUseSearchLabel }}</span>
+          </label>
+        </div>
+
+        <div class="llm-demo-actions">
+          <button class="primary" type="button" :disabled="!canProbePoi" @click="probePoiSpecialist">
+            {{ poiProbePending ? copy.probingPoi : copy.probePoi }}
+          </button>
+          <button type="button" @click="clearPoiProbe">{{ copy.clearPoi }}</button>
+        </div>
+
+        <p v-if="poiProbeErrorText" class="llm-demo-error">{{ poiProbeErrorText }}</p>
 
         <div class="llm-demo-divider"></div>
 
@@ -1494,6 +1813,53 @@ function formatPrettyJson(value: unknown): string {
           </div>
           <div class="llm-demo-composer">
             <textarea v-model="input" :placeholder="copy.composerPlaceholder"></textarea>
+          </div>
+        </section>
+
+        <section class="llm-demo-panel">
+          <h2>{{ copy.poiResultsTitle }}</h2>
+          <div v-if="!poiProbeResult" class="llm-demo-empty">{{ copy.poiResultsEmpty }}</div>
+          <div v-else class="llm-demo-results">
+            <p class="llm-demo-meta">
+              <strong>{{ copy.modelLabel }}:</strong> {{ poiProbeResult.model }} /
+              {{ poiProbeResult.provider_protocol }} / {{ poiProbeResult.wire_api }}
+            </p>
+            <p class="llm-demo-meta">
+              <strong>{{ copy.operationLabel }}:</strong> {{ poiProbeResult.prompt_version }} /
+              {{ poiProbeResult.latency_ms }}ms / {{ poiProbeResult.payload_bytes }} bytes
+            </p>
+            <p v-if="poiProbeResult.parse_error" class="llm-demo-error">{{ poiProbeResult.parse_error }}</p>
+            <p v-for="warning in poiProbeResult.warnings" :key="warning" class="llm-demo-error">{{ warning }}</p>
+
+            <p class="llm-demo-section-title">{{ copy.poiSearchTitle }}</p>
+            <pre>{{ formatPrettyJson(poiProbeResult.search) }}</pre>
+
+            <p class="llm-demo-section-title">{{ copy.poiFeaturedPoisTitle }}</p>
+            <div v-if="poiFeaturedPois.length === 0" class="llm-demo-empty">{{ copy.poiFeaturedPoisEmpty }}</div>
+            <article v-for="poi in poiFeaturedPois" :key="`${poi.name || 'poi'}-${poi.area || ''}`" class="llm-demo-hit">
+              <strong>{{ poi.name || "-" }}</strong>
+              <p v-if="formatPoiMeta(poi)" class="llm-demo-meta">{{ formatPoiMeta(poi) }}</p>
+              <p v-if="poi.reason">{{ poi.reason }}</p>
+              <p v-if="formatPoiEvidence(poi)" class="llm-demo-meta">{{ formatPoiEvidence(poi) }}</p>
+              <small v-if="formatStringList(poi.source_urls)">{{ formatStringList(poi.source_urls) }}</small>
+            </article>
+
+            <details>
+              <summary>{{ copy.poiParsedJsonTitle }}</summary>
+              <pre>{{ formatPrettyJson(poiProbeResult.parsed_json) }}</pre>
+            </details>
+            <details>
+              <summary>{{ copy.poiSystemPromptTitle }}</summary>
+              <pre>{{ poiProbeResult.system_prompt }}</pre>
+            </details>
+            <details>
+              <summary>{{ copy.poiPromptPayloadTitle }}</summary>
+              <pre>{{ formatPrettyJson(poiProbeResult.prompt_payload) }}</pre>
+            </details>
+            <details>
+              <summary>{{ copy.poiRawTextTitle }}</summary>
+              <pre>{{ poiProbeResult.raw_text }}</pre>
+            </details>
           </div>
         </section>
 
@@ -1686,6 +2052,16 @@ function formatPrettyJson(value: unknown): string {
         <section class="llm-demo-panel">
           <h2>{{ copy.searchResponseTitle }}</h2>
           <pre>{{ searchRawResponse || copy.searchResponseEmpty }}</pre>
+        </section>
+
+        <section class="llm-demo-panel">
+          <h2>{{ copy.poiRequestTitle }}</h2>
+          <pre>{{ poiProbeRawRequest || copy.poiRequestEmpty }}</pre>
+        </section>
+
+        <section class="llm-demo-panel">
+          <h2>{{ copy.poiResponseTitle }}</h2>
+          <pre>{{ poiProbeRawResponse || copy.poiResponseEmpty }}</pre>
         </section>
 
         <section class="llm-demo-panel">

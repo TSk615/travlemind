@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
+from datetime import date
 from time import perf_counter
 from typing import Any
 
@@ -11,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from travelmind_api.agents.helloagents import HelloAgentsOrchestrator, HelloAgentsPoiGrounding
 from travelmind_api.api.schemas.common import success_response
 from travelmind_api.api.schemas.llm import LlmConnectionTestRequest, LlmConnectionTestResponse, LlmModelsRequest, LlmProxyRequest
 from travelmind_api.core.config import get_settings
@@ -18,9 +20,11 @@ from travelmind_api.core.deps import get_current_user
 from travelmind_api.core.env import get_env
 from travelmind_api.core.upstream_urls import UpstreamUrlError, normalize_upstream_base_url
 from travelmind_api.db.models import User
+from travelmind_api.prompts import build_poi_specialist_prompt
 from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
 from travelmind_api.services.llm.config import default_base_url_for_protocol, normalize_provider_protocol, normalize_wire_api
 from travelmind_api.services.llm.models import fetch_llm_models
+from travelmind_api.services.llm.user_config import build_user_poi_role_overrides
 from travelmind_api.services.search_connector import (
     ConfiguredSearchGateway,
     DEFAULT_IMAGE_INCLUDE_DOMAINS,
@@ -46,6 +50,26 @@ class SearchProxyRequest(LlmProxyRequest):
 class SearchImageProxyRequest(SearchProxyRequest):
     preferred_tool: str | None = None
     fetch_top_n: int = 3
+
+
+class PoiSpecialistProbeRequest(LlmProxyRequest):
+    search_provider: str | None = Field(default=None, max_length=64)
+    search_transport: str | None = Field(default=None, max_length=64)
+    search_base_url: str | None = Field(default=None, max_length=512)
+    search_api_key: str | None = Field(default=None, max_length=4096)
+    search_timeout_seconds: float | None = Field(default=None, gt=0, le=300)
+    destination: str = Field(min_length=1, max_length=255)
+    origin: str | None = Field(default="", max_length=255)
+    start_date: str | None = Field(default="", max_length=32)
+    end_date: str | None = Field(default="", max_length=32)
+    budget: float | None = Field(default=None, ge=0)
+    travelers: int = Field(default=2, ge=1, le=20)
+    interests: list[str] = Field(default_factory=list, max_length=20)
+    accommodation_preference: str | None = Field(default="", max_length=255)
+    pace: str | None = Field(default="balanced", max_length=64)
+    transport_mode: str | None = Field(default="", max_length=64)
+    user_input: str | None = Field(default="", max_length=4000)
+    use_search: bool = True
 
 
 class TavilyImagesProxyRequest(LlmProxyRequest):
@@ -111,6 +135,7 @@ def _resolve_proxy_config(payload: LlmProxyRequest, user: User) -> LlmConfig:
         "api_key": payload.api_key or user.llm_api_key,
         "model": upstream_payload.get("model") or user.llm_model,
         "wire_api": payload.wire_api or _infer_wire_api(upstream_payload, user),
+        "role_overrides": build_user_poi_role_overrides(user),
     }
     config = LlmConfig.from_mapping(merged)
     if config is None:
@@ -121,15 +146,25 @@ def _resolve_proxy_config(payload: LlmProxyRequest, user: User) -> LlmConfig:
     return config.model_copy(update={"base_url": _validate_upstream_base_url(config.base_url)})
 
 
+def _normalize_llm_settings_scope(scope: str | None) -> str:
+    return "poi" if str(scope or "").strip().lower() == "poi" else "agent"
+
+
+def _saved_llm_value(user: User, scope: str, field: str) -> Any:
+    prefix = "poi_llm" if scope == "poi" else "llm"
+    return getattr(user, f"{prefix}_{field}", None)
+
+
 def _resolve_connection_test_config(payload: LlmConnectionTestRequest, user: User) -> LlmConfig:
-    provider_protocol = normalize_provider_protocol(payload.provider_protocol or getattr(user, "llm_provider_protocol", None))
+    scope = _normalize_llm_settings_scope(payload.scope)
+    provider_protocol = normalize_provider_protocol(payload.provider_protocol or _saved_llm_value(user, scope, "provider_protocol"))
     config = LlmConfig.from_mapping(
         {
             "provider_protocol": provider_protocol,
-            "base_url": payload.base_url or getattr(user, "llm_base_url", None) or default_base_url_for_protocol(provider_protocol),
-            "api_key": payload.api_key or getattr(user, "llm_api_key", None),
-            "model": payload.model or getattr(user, "llm_model", None),
-            "wire_api": payload.wire_api or getattr(user, "llm_wire_api", None),
+            "base_url": payload.base_url or _saved_llm_value(user, scope, "base_url") or default_base_url_for_protocol(provider_protocol),
+            "api_key": payload.api_key or _saved_llm_value(user, scope, "api_key"),
+            "model": payload.model or _saved_llm_value(user, scope, "model"),
+            "wire_api": payload.wire_api or _saved_llm_value(user, scope, "wire_api"),
             "timeout_seconds": payload.timeout_seconds or 30.0,
         }
     )
@@ -492,6 +527,235 @@ def _limit_tavily_raw_result_images(raw: dict[str, Any], limit: int = _TAVILY_IM
     return limited
 
 
+def _normalize_poi_probe_interests(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        candidate = str(value or "").strip()
+        key = candidate.casefold()
+        if not candidate or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(candidate)
+    return normalized[:12]
+
+
+def _parse_probe_date(value: str | None) -> date | None:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    try:
+        return date.fromisoformat(candidate)
+    except ValueError:
+        return None
+
+
+def _calculate_probe_trip_days(start_date: str | None, end_date: str | None) -> int:
+    start = _parse_probe_date(start_date)
+    end = _parse_probe_date(end_date)
+    if start is None or end is None or end < start:
+        return 3
+    return max(1, (end - start).days + 1)
+
+
+def _build_poi_probe_input_payload(payload: PoiSpecialistProbeRequest) -> dict[str, Any]:
+    destination = str(payload.destination or "").strip()
+    interests = _normalize_poi_probe_interests(payload.interests)
+    trip_days = _calculate_probe_trip_days(payload.start_date, payload.end_date)
+    pace = str(payload.pace or "balanced").strip() or "balanced"
+    transport = str(payload.transport_mode or "").strip()
+    accommodation = str(payload.accommodation_preference or "").strip()
+    user_input = str(payload.user_input or "").strip()
+    budget_band = "unknown" if payload.budget is None else "user_provided"
+    title = f"{destination} POI 专家测试"
+
+    trip_request = {
+        "trip_id": "llm-demo-poi-specialist",
+        "title": title,
+        "origin": str(payload.origin or "").strip(),
+        "destination": destination,
+        "start_date": str(payload.start_date or "").strip(),
+        "end_date": str(payload.end_date or "").strip(),
+        "trip_days": trip_days,
+        "budget": payload.budget,
+        "travelers": payload.travelers,
+        "interests": interests,
+        "accommodation_preference": accommodation,
+        "pace": pace,
+        "transport_mode": transport,
+        "raw_user_input": user_input,
+    }
+    planning_brief = {
+        "destination": destination,
+        "trip_days": trip_days,
+        "budget_band": budget_band,
+        "budget_is_hard_constraint": False,
+        "budget_priority": "POI 测试阶段只记录价格证据，不做最终预算分配。",
+        "allow_budget_flex": True,
+        "pace": pace,
+        "must_have": interests,
+        "avoid": [],
+        "transport": transport,
+        "accommodation": accommodation,
+        "interests": interests,
+        "planning_constraints": ["这里只测试 POI 发现，不生成最终行程。", "价格、评分、评论数缺少搜索证据时写 unknown。"],
+        "raw_user_input": user_input,
+    }
+    return {
+        "trip_request": trip_request,
+        "planning_brief": planning_brief,
+        "poi_context": {
+            "budget": payload.budget,
+            "travelers": payload.travelers,
+            "pace": pace,
+            "interests": interests,
+            "must_have": interests,
+            "avoid": [],
+            "food_interests": interests,
+        },
+    }
+
+
+def _resolve_poi_probe_search_config(payload: PoiSpecialistProbeRequest, user: User) -> SearchServiceConfig | None:
+    merged = {
+        "provider": payload.search_provider or getattr(user, "search_service_provider", None),
+        "transport": payload.search_transport or getattr(user, "search_service_transport", None),
+        "base_url": payload.search_base_url or getattr(user, "search_service_base_url", None),
+        "api_key": payload.search_api_key or getattr(user, "search_service_api_key", None),
+        "timeout_seconds": payload.search_timeout_seconds or getattr(user, "search_service_timeout_seconds", None),
+    }
+    config = SearchServiceConfig.from_mapping(merged)
+    if config is None:
+        return None
+    return config.model_copy(update={"base_url": _validate_upstream_base_url(config.base_url)})
+
+
+def _parse_probe_json_text(raw_text: str) -> tuple[dict[str, Any] | None, str | None]:
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                parsed = json.loads(text[start : end + 1])
+            except json.JSONDecodeError as nested_exc:
+                return None, str(nested_exc)
+        else:
+            return None, str(exc)
+    if not isinstance(parsed, dict):
+        return None, "POI specialist response JSON root was not an object."
+    return parsed, None
+
+
+def _resolve_probe_temperature(payload: dict[str, Any]) -> float:
+    try:
+        temperature = float(payload.get("temperature", 0.2))
+    except (TypeError, ValueError):
+        return 0.2
+    return min(max(temperature, 0.0), 2.0)
+
+
+def _resolve_probe_max_tokens(payload: dict[str, Any]) -> int:
+    raw = payload.get("max_tokens") or payload.get("max_output_tokens") or 6000
+    try:
+        max_tokens = int(raw)
+    except (TypeError, ValueError):
+        return 6000
+    return min(max(max_tokens, 512), 16000)
+
+
+def _collect_poi_probe_tool_results(
+    payload: PoiSpecialistProbeRequest,
+    current_user: User,
+    input_payload: dict[str, Any],
+    orchestrator: HelloAgentsOrchestrator,
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    del current_user, input_payload, orchestrator
+    search_meta: dict[str, Any] = {
+        "enabled": False,
+        "requested": bool(payload.use_search),
+        "configured": False,
+        "skipped": True,
+        "reason": "POI specialist probe skips external search-service injection; use the configured POI model's native search if it supports it, and return compact evidence only.",
+        "native_search_allowed": True,
+        "external_tool_collection": False,
+        "tool_result_keys": [],
+        "citations": [],
+    }
+    warnings = [search_meta["reason"]] if payload.use_search else []
+    return {}, search_meta, warnings
+
+
+@router.post("/poi-specialist-probe")
+def probe_poi_specialist(payload: PoiSpecialistProbeRequest, current_user: User = Depends(get_current_user)):
+    llm_config = _resolve_proxy_config(payload, current_user)
+    llm_config = llm_config.model_copy(update={"timeout_seconds": max(float(llm_config.timeout_seconds), 300.0)})
+    orchestrator = HelloAgentsOrchestrator(None)
+    input_payload = _build_poi_probe_input_payload(payload)
+    tool_results, search_meta, warnings = _collect_poi_probe_tool_results(payload, current_user, input_payload, orchestrator)
+    enriched_payload = dict(input_payload)
+    if tool_results:
+        enriched_payload["tool_results"] = tool_results
+    prompt_payload = orchestrator._build_role_prompt_payload(enriched_payload, role_name="poi_specialist")
+    prompt_payload_json = json.dumps(prompt_payload, ensure_ascii=False)
+
+    prompt = build_poi_specialist_prompt()
+    system_prompt = f"{prompt.system_prompt} 请使用简体中文输出。Target output locale: zh-CN."
+    started = perf_counter()
+    try:
+        raw_text = OpenAICompatibleClient(llm_config).create_chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt_payload_json},
+            ],
+            temperature=_resolve_probe_temperature(payload.payload),
+            max_tokens=_resolve_probe_max_tokens(payload.payload),
+            stream=True,
+        )
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "poi_specialist_probe_upstream_failed", "message": f"POI specialist request failed with upstream status {status_code}."},
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "poi_specialist_probe_failed", "message": str(exc) or "POI specialist probe failed."},
+        ) from exc
+
+    parsed_json, parse_error = _parse_probe_json_text(raw_text)
+    if parsed_json is not None:
+        try:
+            parsed_json = HelloAgentsPoiGrounding.model_validate(parsed_json).model_dump(mode="json")
+        except Exception:
+            pass
+    return success_response(
+        {
+            "prompt_version": prompt.version,
+            "system_prompt": system_prompt,
+            "model": llm_config.model,
+            "provider_protocol": llm_config.provider_protocol,
+            "wire_api": llm_config.wire_api,
+            "latency_ms": int((perf_counter() - started) * 1000),
+            "payload_bytes": len(prompt_payload_json.encode("utf-8")),
+            "input_snapshot": enriched_payload,
+            "prompt_payload": prompt_payload,
+            "search": search_meta,
+            "warnings": warnings,
+            "citations": search_meta.get("citations", []),
+            "raw_text": raw_text,
+            "parsed_json": parsed_json,
+            "parse_error": parse_error,
+        }
+    )
+
+
 @router.post("/proxy")
 def proxy_llm_request(payload: LlmProxyRequest, current_user: User = Depends(get_current_user)):
     config = _resolve_proxy_config(payload, current_user)
@@ -537,15 +801,16 @@ def proxy_llm_request(payload: LlmProxyRequest, current_user: User = Depends(get
 
 @router.post("/models")
 def list_llm_models(payload: LlmModelsRequest, current_user: User = Depends(get_current_user)):
-    provider_protocol = normalize_provider_protocol(payload.provider_protocol or getattr(current_user, "llm_provider_protocol", None))
-    api_key = str(payload.api_key or getattr(current_user, "llm_api_key", None) or "").strip()
+    scope = _normalize_llm_settings_scope(payload.scope)
+    provider_protocol = normalize_provider_protocol(payload.provider_protocol or _saved_llm_value(current_user, scope, "provider_protocol"))
+    api_key = str(payload.api_key or _saved_llm_value(current_user, scope, "api_key") or "").strip()
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "llm_models_api_key_required", "message": "Provide or save an API key before fetching models."},
         )
     base_url = _validate_upstream_base_url(
-        str(payload.base_url or getattr(current_user, "llm_base_url", None) or default_base_url_for_protocol(provider_protocol)).strip().rstrip("/")
+        str(payload.base_url or _saved_llm_value(current_user, scope, "base_url") or default_base_url_for_protocol(provider_protocol)).strip().rstrip("/")
     )
     timeout_seconds = float(payload.timeout_seconds or 30.0)
     try:
@@ -576,6 +841,7 @@ def list_llm_models(payload: LlmModelsRequest, current_user: User = Depends(get_
 
 @router.post("/test")
 def test_llm_connection(payload: LlmConnectionTestRequest, current_user: User = Depends(get_current_user)):
+    scope = _normalize_llm_settings_scope(payload.scope)
     config = _resolve_connection_test_config(payload, current_user)
     started = perf_counter()
     try:
@@ -583,6 +849,7 @@ def test_llm_connection(payload: LlmConnectionTestRequest, current_user: User = 
             messages=[{"role": "user", "content": "Reply with exactly: ok"}],
             temperature=0,
             max_tokens=16,
+            stream=scope == "poi",
         )
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code if exc.response is not None else 502

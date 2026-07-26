@@ -14,6 +14,7 @@ class LlmProxyRequest(BaseModel):
 
 
 class LlmModelsRequest(BaseModel):
+    scope: str | None = Field(default=None, max_length=32)
     provider_protocol: str | None = Field(default=None, max_length=64)
     base_url: str | None = Field(default=None, max_length=512)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -21,6 +22,7 @@ class LlmModelsRequest(BaseModel):
 
 
 class LlmConnectionTestRequest(BaseModel):
+    scope: str | None = Field(default=None, max_length=32)
     provider_protocol: str | None = Field(default=None, max_length=64)
     base_url: str | None = Field(default=None, max_length=512)
     api_key: str | None = Field(default=None, max_length=4096)

@@ -1,10 +1,12 @@
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, inspect, text
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from travelmind_api.core.database import Base, engine
+from travelmind_api.core.credentials import EncryptedCredential
+from travelmind_api.core.database import Base
 
 
 def utcnow() -> datetime:
@@ -21,19 +23,24 @@ class User(Base):
     locale: Mapped[str] = mapped_column(String(16), default="zh-CN")
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     llm_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    llm_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_api_key: Mapped[str | None] = mapped_column(EncryptedCredential(), nullable=True)
     llm_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     llm_wire_api: Mapped[str | None] = mapped_column(String(64), nullable=True)
     llm_provider_protocol: Mapped[str | None] = mapped_column(String(64), nullable=True)
     llm_agent_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    poi_llm_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    poi_llm_api_key: Mapped[str | None] = mapped_column(EncryptedCredential(), nullable=True)
+    poi_llm_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    poi_llm_wire_api: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    poi_llm_provider_protocol: Mapped[str | None] = mapped_column(String(64), nullable=True)
     image_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    image_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_api_key: Mapped[str | None] = mapped_column(EncryptedCredential(), nullable=True)
     image_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     image_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     search_service_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     search_service_transport: Mapped[str | None] = mapped_column(String(32), nullable=True)
     search_service_base_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    search_service_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    search_service_api_key: Mapped[str | None] = mapped_column(EncryptedCredential(), nullable=True)
     search_service_timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=30.0)
     xhs_source_enabled: Mapped[bool] = mapped_column(default=False)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -93,7 +100,7 @@ class Trip(Base):
     destination: Mapped[str] = mapped_column(String(255), nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
-    budget: Mapped[float] = mapped_column(Float, nullable=False)
+    budget: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     travelers: Mapped[int] = mapped_column(nullable=False, default=1)
     interests: Mapped[list[str]] = mapped_column(JSON, default=list)
     accommodation_preference: Mapped[str] = mapped_column(Text, default="")
@@ -136,6 +143,10 @@ class CommunityPost(Base):
 
 class JobRecord(Base):
     __tablename__ = "job_records"
+    __table_args__ = (
+        Index("ix_job_records_idempotency", "owner_user_id", "type", "idempotency_key", unique=True),
+        Index("ix_job_records_recovery", "status", "heartbeat_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
     type: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -149,6 +160,12 @@ class JobRecord(Base):
     stage_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     progress_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     timeline_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -194,151 +211,3 @@ class AdminAuditLog(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     details_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-# Lightweight SQLite compatibility for local developer databases created before
-# the LLM config fields existed. Fresh databases still rely on create_all().
-def _ensure_sqlite_user_columns() -> None:
-    if engine.dialect.name != "sqlite":
-        return
-
-    with engine.begin() as conn:
-        inspector = inspect(conn)
-        if "users" not in inspector.get_table_names():
-            return
-
-        existing_columns = {column["name"] for column in inspector.get_columns("users")}
-        statements: list[str] = []
-        if "llm_base_url" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN llm_base_url VARCHAR(512)")
-        if "llm_api_key" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN llm_api_key TEXT")
-        if "llm_model" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN llm_model VARCHAR(255)")
-        if "llm_wire_api" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN llm_wire_api VARCHAR(64)")
-        if "llm_provider_protocol" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN llm_provider_protocol VARCHAR(64)")
-        if "llm_agent_provider" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN llm_agent_provider VARCHAR(64)")
-        if "image_base_url" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN image_base_url VARCHAR(512)")
-        if "image_api_key" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN image_api_key TEXT")
-        if "image_model" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN image_model VARCHAR(255)")
-        if "image_provider" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN image_provider VARCHAR(64)")
-        if "search_service_provider" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN search_service_provider VARCHAR(64)")
-        if "search_service_transport" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN search_service_transport VARCHAR(32)")
-        if "search_service_base_url" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN search_service_base_url VARCHAR(512)")
-        if "search_service_api_key" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN search_service_api_key TEXT")
-        if "search_service_timeout_seconds" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN search_service_timeout_seconds FLOAT NOT NULL DEFAULT 30")
-        if "xhs_source_enabled" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN xhs_source_enabled BOOLEAN NOT NULL DEFAULT 0")
-        if "disabled_at" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN disabled_at DATETIME")
-        if "disabled_reason" not in existing_columns:
-            statements.append("ALTER TABLE users ADD COLUMN disabled_reason TEXT")
-
-        for statement in statements:
-            conn.execute(text(statement))
-
-
-_ensure_sqlite_user_columns()
-
-
-def _ensure_sqlite_trip_columns() -> None:
-    if engine.dialect.name != "sqlite":
-        return
-
-    with engine.begin() as conn:
-        inspector = inspect(conn)
-        if "trips" not in inspector.get_table_names():
-            return
-
-        existing_columns = {column["name"] for column in inspector.get_columns("trips")}
-        statements: list[str] = []
-        if "origin" not in existing_columns:
-            statements.append("ALTER TABLE trips ADD COLUMN origin VARCHAR(255) NOT NULL DEFAULT ''")
-
-        for statement in statements:
-            conn.execute(text(statement))
-
-
-_ensure_sqlite_trip_columns()
-
-
-def _ensure_sqlite_trip_refine_sessions_table() -> None:
-    if engine.dialect.name != "sqlite":
-        return
-
-    with engine.begin() as conn:
-        inspector = inspect(conn)
-        if "trip_refine_sessions" in inspector.get_table_names():
-            return
-
-        conn.execute(
-            text(
-                """
-                CREATE TABLE trip_refine_sessions (
-                    id VARCHAR(32) NOT NULL PRIMARY KEY,
-                    trip_id VARCHAR(32) NOT NULL,
-                    user_id VARCHAR(32) NOT NULL,
-                    messages_json JSON NOT NULL,
-                    uploaded_guides_json JSON NOT NULL,
-                    community_sources_json JSON NOT NULL,
-                    created_at DATETIME,
-                    updated_at DATETIME,
-                    UNIQUE (trip_id),
-                    FOREIGN KEY(trip_id) REFERENCES trips (id),
-                    FOREIGN KEY(user_id) REFERENCES users (id)
-                )
-                """
-            )
-        )
-        conn.execute(text("CREATE INDEX ix_trip_refine_sessions_trip_id ON trip_refine_sessions (trip_id)"))
-        conn.execute(text("CREATE INDEX ix_trip_refine_sessions_user_id ON trip_refine_sessions (user_id)"))
-
-
-_ensure_sqlite_trip_refine_sessions_table()
-
-
-def _ensure_sqlite_admin_audit_logs_table() -> None:
-    if engine.dialect.name != "sqlite":
-        return
-
-    with engine.begin() as conn:
-        inspector = inspect(conn)
-        if "admin_audit_logs" in inspector.get_table_names():
-            return
-
-        conn.execute(
-            text(
-                """
-                CREATE TABLE admin_audit_logs (
-                    id VARCHAR(32) NOT NULL PRIMARY KEY,
-                    admin_user_id VARCHAR(32) NOT NULL,
-                    admin_email_snapshot VARCHAR(255) NOT NULL,
-                    action VARCHAR(64) NOT NULL,
-                    target_type VARCHAR(64) NOT NULL,
-                    target_id VARCHAR(64) NOT NULL,
-                    reason TEXT NOT NULL,
-                    details_json JSON NOT NULL,
-                    created_at DATETIME
-                )
-                """
-            )
-        )
-        conn.execute(text("CREATE INDEX ix_admin_audit_logs_admin_user_id ON admin_audit_logs (admin_user_id)"))
-        conn.execute(text("CREATE INDEX ix_admin_audit_logs_action ON admin_audit_logs (action)"))
-        conn.execute(text("CREATE INDEX ix_admin_audit_logs_target_type ON admin_audit_logs (target_type)"))
-        conn.execute(text("CREATE INDEX ix_admin_audit_logs_target_id ON admin_audit_logs (target_id)"))
-
-
-_ensure_sqlite_admin_audit_logs_table()

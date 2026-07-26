@@ -1,13 +1,16 @@
 ﻿services:
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    restart: unless-stopped
     ports:
       - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
 
   postgres:
-    profiles: ["postgres"]
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-travelmind}
       POSTGRES_USER: ${POSTGRES_USER:-travelmind}
@@ -16,6 +19,11 @@
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-travelmind} -d ${POSTGRES_DB:-travelmind}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   api:
     build:
@@ -26,17 +34,35 @@
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     environment:
-      TRAVELMIND_DATABASE_URL: sqlite:////app/storage/travelmind.db
+      TRAVELMIND_ENVIRONMENT: ${TRAVELMIND_ENVIRONMENT:-development}
+      TRAVELMIND_DATABASE_URL: ${TRAVELMIND_COMPOSE_DATABASE_URL:-postgresql+psycopg://travelmind:travelmind@postgres:5432/travelmind}
       TRAVELMIND_EXPORT_ROOT: /app/storage/exports
       TRAVELMIND_JWT_SECRET: ${TRAVELMIND_JWT_SECRET:-travelmind-dev-secret-change-me-32-bytes-minimum}
+      TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY: ${TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY:-travelmind-dev-credential-key-change-me-32-bytes}
+      TRAVELMIND_COOKIE_SECURE: ${TRAVELMIND_COOKIE_SECURE:-false}
+      TRAVELMIND_COOKIE_SAMESITE: ${TRAVELMIND_COOKIE_SAMESITE:-lax}
+      TRAVELMIND_CSRF_ENABLED: ${TRAVELMIND_CSRF_ENABLED:-true}
+      TRAVELMIND_RATE_LIMIT_ENABLED: ${TRAVELMIND_RATE_LIMIT_ENABLED:-true}
+      TRAVELMIND_RATE_LIMIT_BACKEND: ${TRAVELMIND_RATE_LIMIT_BACKEND:-redis}
+      TRAVELMIND_JOB_MAX_ATTEMPTS: ${TRAVELMIND_JOB_MAX_ATTEMPTS:-3}
+      TRAVELMIND_JOB_TIMEOUT_SECONDS: ${TRAVELMIND_JOB_TIMEOUT_SECONDS:-900}
+      TRAVELMIND_JOB_RETRY_BASE_SECONDS: ${TRAVELMIND_JOB_RETRY_BASE_SECONDS:-5}
+      TRAVELMIND_JOB_HEARTBEAT_SECONDS: ${TRAVELMIND_JOB_HEARTBEAT_SECONDS:-15}
+      TRAVELMIND_JOB_STALE_AFTER_SECONDS: ${TRAVELMIND_JOB_STALE_AFTER_SECONDS:-120}
+      TRAVELMIND_JOB_RESULT_TTL_SECONDS: ${TRAVELMIND_JOB_RESULT_TTL_SECONDS:-86400}
       TRAVELMIND_QUEUE_MODE: arq
       TRAVELMIND_REDIS_URL: redis://redis:6379/0
       TRAVELMIND_AGENT_PROVIDER: ${TRAVELMIND_AGENT_PROVIDER:-stub}
       TRAVELMIND_PUBLIC_API_URL: ${TRAVELMIND_PUBLIC_API_URL:-http://localhost:8000}
       TRAVELMIND_CORS_ORIGINS: >-
         ${TRAVELMIND_CORS_ORIGINS:-["http://127.0.0.1:5173","http://localhost:5173","http://127.0.0.1:3000","http://localhost:3000"]}
+      TRAVELMIND_UPSTREAM_PRIVATE_URL_POLICY: ${TRAVELMIND_UPSTREAM_PRIVATE_URL_POLICY:-loopback}
+      TRAVELMIND_UPSTREAM_URL_ALLOWED_HOSTS: ${TRAVELMIND_UPSTREAM_URL_ALLOWED_HOSTS:-groksearch-bridge,host.docker.internal}
       TRAVELMIND_SEARCH_SERVICE_PROVIDER: ${TRAVELMIND_SEARCH_SERVICE_PROVIDER:-groksearch}
       TRAVELMIND_SEARCH_SERVICE_TRANSPORT: ${TRAVELMIND_SEARCH_SERVICE_TRANSPORT:-mcp}
       TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL: ${TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL:-http://groksearch-bridge:8085/mcp}
@@ -53,6 +79,11 @@
       - "${API_PORT:-8000}:8000"
     volumes:
       - storage-data:/app/storage
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   worker:
     build:
@@ -63,17 +94,31 @@
         PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     environment:
-      TRAVELMIND_DATABASE_URL: sqlite:////app/storage/travelmind.db
+      TRAVELMIND_ENVIRONMENT: ${TRAVELMIND_ENVIRONMENT:-development}
+      TRAVELMIND_DATABASE_URL: ${TRAVELMIND_COMPOSE_DATABASE_URL:-postgresql+psycopg://travelmind:travelmind@postgres:5432/travelmind}
       TRAVELMIND_EXPORT_ROOT: /app/storage/exports
       TRAVELMIND_JWT_SECRET: ${TRAVELMIND_JWT_SECRET:-travelmind-dev-secret-change-me-32-bytes-minimum}
+      TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY: ${TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY:-travelmind-dev-credential-key-change-me-32-bytes}
+      TRAVELMIND_JOB_MAX_ATTEMPTS: ${TRAVELMIND_JOB_MAX_ATTEMPTS:-3}
+      TRAVELMIND_JOB_TIMEOUT_SECONDS: ${TRAVELMIND_JOB_TIMEOUT_SECONDS:-900}
+      TRAVELMIND_JOB_RETRY_BASE_SECONDS: ${TRAVELMIND_JOB_RETRY_BASE_SECONDS:-5}
+      TRAVELMIND_JOB_HEARTBEAT_SECONDS: ${TRAVELMIND_JOB_HEARTBEAT_SECONDS:-15}
+      TRAVELMIND_JOB_STALE_AFTER_SECONDS: ${TRAVELMIND_JOB_STALE_AFTER_SECONDS:-120}
+      TRAVELMIND_JOB_RESULT_TTL_SECONDS: ${TRAVELMIND_JOB_RESULT_TTL_SECONDS:-86400}
+      TRAVELMIND_WORKER_MAX_JOBS: ${TRAVELMIND_WORKER_MAX_JOBS:-8}
       TRAVELMIND_QUEUE_MODE: arq
       TRAVELMIND_REDIS_URL: redis://redis:6379/0
       TRAVELMIND_AGENT_PROVIDER: ${TRAVELMIND_AGENT_PROVIDER:-stub}
       TRAVELMIND_PUBLIC_API_URL: ${TRAVELMIND_PUBLIC_API_URL:-http://localhost:8000}
       TRAVELMIND_CORS_ORIGINS: >-
         ${TRAVELMIND_CORS_ORIGINS:-["http://127.0.0.1:5173","http://localhost:5173","http://127.0.0.1:3000","http://localhost:3000"]}
+      TRAVELMIND_UPSTREAM_PRIVATE_URL_POLICY: ${TRAVELMIND_UPSTREAM_PRIVATE_URL_POLICY:-loopback}
+      TRAVELMIND_UPSTREAM_URL_ALLOWED_HOSTS: ${TRAVELMIND_UPSTREAM_URL_ALLOWED_HOSTS:-groksearch-bridge,host.docker.internal}
       TRAVELMIND_SEARCH_SERVICE_PROVIDER: ${TRAVELMIND_SEARCH_SERVICE_PROVIDER:-groksearch}
       TRAVELMIND_SEARCH_SERVICE_TRANSPORT: ${TRAVELMIND_SEARCH_SERVICE_TRANSPORT:-mcp}
       TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL: ${TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL:-http://groksearch-bridge:8085/mcp}
@@ -88,6 +133,8 @@
       TRAVELMIND_XHS_MAX_RESULTS: ${TRAVELMIND_XHS_MAX_RESULTS:-10}
     volumes:
       - storage-data:/app/storage
+    restart: unless-stopped
+    stop_grace_period: 30s
 
   xhs-crawler:
     profiles: ["xhs"]
@@ -148,6 +195,7 @@
       - "${WEB_PORT:-3000}:80"
 
 volumes:
+  redis-data:
   postgres-data:
   storage-data:
   xhs-crawler-data:

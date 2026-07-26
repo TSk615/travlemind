@@ -59,7 +59,7 @@ watch(
     jobGuard.clearActiveJob()
 
     try {
-      if (typeof window !== "undefined") {
+      if (typeof window !== "undefined" && route.name !== "login") {
         window.alert(sessionExpiredMessage.value)
       }
 

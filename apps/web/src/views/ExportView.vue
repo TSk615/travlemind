@@ -6,6 +6,7 @@ import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
 import { api, getErrorMessage, type JobRecord } from "@/lib/api"
 import { formatDateTime } from "@/lib/format"
+import { isJobActive } from "@/lib/jobStatus"
 import { useI18n } from "@/lib/useI18n"
 
 const route = useRoute()
@@ -133,7 +134,7 @@ function clampProgress(value?: number | null, status?: string): number {
 }
 
 function formatProgress(value?: number | null, status?: string): string {
-  if (typeof value === "number" || status === "queued" || status === "running" || status === "completed") {
+  if (typeof value === "number" || isJobActive(status) || status === "completed") {
     return `${clampProgress(value, status)}%`
   }
 
@@ -232,7 +233,7 @@ async function load(initial = false) {
   try {
     job.value = await api.getJob(jobId.value)
 
-    if (job.value.status === "queued" || job.value.status === "running") {
+    if (isJobActive(job.value.status)) {
       stopPolling()
       timer = window.setTimeout(() => {
         void load()
@@ -337,7 +338,7 @@ onBeforeUnmount(() => {
       />
 
       <StatePanel
-        v-if="job.status === 'queued' || job.status === 'running'"
+        v-if="isJobActive(job.status)"
         kind="loading"
         :title="t('exportView.runningTitle')"
         :message="refreshing ? t('exportView.runningPolling') : t('exportView.runningWaiting')"
@@ -416,7 +417,7 @@ onBeforeUnmount(() => {
       </div>
 
       <StatePanel
-        v-else-if="job.status !== 'queued' && job.status !== 'running' && job.status !== 'failed'"
+        v-else-if="!isJobActive(job.status) && job.status !== 'failed'"
         kind="empty"
         :title="t('exportView.emptyTitle')"
         :message="t('exportView.emptyMessage')"

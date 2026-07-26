@@ -58,7 +58,7 @@ def _wait_for_job(client: TestClient, job_id: str) -> dict:
         response = client.get(f"/api/v1/jobs/{job_id}")
         assert response.status_code == 200
         payload = response.json()["data"]
-        if payload["status"] in {"completed", "failed"}:
+        if payload["status"] in {"completed", "failed", "cancelled"}:
             return payload
         time.sleep(0.1)
     assert payload is not None
@@ -92,7 +92,7 @@ def _fake_helloagents_module(*, failing_role: str | None = None):
                         "planning_constraints": ["keep sequencing realistic"],
                     }
                 )
-            if self.name == "attraction_specialist":
+            if self.name in {"attraction_specialist", "poi_specialist"}:
                 return json.dumps(
                     {
                         "candidate_areas": ["Higashiyama", "Downtown Kyoto", "Arashiyama"],
@@ -120,7 +120,13 @@ def _fake_helloagents_module(*, failing_role: str | None = None):
                     {
                         "recommended_areas": ["Downtown Kyoto", "Higashiyama"],
                         "hotel_candidates": [
-                            {"name": "Downtown Kyoto Hotel", "area": "Downtown Kyoto", "reason": "Balanced access to food and transit.", "price_hint": "moderate"}
+                            {
+                                "name": "Downtown Kyoto Hotel",
+                                "area": "Downtown Kyoto",
+                                "reason": "Balanced access to food and transit.",
+                                "price_hint": "moderate",
+                                "source_urls": ["https://hotel.example.test/downtown-kyoto"],
+                            }
                         ],
                         "stay_strategy": ["Prefer one transit-friendly base for the whole trip."],
                         "budget_notes": ["Keep the hotel near the nightly target budget band."],
@@ -150,7 +156,7 @@ def _fake_helloagents_module(*, failing_role: str | None = None):
                     }
                 )
             if self.name == "itinerary_planner":
-                assert "attractions" in prompt
+                assert "poi_collection" in prompt
                 assert "weather" in prompt
                 assert "hotels" in prompt
                 assert "transport" in prompt
@@ -240,6 +246,8 @@ def test_trip_generation_and_export_flow(client: TestClient):
     assert markdown_response.status_code == 200
     assert markdown_response.headers["content-type"].startswith("text/")
     assert "# " in markdown_response.text
+    # stay_recommendation rendering is covered by test_export_service.py: the
+    # stub generation chain used here does not produce stay data.
 
     json_response = client.get(urlparse(artifact_map["json"]["file_url"]).path)
     assert json_response.status_code == 200
@@ -320,11 +328,13 @@ def test_trip_generation_uses_helloagents_provider_when_selected(client: TestCli
     assert trip_detail.status_code == 200
     detail_payload = trip_detail.json()["data"]
     assert detail_payload["itinerary"]["days"]
+    assert detail_payload["itinerary"]["stay_recommendation"]["final_recommended_hotel"]["name"] == "Downtown Kyoto Hotel"
+    assert "Downtown Kyoto" in detail_payload["itinerary"]["stay_recommendation"]["recommended_areas"]
     assert detail_payload["latest_agent_trace"]["provider"] == "helloagents-poc"
     assert detail_payload["latest_agent_trace"]["license_notice"]
     agent_run_keys = {run["key"] for run in detail_payload["latest_agent_trace"]["agent_runs"]}
     assert len(detail_payload["latest_agent_trace"]["agent_runs"]) >= 7
-    assert detail_payload["latest_agent_trace"]["agent_runs"][1]["key"] in {"attraction_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
+    assert detail_payload["latest_agent_trace"]["agent_runs"][1]["key"] in {"attraction_specialist", "poi_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
     assert "attraction_image_specialist" in agent_run_keys
     assert "image_curator" not in agent_run_keys
     assert "image_reviewer" not in agent_run_keys
@@ -364,3 +374,187 @@ def test_trip_generation_job_fails_when_helloagents_role_fails(client: TestClien
     trip_detail = client.get(f"/api/v1/trips/{trip['id']}")
     assert trip_detail.status_code == 200
     assert trip_detail.json()["data"]["itinerary"] is None
+
+
+def test_failed_trip_generation_can_retry_from_failed_helloagents_node(client: TestClient, monkeypatch):
+    import travelmind_api.agents.helloagents as current_helloagents_module
+    from travelmind_api.agents.helloagents import HelloAgentsOrchestrator
+
+    calls: list[str] = []
+    weather_failed_once = {"done": False}
+
+    role_payloads = {
+        "brief_parser": {
+            "destination": "Kyoto",
+            "trip_days": 3,
+            "budget_band": "midrange",
+            "pace": "balanced",
+            "must_have": ["temples", "coffee"],
+            "avoid": ["overpacked transfers"],
+            "transport": "rail",
+            "accommodation": "Quiet boutique hotel",
+            "interests": ["temples", "coffee"],
+            "planning_constraints": ["keep sequencing realistic"],
+        },
+        "poi_specialist": {
+            "candidate_areas": ["Higashiyama", "Downtown Kyoto"],
+            "featured_pois": [
+                {"name": "Ginkaku-ji", "area": "Higashiyama", "reason": "Calm morning temple.", "suggested_time": "morning"},
+                {"name": "Nishiki Market", "area": "Downtown Kyoto", "reason": "Food focus.", "suggested_time": "midday"},
+            ],
+            "sequencing_hints": ["Group nearby sights in half-day blocks."],
+        },
+        "weather_specialist": {
+            "overall_outlook": "Cool mornings and mild afternoons.",
+            "daily_outlook": ["Day 1: cool.", "Day 2: mild.", "Day 3: comfortable."],
+            "packing_notes": ["Carry a light layer."],
+            "timing_guidance": ["Outdoor walks fit before late afternoon."],
+            "weather_risks": ["Light rain may affect walks."],
+        },
+        "hotel_specialist": {
+            "recommended_areas": ["Downtown Kyoto"],
+            "hotel_candidates": [
+                {
+                    "name": "Downtown Kyoto Hotel",
+                    "area": "Downtown Kyoto",
+                    "reason": "Balanced access.",
+                    "price_hint": "moderate",
+                    "source_urls": ["https://hotel.example.test/downtown-kyoto"],
+                }
+            ],
+            "stay_strategy": ["Use one transit-friendly base."],
+            "budget_notes": ["Keep hotel spend near target."],
+        },
+        "transport_specialist": {
+            "intercity_options": [
+                {
+                    "mode": "rail",
+                    "route": "Osaka to Kyoto Station",
+                    "duration_hint": "about 30 minutes",
+                    "price_hint": "moderate",
+                    "booking_window": "Reserve during peak periods",
+                    "reason": "Fast practical transfer.",
+                }
+            ],
+            "arrival_strategy": ["Align arrival with hotel area."],
+            "local_mobility_strategy": ["Use rail or subway first."],
+            "pass_or_ticket_notes": ["Use point-to-point tickets."],
+            "budget_notes": ["Keep local transport modest."],
+            "transport_risks": ["Peak-hour trains may be crowded."],
+            "sequencing_constraints": ["Keep departure-day stops near rail."],
+            "estimated_intercity_cost": 320,
+            "estimated_local_transport_cost": 60,
+        },
+        "itinerary_planner": {
+            "summary": "Three Kyoto days resumed from a failed weather node.",
+            "total_budget_estimate": 4700,
+            "risks": ["Popular sites may require early arrival."],
+            "days": [
+                {
+                    "title": "Day 1 | East Kyoto",
+                    "summary": "Temple-heavy first day.",
+                    "total_cost": 1500,
+                    "items": [
+                        {"type": "sight", "name": "Ginkaku-ji", "start_time": "09:00", "end_time": "11:00", "location": "Kyoto", "score": 0.9, "note": "Start calm."}
+                    ],
+                },
+                {
+                    "title": "Day 2 | Central Kyoto",
+                    "summary": "Market and river.",
+                    "total_cost": 1600,
+                    "items": [
+                        {"type": "meal", "name": "Nishiki Market", "start_time": "10:00", "end_time": "12:00", "location": "Kyoto", "score": 0.84, "note": "Food crawl."}
+                    ],
+                },
+                {
+                    "title": "Day 3 | Arashiyama",
+                    "summary": "Scenic finish.",
+                    "total_cost": 1600,
+                    "items": [
+                        {"type": "sight", "name": "Arashiyama Bamboo Grove", "start_time": "08:30", "end_time": "10:30", "location": "Kyoto", "score": 0.88, "note": "Arrive early."}
+                    ],
+                },
+            ],
+        },
+    }
+
+    def fake_run_role(self, *, module, role_config, llm_config, input_payload):
+        role_name = role_config.role_name
+        calls.append(role_name)
+        if role_name == "weather_specialist" and not weather_failed_once["done"]:
+            weather_failed_once["done"] = True
+            raise RuntimeError("forced upstream failure for weather_specialist")
+        return json.dumps(role_payloads[role_name])
+
+    monkeypatch.setattr(current_helloagents_module, "import_module", lambda _: object())
+    monkeypatch.setattr(HelloAgentsOrchestrator, "_run_role", fake_run_role)
+
+    _register(client)
+    settings_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "base_url": "https://api.example.test/v1",
+            "api_key": "test-key",
+            "model": "gpt-5.4",
+            "wire_api": "responses",
+            "agent_provider": "helloagents",
+        },
+    )
+    assert settings_response.status_code == 200, settings_response.text
+
+    trip = _create_trip(client)
+    generate_response = client.post(f"/api/v1/trips/{trip['id']}/generate")
+    assert generate_response.status_code == 200, generate_response.text
+    failed_job = _wait_for_job(client, generate_response.json()["data"]["job_id"])
+    assert failed_job["status"] == "failed"
+    assert failed_job["can_resume"] is True
+    assert failed_job["resume_failed_role"] == "weather_specialist"
+    assert failed_job["result"]["resume_completed_roles"] == ["brief_parser", "poi_specialist"]
+
+    retry_response = client.post(f"/api/v1/jobs/{failed_job['job_id']}/retry")
+    assert retry_response.status_code == 200, retry_response.text
+    retry_job = _wait_for_job(client, retry_response.json()["data"]["job_id"])
+    assert retry_job["status"] == "completed"
+
+    assert calls.count("brief_parser") == 1
+    assert calls.count("poi_specialist") == 1
+    assert calls.count("weather_specialist") == 2
+    assert calls.count("hotel_specialist") == 1
+    assert calls.count("transport_specialist") == 1
+    assert calls.count("itinerary_planner") == 1
+
+    trip_detail = client.get(f"/api/v1/trips/{trip['id']}")
+    assert trip_detail.status_code == 200
+    assert trip_detail.json()["data"]["itinerary"]["summary"] == "Three Kyoto days resumed from a failed weather node."
+
+
+def test_failed_trip_generation_without_checkpoint_cannot_retry(client: TestClient):
+    from travelmind_api.core.database import SessionLocal
+    from travelmind_api.services.job_service import create_job, update_job_state
+
+    _register(client)
+    trip = _create_trip(client)
+
+    with SessionLocal() as session:
+        job = create_job(
+            session,
+            job_type="trip.generate",
+            owner_user_id=trip["user_id"],
+            trip_id=trip["id"],
+            payload={"trip_id": trip["id"]},
+        )
+        update_job_state(
+            session,
+            job.id,
+            status="failed",
+            stage="route_planning",
+            stage_message="Legacy failure without checkpoint.",
+            error_message="Legacy failure without checkpoint.",
+            set_finished=True,
+        )
+        session.commit()
+        job_id = job.id
+
+    retry_response = client.post(f"/api/v1/jobs/{job_id}/retry")
+    assert retry_response.status_code == 409
+    assert retry_response.json()["error"]["code"] == "job_resume_checkpoint_missing"

@@ -11,7 +11,8 @@
   "scripts": {
     "dev:web": "npm run dev --workspace @travelmind/web",
     "build:web": "npm run build --workspace @travelmind/web",
+    "test:web:unit": "npm run test:unit --workspace @travelmind/web",
+    "test:web:e2e": "npm run test:e2e --workspace @travelmind/web",
     "preview:web": "npm run preview --workspace @travelmind/web"
   }
 }
-

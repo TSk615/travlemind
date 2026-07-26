@@ -14,14 +14,15 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir --default-timeout=${PIP_DEFAULT_TIMEOUT} uv
 
-COPY apps/worker/pyproject.toml /app/apps/worker/pyproject.toml
-
-RUN uv sync --project /app/apps/worker --no-install-project
-
 COPY apps/api /app/apps/api
+COPY apps/worker/pyproject.toml /app/apps/worker/pyproject.toml
+COPY apps/worker/uv.lock /app/apps/worker/uv.lock
+
+RUN uv sync --frozen --no-dev --project /app/apps/worker --no-install-project
+
 COPY apps/worker /app/apps/worker
 
-RUN uv sync --project /app/apps/worker
+RUN uv sync --frozen --no-dev --project /app/apps/worker
 
 FROM python:3.11-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1

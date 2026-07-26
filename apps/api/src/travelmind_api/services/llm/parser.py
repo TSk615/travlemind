@@ -1,9 +1,60 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+_TIME_VALUE_RE = re.compile(r"^\s*(\d{1,2})\s*[:\uff1a]\s*(\d{1,2})\s*$")
+_DURATION_RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:-|~|\u2013|\u2014|\u81f3|\u5230)\s*(\d+(?:\.\d+)?)")
+_DURATION_VALUE_RE = re.compile(r"(\d+(?:\.\d+)?)")
+_DAY_START_MINUTES = 9 * 60
+_DEFAULT_ITEM_DURATION_MINUTES = 90
+_MIN_ITEM_DURATION_MINUTES = 30
+_MAX_ITEM_DURATION_MINUTES = 6 * 60
+_ITEM_GAP_MINUTES = 30
+_LAST_MINUTE_OF_DAY = 23 * 60 + 59
+_LATEST_FALLBACK_START_MINUTES = 22 * 60
+_TIME_HINTS: tuple[tuple[tuple[str, ...], int], ...] = (
+    (("check-in", "check in", "\u5165\u4f4f"), 15 * 60),
+    (("check-out", "check out", "\u79bb\u5e97", "\u9000\u623f"), 11 * 60),
+    (("\u665a\u4e0a", "\u591c", "night", "evening"), 19 * 60),
+    (("\u508d\u665a", "\u9ec4\u660f", "dusk"), 17 * 60 + 30),
+    (("\u4e0b\u5348", "afternoon"), 14 * 60),
+    (("\u4e2d\u5348", "\u5348\u9910", "noon", "lunch"), 12 * 60),
+    (("\u4e0a\u5348", "\u65e9\u4e0a", "\u65e9\u6668", "\u6e05\u6668", "morning", "breakfast"), 9 * 60),
+)
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().casefold()
+    if normalized in {"1", "true", "yes", "y", "required", "needed", "need", "must", "timed", "advance"}:
+        return True
+    if normalized in {
+        "",
+        "0",
+        "false",
+        "no",
+        "n",
+        "not_required",
+        "not required",
+        "not_needed",
+        "not needed",
+        "none",
+        "null",
+        "unknown",
+        "unsure",
+        "unclear",
+        "n/a",
+        "na",
+    }:
+        return False
+    return default
 
 
 class LlmPlanItem(BaseModel):
@@ -48,6 +99,11 @@ class LlmBookingInfo(BaseModel):
         except (TypeError, ValueError):
             return None
 
+    @field_validator("booking_required", "reservation_required", mode="before")
+    @classmethod
+    def normalize_bool(cls, value: Any) -> bool:
+        return _coerce_bool(value, default=False)
+
 
 class LlmVisitRequirements(BaseModel):
     reservation_policy: str | None = None
@@ -55,6 +111,11 @@ class LlmVisitRequirements(BaseModel):
     identity_required: bool = False
     advance_booking_note: str | None = None
     notes: list[str] = Field(default_factory=list)
+
+    @field_validator("timed_entry", "identity_required", mode="before")
+    @classmethod
+    def normalize_bool(cls, value: Any) -> bool:
+        return _coerce_bool(value, default=False)
 
 
 class LlmTransportBookingSummary(BaseModel):
@@ -77,6 +138,11 @@ class LlmTransportBookingSummary(BaseModel):
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+    @field_validator("booking_required", mode="before")
+    @classmethod
+    def normalize_bool(cls, value: Any) -> bool:
+        return _coerce_bool(value, default=False)
 
 
 class LlmPlanDay(BaseModel):
@@ -107,11 +173,160 @@ class PlanningResponseValidationError(ValueError):
 
 def parse_planning_response(content: str) -> LlmPlanningPayload:
     raw_payload = _extract_json_payload(content)
+    raw_payload = _normalize_planning_payload_times(raw_payload)
     try:
         return LlmPlanningPayload.model_validate(raw_payload)
     except ValidationError as exc:
         raise PlanningResponseValidationError(str(exc)) from exc
 
+
+def _normalize_planning_payload_times(payload: dict[str, Any]) -> dict[str, Any]:
+    days = payload.get("days")
+    if not isinstance(days, list):
+        return payload
+
+    for day in days:
+        if not isinstance(day, dict):
+            continue
+        _normalize_day_item_times(day.get("items"))
+    return payload
+
+
+def _normalize_day_item_times(items: Any) -> None:
+    if not isinstance(items, list):
+        return
+
+    cursor = _DAY_START_MINUTES
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        raw_start = item.get("start_time")
+        raw_end = item.get("end_time")
+        start = _parse_time_minutes(raw_start)
+        end = _parse_time_minutes(raw_end)
+        start_is_explicit = _parse_explicit_time_minutes(raw_start) is not None
+        end_is_explicit = _parse_explicit_time_minutes(raw_end) is not None
+
+        if start is None:
+            start = cursor
+        elif not start_is_explicit and start < cursor:
+            start = cursor
+
+        if end is None:
+            end = start + (_parse_duration_minutes(raw_end) or _DEFAULT_ITEM_DURATION_MINUTES)
+        elif end <= start:
+            end = start + (_parse_duration_minutes(raw_end) or _MIN_ITEM_DURATION_MINUTES)
+        elif not end_is_explicit and end < cursor:
+            end = start + (_parse_duration_minutes(raw_end) or _DEFAULT_ITEM_DURATION_MINUTES)
+
+        start, end = _fit_time_window(start, end)
+        item["start_time"] = _format_time_minutes(start)
+        item["end_time"] = _format_time_minutes(end)
+        if _should_preserve_original_timing(raw_start) or _should_preserve_original_timing(raw_end):
+            _append_original_timing_note(item, raw_start, raw_end)
+
+        cursor = min(end + _ITEM_GAP_MINUTES, _LATEST_FALLBACK_START_MINUTES)
+
+
+def _parse_time_minutes(value: Any) -> int | None:
+    explicit = _parse_explicit_time_minutes(value)
+    if explicit is not None:
+        return explicit
+    if _is_empty_value(value):
+        return None
+
+    text = str(value).strip().casefold()
+    if not text:
+        return None
+    for keywords, minutes in _TIME_HINTS:
+        if any(keyword in text for keyword in keywords):
+            return minutes
+    return None
+
+
+def _parse_explicit_time_minutes(value: Any) -> int | None:
+    if _is_empty_value(value):
+        return None
+    match = _TIME_VALUE_RE.match(str(value))
+    if match is None:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def _parse_duration_minutes(value: Any) -> int | None:
+    if _is_empty_value(value):
+        return None
+
+    text = str(value).strip().casefold()
+    if not text:
+        return None
+
+    has_duration_unit = any(marker in text for marker in ("min", "minute", "hour", "\u5206", "\u5c0f\u65f6"))
+    range_match = _DURATION_RANGE_RE.search(text)
+    if range_match is not None:
+        amount = max(float(range_match.group(1)), float(range_match.group(2)))
+    elif has_duration_unit:
+        value_match = _DURATION_VALUE_RE.search(text)
+        if value_match is None:
+            return None
+        amount = float(value_match.group(1))
+    else:
+        return None
+
+    multiplier = 60 if any(marker in text for marker in ("hour", "\u5c0f\u65f6")) else 1
+    minutes = int(round(amount * multiplier))
+    return max(_MIN_ITEM_DURATION_MINUTES, min(_MAX_ITEM_DURATION_MINUTES, minutes))
+
+
+def _fit_time_window(start: int, end: int) -> tuple[int, int]:
+    start = max(0, min(_LAST_MINUTE_OF_DAY, int(start)))
+    end = max(0, min(_LAST_MINUTE_OF_DAY, int(end)))
+    if end > start:
+        return start, end
+
+    if start >= _LAST_MINUTE_OF_DAY:
+        start = _LAST_MINUTE_OF_DAY - _MIN_ITEM_DURATION_MINUTES
+    end = min(_LAST_MINUTE_OF_DAY, start + _MIN_ITEM_DURATION_MINUTES)
+    if end <= start:
+        start = max(0, end - _MIN_ITEM_DURATION_MINUTES)
+    return start, end
+
+
+def _format_time_minutes(minutes: int) -> str:
+    minutes = max(0, min(_LAST_MINUTE_OF_DAY, int(minutes)))
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _should_preserve_original_timing(value: Any) -> bool:
+    if _is_empty_value(value):
+        return False
+    text = str(value).strip()
+    return bool(text) and _parse_explicit_time_minutes(text) is None
+
+
+def _is_empty_value(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _append_original_timing_note(item: dict[str, Any], raw_start: Any, raw_end: Any) -> None:
+    hints = []
+    if _should_preserve_original_timing(raw_start):
+        hints.append(f"start_time={raw_start}")
+    if _should_preserve_original_timing(raw_end):
+        hints.append(f"end_time={raw_end}")
+    if not hints:
+        return
+
+    note = item.get("note")
+    note_text = note.strip() if isinstance(note, str) else str(note).strip() if note is not None else ""
+    timing_note = f"Original timing hint: {'; '.join(hints)}."
+    if timing_note not in note_text:
+        item["note"] = f"{note_text} {timing_note}".strip()
 
 
 def _extract_json_payload(content: str) -> dict[str, Any]:
@@ -154,7 +369,6 @@ def _unwrap_nested_itinerary_payload(payload: dict[str, Any]) -> dict[str, Any]:
             return nested_itinerary
 
     return payload
-
 
 
 def _strip_code_fences(content: str) -> str:

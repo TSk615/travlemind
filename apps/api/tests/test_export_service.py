@@ -14,12 +14,19 @@ from travelmind_api.agents.base import (
     PlannedItem,
     PlanningRequest,
     PlanningResult,
+    StayHotelCandidate,
+    StayRecommendation,
     TransportBookingSummary,
     VisitRequirements,
 )
 from travelmind_api.core.config import Settings
 from travelmind_api.services.budgeting import enrich_plan_with_budget
-from travelmind_api.services.export_service import _build_export_document, write_export_bundle, write_pdf_export
+from travelmind_api.services.export_service import (
+    _build_export_document,
+    _render_markdown,
+    write_export_bundle,
+    write_pdf_export,
+)
 
 
 def _build_request() -> PlanningRequest:
@@ -235,6 +242,50 @@ def test_build_export_document_maps_trip_structure_into_sections():
     assert "第二天下午短时阵雨可能影响河边停留。" in view.risks
     assert any("预算上限" in risk or "预算" in risk for risk in view.risks)
     assert any(field.label == "生成链路" and field.value == "stub" for field in view.metadata_fields)
+
+
+def test_export_document_and_markdown_include_stay_recommendation():
+    request = _build_request()
+    plan = _build_plan(request)
+    plan.stay_recommendation = StayRecommendation(
+        recommended_areas=["下京区", "东山区"],
+        final_recommended_hotel=StayHotelCandidate(
+            name="四条河原町酒店",
+            area="下京区",
+            hotel_type="精品酒店",
+            reason="步行可达地铁与锦市场。",
+            price_hint="每晚约 1200 CNY",
+            review_score="4.6",
+            review_count="2100+ 条评价",
+            preference_match="符合安静町屋旅馆偏好，且交通便利。",
+        ),
+        hotel_candidates=[
+            StayHotelCandidate(name="东山庭院旅馆", area="东山区", price_hint="每晚约 950 CNY", reason="靠近清水寺。"),
+        ],
+        stay_strategy=["全程住同一家，减少搬运行李。"],
+        budget_notes=["房价占预算约三成。"],
+    )
+    draft = ExportDraft(title=request.title, subtitle="京都 3 天游览手册", sections=[])
+
+    view = _build_export_document(
+        job_id="job_pdf_test",
+        request=request,
+        plan=plan,
+        draft=draft,
+        exported_at=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+        file_url="http://testserver/exports/files/job_pdf_test.pdf",
+    )
+
+    assert view.stay_title == "住宿推荐"
+    assert any(field.value == "四条河原町酒店" for field in view.stay_fields)
+    assert any("下京区" in field.value for field in view.stay_fields)
+    assert any("全程住同一家" in note for note in view.stay_highlights)
+    assert any("东山庭院旅馆" in line for line in view.stay_candidates)
+
+    markdown = _render_markdown(view).decode("utf-8")
+    assert "住宿推荐" in markdown
+    assert "四条河原町酒店" in markdown
+    assert "东山庭院旅馆" in markdown
 
 
 def test_write_pdf_export_generates_multi_page_pdf_with_cjk_font():

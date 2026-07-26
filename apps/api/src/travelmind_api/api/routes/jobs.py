@@ -3,15 +3,16 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.common import success_response
+from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import SessionLocal, get_db
 from travelmind_api.core.deps import get_current_user
 from travelmind_api.db.models import User
-from travelmind_api.services.job_service import TERMINAL_JOB_STATUSES, get_job, serialize_job
+from travelmind_api.services.job_service import TERMINAL_JOB_STATUSES, cancel_job, create_job, dispatch_job, extract_resume_checkpoint, get_job, serialize_job
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -25,6 +26,75 @@ def get_job_endpoint(job_id: str, db: Session = Depends(get_db), current_user: U
     job = get_job(db, job_id, current_user.id)
     if not job:
         raise _job_not_found_exception()
+    return success_response(serialize_job(job).model_dump(mode="json"))
+
+
+@router.post("/{job_id}/retry")
+def retry_failed_job_endpoint(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    current_user: User = Depends(get_current_user),
+):
+    job = get_job(db, job_id, current_user.id)
+    if not job:
+        raise _job_not_found_exception()
+    if job.type != "trip.generate":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "job_retry_unsupported", "message": "Only failed trip generation jobs can be retried from a checkpoint."},
+        )
+    if job.status != "failed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "job_not_failed", "message": "Only failed jobs can be retried from the last failed node."},
+        )
+    checkpoint = extract_resume_checkpoint(job)
+    if checkpoint is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "job_resume_checkpoint_missing", "message": "This failed job does not have a resume checkpoint. Start a new generation instead."},
+        )
+    if not job.trip_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "job_trip_missing", "message": "Cannot retry a generation job without an associated trip."},
+        )
+
+    source_payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    retry_payload = {
+        key: value
+        for key, value in source_payload.items()
+        if key not in {"resume_checkpoint", "resume_from_job_id"}
+    }
+    retry_payload.update(
+        {
+            "trip_id": job.trip_id,
+            "resume_from_job_id": job.id,
+            "resume_checkpoint": checkpoint,
+        }
+    )
+    retry_job = create_job(
+        db,
+        job_type="trip.generate",
+        owner_user_id=current_user.id,
+        trip_id=job.trip_id,
+        payload=retry_payload,
+        idempotency_key=idempotency_key,
+    )
+    dispatch_job(retry_job.id, settings, background_tasks)
+    return success_response(serialize_job(retry_job).model_dump(mode="json"))
+
+
+@router.post("/{job_id}/cancel")
+def cancel_job_endpoint(job_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    job = cancel_job(db, job_id, current_user.id)
+    if not job:
+        raise _job_not_found_exception()
+    db.commit()
+    db.refresh(job)
     return success_response(serialize_job(job).model_dump(mode="json"))
 
 

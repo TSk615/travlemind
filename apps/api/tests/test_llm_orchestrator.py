@@ -8,11 +8,22 @@ import travelmind_api.agents.helloagents as helloagents_module
 
 from travelmind_api.agents.base import PlanningRequest, PlanningResult
 from travelmind_api.agents.factory import build_orchestrator
-from travelmind_api.agents.helloagents import HelloAgentsOrchestrator
+from travelmind_api.agents.helloagents import (
+    HelloAgentsHotelCandidate,
+    HelloAgentsHotelRecommendation,
+    HelloAgentsOrchestrator,
+    HelloAgentsPoiGrounding,
+    HelloAgentsRoleConfig,
+)
 from travelmind_api.agents.openai_compatible import OpenAICompatibleOrchestrator
 from travelmind_api.agents.stub import StubOrchestrator
 from travelmind_api.api.schemas.search import ScoreBreakdown, SearchDocumentResponse
 from travelmind_api.core.config import Settings
+from travelmind_api.prompts.roles.helloagents import (
+    build_hotel_specialist_prompt,
+    build_poi_specialist_prompt,
+    build_weather_specialist_prompt,
+)
 from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
 from travelmind_api.services.llm.parser import parse_planning_response
 from travelmind_api.services.maps import StubMapsPoiProvider
@@ -160,6 +171,70 @@ def test_openai_compatible_client_supports_multimodal_chat_payload():
     payload = captured["payload"]
     assert payload["messages"][0]["content"][0] == {"type": "text", "text": "Candidate c1 metadata."}
     assert payload["messages"][0]["content"][1] == {"type": "image_url", "image_url": {"url": "https://cdn.example.test/c1.jpg"}}
+
+
+def test_openai_compatible_client_supports_streaming_chat_completions_payload():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(transport=transport)
+    client = OpenAICompatibleClient(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="chat_completions"),
+        http_client=http_client,
+    )
+
+    try:
+        response = client.create_chat_completion(
+            messages=[{"role": "user", "content": "hello"}],
+            stream=True,
+        )
+    finally:
+        http_client.close()
+
+    assert response == "hello"
+    assert captured["payload"]["stream"] is True
+
+
+def test_openai_compatible_client_forces_streaming_for_grok_models():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(transport=transport)
+    client = OpenAICompatibleClient(
+        LlmConfig(base_url="https://poi.example.test/v1", api_key="test-key", model="grok-4.20-multi-agent-medium", wire_api="chat_completions"),
+        http_client=http_client,
+    )
+
+    try:
+        response = client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert response == "ok"
+    assert captured["payload"]["stream"] is True
 
 
 
@@ -782,6 +857,41 @@ def test_openai_compatible_orchestrator_retries_responses_with_streaming_after_4
     assert captured_payloads[1]["stream"] is True
 
 
+def test_openai_compatible_client_retries_responses_504_with_streaming():
+    captured_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        captured_payloads.append(payload)
+        if len(captured_payloads) == 1:
+            return httpx.Response(504, json={"error": {"message": "Gateway Timeout"}})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"type":"response.output_text.delta","delta":"stream"}\n\n'
+                'data: {"type":"response.output_text.delta","delta":" ok"}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(transport=transport)
+    client = OpenAICompatibleClient(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        http_client=http_client,
+    )
+
+    try:
+        response = client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert response == "stream ok"
+    assert captured_payloads[0]["stream"] is False
+    assert captured_payloads[1]["stream"] is True
+
+
 def test_openai_compatible_orchestrator_retries_streaming_once_after_eof():
     captured_payloads: list[dict[str, object]] = []
 
@@ -894,6 +1004,48 @@ def test_openai_compatible_orchestrator_retries_streaming_once_after_eof():
     assert captured_payloads[2]["stream"] is True
 
 
+def test_openai_compatible_client_retries_streaming_once_after_http2_internal_error():
+    captured_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        captured_payloads.append(payload)
+        if len(captured_payloads) == 1:
+            raise httpx.ReadError(
+                "Failed to perform, curl: (92) HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR (err 2).",
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"choices":[{"delta":{"content":"retry"}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":" ok"}}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    http_client = httpx.Client(transport=transport)
+    client = OpenAICompatibleClient(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
+        http_client=http_client,
+    )
+
+    try:
+        response = client.create_chat_completion(
+            messages=[{"role": "user", "content": "hello"}],
+            stream=True,
+        )
+    finally:
+        http_client.close()
+
+    assert response == "retry ok"
+    assert len(captured_payloads) == 2
+    assert captured_payloads[0]["stream"] is True
+    assert captured_payloads[1]["stream"] is True
+
+
 def test_helloagents_compatible_llm_retries_once_after_transport_error(monkeypatch):
     class FakeClient:
         def __init__(self, config):
@@ -919,6 +1071,221 @@ def test_helloagents_compatible_llm_retries_once_after_transport_error(monkeypat
 
     assert result.content == "retry succeeded"
     assert llm._client.calls == 2
+
+
+def test_helloagents_compatible_llm_retries_stream_rate_limit_error_event(monkeypatch):
+    class FakeClient:
+        def __init__(self, config):
+            del config
+            self.calls = 0
+            self.stream_values: list[bool] = []
+
+        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
+            del messages, temperature, max_tokens
+            self.calls += 1
+            self.stream_values.append(stream)
+            if self.calls == 1:
+                raise ValueError("Chat Completions stream returned an error event: Console API returned 429")
+            return "retry succeeded"
+
+    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
+    monkeypatch.setattr(helloagents_module.time, "sleep", lambda seconds: None)
+    llm = helloagents_module.HelloAgentsCompatibleLLM(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
+        retry_attempts=2,
+        stream=True,
+    )
+
+    result = llm.invoke([{"role": "user", "content": "hello"}])
+
+    assert result.content == "retry succeeded"
+    assert llm._client.calls == 2
+    assert llm._client.stream_values == [True, True]
+
+
+def test_helloagents_compatible_llm_uses_extended_rate_limit_retries(monkeypatch):
+    class FakeClient:
+        def __init__(self, config):
+            del config
+            self.calls = 0
+            self.stream_values: list[bool] = []
+
+        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
+            del messages, temperature, max_tokens
+            self.calls += 1
+            self.stream_values.append(stream)
+            if self.calls <= 5:
+                raise ValueError("Chat Completions stream returned an error event: Console API returned 429")
+            return "retry succeeded"
+
+    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
+    monkeypatch.setattr(helloagents_module.time, "sleep", lambda seconds: None)
+    llm = helloagents_module.HelloAgentsCompatibleLLM(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
+        retry_attempts=2,
+        stream=True,
+    )
+
+    result = llm.invoke([{"role": "user", "content": "hello"}])
+
+    assert result.content == "retry succeeded"
+    assert llm._client.calls == 6
+    assert llm._client.stream_values == [True, True, True, True, True, True]
+    assert llm.kwargs["retry_attempts"] == 2
+    assert llm.kwargs["rate_limit_retry_attempts"] == 6
+
+
+def test_helloagents_compatible_llm_retries_stream_http2_transport_error_event(monkeypatch):
+    class FakeClient:
+        def __init__(self, config):
+            del config
+            self.calls = 0
+            self.stream_values: list[bool] = []
+
+        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
+            del messages, temperature, max_tokens
+            self.calls += 1
+            self.stream_values.append(stream)
+            if self.calls == 1:
+                raise ValueError(
+                    "Chat Completions stream returned an error event: Console transport failed: "
+                    "Transport request failed: Failed to perform, curl: (92) HTTP/2 stream 1 "
+                    "was not closed cleanly: INTERNAL_ERROR (err 2)."
+                )
+            return "retry succeeded"
+
+    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
+    monkeypatch.setattr(helloagents_module.time, "sleep", lambda seconds: None)
+    llm = helloagents_module.HelloAgentsCompatibleLLM(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
+        retry_attempts=2,
+        stream=True,
+    )
+
+    result = llm.invoke([{"role": "user", "content": "hello"}])
+
+    assert result.content == "retry succeeded"
+    assert llm._client.calls == 2
+    assert llm._client.stream_values == [True, True]
+
+
+def test_helloagents_compatible_llm_does_not_retry_non_rate_limit_value_error(monkeypatch):
+    class FakeClient:
+        def __init__(self, config):
+            del config
+            self.calls = 0
+
+        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
+            del messages, temperature, max_tokens, stream
+            self.calls += 1
+            raise ValueError("Chat Completions stream did not contain assistant text")
+
+    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
+    llm = helloagents_module.HelloAgentsCompatibleLLM(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
+        retry_attempts=2,
+        stream=True,
+    )
+
+    with pytest.raises(ValueError, match="did not contain assistant text"):
+        llm.invoke([{"role": "user", "content": "hello"}])
+
+    assert llm._client.calls == 1
+
+
+def test_helloagents_compatible_llm_can_disable_retry_for_fast_fallback(monkeypatch):
+    class FakeClient:
+        def __init__(self, config):
+            del config
+            self.calls = 0
+
+        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None):
+            del messages, temperature, max_tokens
+            self.calls += 1
+            raise httpx.TimeoutException("timed out", request=httpx.Request("POST", "https://llm.example.test/v1/responses"))
+
+    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
+    llm = helloagents_module.HelloAgentsCompatibleLLM(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        retry_attempts=1,
+        max_tokens=3200,
+    )
+
+    with pytest.raises(httpx.TimeoutException):
+        llm.invoke([{"role": "user", "content": "hello"}])
+
+    assert llm._client.calls == 1
+    assert llm.kwargs["retry_attempts"] == 1
+    assert llm.kwargs["max_tokens"] == 3200
+
+
+def test_helloagents_compatible_llm_can_force_streaming(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            del config
+
+        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
+            del messages, temperature, max_tokens
+            captured["stream"] = stream
+            return "stream succeeded"
+
+    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
+    llm = helloagents_module.HelloAgentsCompatibleLLM(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        stream=True,
+    )
+
+    result = llm.invoke([{"role": "user", "content": "hello"}])
+
+    assert result.content == "stream succeeded"
+    assert captured["stream"] is True
+    assert llm.kwargs["stream"] is True
+
+
+def test_helloagents_run_role_disables_third_party_trace_output():
+    captured: dict[str, object] = {}
+
+    class FakeConfig:
+        def __init__(self, trace_enabled=True, **kwargs):
+            captured["trace_enabled"] = trace_enabled
+            captured["config_kwargs"] = kwargs
+            self.trace_enabled = trace_enabled
+
+    class FakeSimpleAgent:
+        def __init__(self, *, name, llm, system_prompt, config=None, **kwargs):
+            del name, llm, system_prompt, kwargs
+            captured["agent_config"] = config
+
+        def run(self, prompt):
+            assert "trip_request" in prompt
+            return '{"destination":"Kyoto","trip_days":2,"budget_band":"midrange","budget_is_hard_constraint":true,"budget_priority":"","allow_budget_flex":false,"pace":"balanced","must_have":[],"avoid":[],"transport":"rail","accommodation":"","interests":[],"planning_constraints":[]}'
+
+    fake_module = SimpleNamespace(SimpleAgent=FakeSimpleAgent, Config=FakeConfig)
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    response = orchestrator._run_role(
+        module=fake_module,
+        role_config=HelloAgentsRoleConfig(
+            role_name="brief_parser",
+            title="Brief parser",
+            description="test",
+            prompt_focus="test",
+            agent_class_name="SimpleAgent",
+            system_prompt="Return JSON only.",
+            prompt_version="test.v1",
+        ),
+        llm_config=LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        input_payload={"trip_request": {"destination": "Kyoto"}},
+    )
+
+    assert captured["trace_enabled"] is False
+    assert captured["agent_config"] is not None
+    assert '"destination":"Kyoto"' in response
 
 
 def test_build_orchestrator_returns_stub_without_llm_config(monkeypatch):
@@ -977,9 +1344,9 @@ def test_llm_config_supports_role_overrides_from_mapping():
             "model": "gpt-default",
             "wire_api": "responses",
             "role_overrides": {
-                "attraction_specialist": {
-                    "base_url": "https://attractions.example.test/v1",
-                    "model": "gpt-attractions",
+                "poi_specialist": {
+                    "base_url": "https://poi.example.test/v1",
+                    "model": "gpt-poi",
                 },
                 "hotel_specialist": {
                     "base_url": "https://hotels.example.test/v1",
@@ -991,11 +1358,108 @@ def test_llm_config_supports_role_overrides_from_mapping():
     )
 
     assert config is not None
-    assert config.config_for_role("attraction_specialist").base_url == "https://attractions.example.test/v1"
-    assert config.config_for_role("attraction_specialist").api_key == "default-key"
-    assert config.config_for_role("attraction_specialist").model == "gpt-attractions"
+    assert config.config_for_role("poi_specialist").base_url == "https://poi.example.test/v1"
+    assert config.config_for_role("poi_specialist").api_key == "default-key"
+    assert config.config_for_role("poi_specialist").model == "gpt-poi"
     assert config.config_for_role("weather_specialist").base_url == "https://default.example.test/v1"
     assert config.config_for_role("hotel_specialist").api_key == "hotel-key"
+
+
+def test_llm_config_uses_grok_env_for_direct_search_specialists(monkeypatch):
+    monkeypatch.setenv("GROK_API_URL", "https://api.x.ai/v1")
+    monkeypatch.setenv("GROK_API_KEY", "grok-key")
+    monkeypatch.setenv("GROK_MODEL", "grok-4.20-beta")
+
+    config = LlmConfig.from_mapping(
+        {
+            "base_url": "https://default.example.test/v1",
+            "api_key": "default-key",
+            "model": "gpt-default",
+            "wire_api": "responses",
+        }
+    )
+
+    assert config is not None
+    for role_name in ("weather_specialist", "hotel_specialist", "transport_specialist"):
+        role_config = config.config_for_role(role_name)
+        assert role_config.base_url == "https://api.x.ai/v1"
+        assert role_config.api_key == "grok-key"
+        assert role_config.model == "grok-4.20-beta"
+        assert role_config.provider_protocol == "newapi"
+        assert role_config.wire_api == "chat_completions"
+    assert config.config_for_role("poi_specialist").model == "gpt-default"
+
+
+def test_llm_config_can_source_poi_override_from_user_mapping():
+    config = LlmConfig.from_mapping(
+        {
+            "base_url": "https://default.example.test/v1",
+            "api_key": "default-key",
+            "model": "gpt-default",
+            "wire_api": "responses",
+            "provider_protocol": "openai",
+            "role_overrides": {
+                "poi_specialist": {
+                    "base_url": "https://poi.example.test/v1",
+                    "api_key": "poi-key",
+                    "model": "grok-4.20-multi-agent-xhigh",
+                    "wire_api": "chat_completions",
+                    "provider_protocol": "newapi",
+                }
+            },
+        }
+    )
+
+    assert config is not None
+    poi_config = config.config_for_role("poi_specialist")
+    assert poi_config.base_url == "https://poi.example.test/v1"
+    assert poi_config.api_key == "poi-key"
+    assert poi_config.model == "grok-4.20-multi-agent-xhigh"
+    assert poi_config.wire_api == "chat_completions"
+    assert poi_config.provider_protocol == "newapi"
+
+
+def test_user_poi_role_override_requires_complete_saved_settings():
+    from travelmind_api.services.llm.user_config import build_user_poi_role_overrides
+
+    user = SimpleNamespace(
+        poi_llm_base_url="https://old-poi.example.test/v1",
+        poi_llm_api_key="poi-key",
+        poi_llm_model=None,
+        poi_llm_wire_api="responses",
+        poi_llm_provider_protocol="openai",
+    )
+
+    assert build_user_poi_role_overrides(user) == {}
+
+    user.poi_llm_model = "grok-poi"
+    overrides = build_user_poi_role_overrides(user)
+    config = LlmConfig.from_mapping(
+        {
+            "base_url": "https://default.example.test/v1",
+            "api_key": "default-key",
+            "model": "gpt-default",
+            "wire_api": "responses",
+            "provider_protocol": "newapi",
+            "role_overrides": overrides,
+        }
+    )
+
+    assert config is not None
+    assert set(overrides) == {"poi_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
+    for role_name in ("poi_specialist", "hotel_specialist", "transport_specialist"):
+        role_config = config.config_for_role(role_name)
+        assert role_config.base_url == "https://old-poi.example.test/v1"
+        assert role_config.api_key == "poi-key"
+        assert role_config.model == "grok-poi"
+        assert role_config.wire_api == "responses"
+        assert role_config.provider_protocol == "openai"
+    weather_config = config.config_for_role("weather_specialist")
+    assert weather_config.base_url == "https://old-poi.example.test/v1"
+    assert weather_config.api_key == "poi-key"
+    assert weather_config.model == "grok-4.20-multi-agent-medium"
+    assert weather_config.wire_api == "responses"
+    assert weather_config.provider_protocol == "openai"
 
 
 
@@ -1060,17 +1524,26 @@ def _fake_helloagents_module(
                         "planning_constraints": ["keep sequencing realistic"],
                     }
                 )
-            if self.name == "attraction_specialist":
-                assert "candidate_attractions" in prompt
+            if self.name == "poi_specialist":
+                assert "poi_context" in prompt
+                assert "candidate_pois" not in prompt
+                assert "candidate_food_pois" not in prompt
+                assert "poi_request" not in prompt
                 return json.dumps(
                     {
                         "candidate_areas": ["Higashiyama", "Downtown Kyoto"],
                         "featured_pois": [
                             {
                                 "name": "Ginkaku-ji",
+                                "kind": "attraction",
+                                "category": "temple",
                                 "area": "Higashiyama",
                                 "reason": "Calm scenic morning.",
                                 "suggested_time": "morning",
+                                "confidence": "high",
+                                "source_urls": ["https://www.city.kyoto.lg.jp/official/ginkakuji"],
+                                "evidence_notes": ["Official ticket context is available."],
+                                "caveats": ["Peak foliage controls can change."],
                                 "booking_info": {
                                     "price_label": "Adult ticket around 500 JPY",
                                     "estimated_price": 25,
@@ -1089,26 +1562,133 @@ def _fake_helloagents_module(
                                     "advance_booking_note": "No reservation is usually needed, but peak seasonal controls can change.",
                                     "notes": ["Arrive early if limited-entry notices appear."],
                                 },
-                            }
+                            },
+                            {
+                                "name": "Lunch along Philosopher's Path",
+                                "kind": "food",
+                                "category": "cafe lunch",
+                                "area": "Higashiyama",
+                                "cuisine_or_type": "cafe lunch",
+                                "reason": "Works near the walking route.",
+                                "suggested_time": "lunch",
+                                "price_hint": "around 1,500 to 2,500 JPY per person from current search evidence",
+                                "price_checked_at": "current search snapshot",
+                                "price_valid_for": "2026-04-14, two travelers",
+                                "review_score": "4.3/5",
+                                "review_count": "500+",
+                                "review_summary": "Good location and relaxed lunch feedback.",
+                                "signature_dishes": ["coffee", "light lunch"],
+                                "reservation_hint": "unknown",
+                                "queue_hint": "short queue possible at lunch",
+                                "confidence": "medium",
+                                "caveats": ["Re-check opening hours before going."],
+                                "source_urls": ["https://food.example.test/philosopher-cafe"],
+                            },
+                            {
+                                "name": "Nishiki Market brunch",
+                                "kind": "market",
+                                "category": "market food",
+                                "area": "Downtown Kyoto",
+                                "cuisine_or_type": "market food",
+                                "reason": "Flexible food crawl.",
+                                "suggested_time": "brunch",
+                                "price_hint": "unknown",
+                                "price_checked_at": "unknown",
+                                "review_score": "unknown",
+                                "review_count": "unknown",
+                                "review_summary": "Popular food market; exact stall ratings vary.",
+                                "signature_dishes": ["snacks"],
+                                "reservation_hint": "not usually required",
+                                "queue_hint": "expect queues near noon",
+                                "confidence": "low",
+                                "caveats": ["Use unknown instead of invented exact ratings."],
+                                "source_urls": ["https://food.example.test/nishiki"],
+                            },
                         ],
                         "sequencing_hints": ["Keep East Kyoto stops together."],
                         "crowd_notes": ["Arrive early at the headline sights."],
-                        "attraction_risks": ["Long cross-city transfers will hurt pacing."],
+                        "meal_strategy": ["Anchor lunches near the attraction clusters."],
+                        "price_notes": ["Use unknown when source-backed prices are missing."],
+                        "review_notes": ["Use recent review signals over generic popularity."],
+                        "poi_risks": ["Long cross-city transfers will hurt pacing.", "Queues can affect meal timing."],
                     }
                 )
             if self.name == "weather_specialist":
                 assert "season_context" in prompt
+                assert "weather_segments" in prompt
                 return json.dumps(
                     {
                         "overall_outlook": "Cool mornings and mild afternoons with occasional light rain.",
                         "daily_outlook": ["Day 1: cool start, mild afternoon.", "Day 2: light rain risk after lunch."],
+                        "segments": [
+                            {
+                                "name": "Kyoto",
+                                "date_range": "2026-04-14 to 2026-04-15",
+                                "outlook": "Mild with light rain risk.",
+                                "temperature_range": "18 C to 24 C",
+                                "clothing_advice": ["Carry a light layer."],
+                                "outdoor_notes": ["Keep temple walks before late afternoon."],
+                                "risks": ["Light rain may affect exposed paths."],
+                            }
+                        ],
                         "packing_notes": ["Carry a light layer.", "Bring a compact umbrella."],
                         "timing_guidance": ["Outdoor walks fit best before late afternoon."],
                         "weather_risks": ["Light rain may affect exposed temple walks."],
                     }
                 )
+            if self.name == "food_specialist":
+                assert "candidate_food_pois" in prompt
+                return json.dumps(
+                    {
+                        "candidate_areas": ["Downtown Kyoto", "Nishiki Market"],
+                        "featured_pois": [
+                            {
+                                "name": "Lunch along Philosopher's Path",
+                                "area": "Higashiyama",
+                                "cuisine_or_type": "cafe lunch",
+                                "reason": "Works near the walking route.",
+                                "suggested_time": "lunch",
+                                "price_hint": "around 1,500 to 2,500 JPY per person from current search evidence",
+                                "price_checked_at": "current search snapshot",
+                                "price_valid_for": "2026-04-14, two travelers",
+                                "review_score": "4.3/5",
+                                "review_count": "500+",
+                                "review_summary": "Good location and relaxed lunch feedback.",
+                                "signature_dishes": ["coffee", "light lunch"],
+                                "reservation_hint": "unknown",
+                                "queue_hint": "short queue possible at lunch",
+                                "confidence": "medium",
+                                "caveats": ["Re-check opening hours before going."],
+                                "source_urls": ["https://food.example.test/philosopher-cafe"],
+                            },
+                            {
+                                "name": "Nishiki Market brunch",
+                                "area": "Downtown Kyoto",
+                                "cuisine_or_type": "market food",
+                                "reason": "Flexible food crawl.",
+                                "suggested_time": "brunch",
+                                "price_hint": "unknown",
+                                "price_checked_at": "unknown",
+                                "review_score": "unknown",
+                                "review_count": "unknown",
+                                "review_summary": "Popular food market; exact stall ratings vary.",
+                                "signature_dishes": ["snacks"],
+                                "reservation_hint": "not usually required",
+                                "queue_hint": "expect queues near noon",
+                                "confidence": "low",
+                                "caveats": ["Use unknown instead of invented exact ratings."],
+                                "source_urls": ["https://food.example.test/nishiki"],
+                            },
+                        ],
+                        "meal_strategy": ["Anchor lunches near the attraction clusters."],
+                        "price_notes": ["Use unknown when source-backed prices are missing."],
+                        "review_notes": ["Use recent review signals over generic popularity."],
+                        "food_risks": ["Queues can affect meal timing."],
+                    }
+                )
             if self.name == "hotel_specialist":
                 assert "candidate_hotels" in prompt
+                assert "poi_collection" in prompt
                 return json.dumps(
                     {
                         "recommended_areas": ["Downtown Kyoto", "Higashiyama"],
@@ -1118,6 +1698,7 @@ def _fake_helloagents_module(
                                 "area": "Downtown Kyoto",
                                 "reason": "Balanced access to food and transit.",
                                 "price_hint": "moderate",
+                                "source_urls": ["https://hotel.example.test/downtown-kyoto"],
                             }
                         ],
                         "stay_strategy": ["Prefer one transit-friendly base for the whole trip."],
@@ -1126,6 +1707,7 @@ def _fake_helloagents_module(
                 )
             if self.name == "transport_specialist":
                 assert "transport_context" in prompt
+                assert "poi_collection" in prompt
                 return json.dumps(
                     {
                         "intercity_options": [
@@ -1161,16 +1743,19 @@ def _fake_helloagents_module(
                     }
                 )
             if self.name == "itinerary_planner":
-                assert "attractions" in prompt
+                assert "poi_collection" in prompt
                 assert "weather" in prompt
                 assert "hotels" in prompt
                 assert "transport" in prompt
                 parsed = json.loads(prompt)
-                attractions = parsed["attractions"]
+                poi_collection = parsed["poi_collection"]
                 hotels = parsed["hotels"]
                 transport = parsed["transport"]
-                assert "crowd_notes" not in attractions
-                assert len(attractions["featured_pois"]) <= 6
+                assert "pois" in poi_collection
+                assert "food_pois" in poi_collection
+                assert poi_collection["food_pois"] == []
+                assert not any(poi["kind"] in {"food", "cafe", "market", "night_market"} for poi in poi_collection["pois"])
+                assert len(poi_collection["pois"]) <= 12
                 assert len(hotels["hotel_candidates"]) <= 4
                 assert len(transport["intercity_options"]) <= 3
                 return json.dumps(
@@ -1194,29 +1779,29 @@ def _fake_helloagents_module(
                                         "note": "Start calm and scenic.",
                                     },
                                     {
-                                        "type": "meal",
-                                        "name": "Lunch along Philosopher's Path",
+                                        "type": "explore",
+                                        "name": "Philosopher's Path",
                                         "start_time": "12:00",
                                         "end_time": "13:30",
                                         "location": "Kyoto",
                                         "score": 0.82,
-                                        "note": "Cafe stop near the walking route.",
+                                        "note": "Canal-side walk near the temple route.",
                                     },
                                 ],
                             },
                             {
                                 "title": "2026-04-15 | Central Kyoto",
-                                "summary": "Market and slow afternoon.",
+                                "summary": "Slow scenic afternoon.",
                                 "total_cost": 2400,
                                 "items": [
                                     {
-                                        "type": "food",
-                                        "name": "Nishiki Market brunch",
+                                        "type": "sight",
+                                        "name": "Kiyomizu hillside stroll",
                                         "start_time": "10:00",
                                         "end_time": "12:00",
                                         "location": "Kyoto",
                                         "score": 0.84,
-                                        "note": "Flexible food crawl.",
+                                        "note": "Traditional lanes and hillside views.",
                                     },
                                     {
                                         "type": "explore",
@@ -1264,9 +1849,9 @@ def test_helloagents_orchestrator_returns_business_specialist_result(monkeypatch
             "model": "gpt-default",
             "wire_api": "responses",
             "role_overrides": {
-                "attraction_specialist": {
-                    "base_url": "https://attractions.example.test/v1",
-                    "model": "gpt-attractions",
+                "poi_specialist": {
+                    "base_url": "https://poi.example.test/v1",
+                    "model": "gpt-poi",
                 },
                 "hotel_specialist": {
                     "base_url": "https://hotels.example.test/v1",
@@ -1287,25 +1872,83 @@ def test_helloagents_orchestrator_returns_business_specialist_result(monkeypatch
     assert result.days[0].items[1].route_from_previous is not None
     assert calls[0] == "brief_parser"
     assert calls[-1] == "itinerary_planner"
-    assert set(calls[1:5]) == {"attraction_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
-    assert llm_by_role["attraction_specialist"]["base_url"] == "https://attractions.example.test/v1"
-    assert llm_by_role["attraction_specialist"]["model"] == "gpt-attractions"
+    assert set(calls[1:3]) == {"poi_specialist", "weather_specialist"}
+    assert set(calls[3:5]) == {"hotel_specialist", "transport_specialist"}
+    assert llm_by_role["poi_specialist"]["base_url"] == "https://poi.example.test/v1"
+    assert llm_by_role["poi_specialist"]["model"] == "gpt-poi"
+    assert llm_by_role["poi_specialist"]["timeout"] == 120
+    assert llm_by_role["poi_specialist"]["max_tokens"] == 3200
+    assert llm_by_role["poi_specialist"]["retry_attempts"] == 1
+    assert llm_by_role["poi_specialist"]["stream"] is True
     assert llm_by_role["weather_specialist"]["base_url"] == "https://default.example.test/v1"
+    assert llm_by_role["weather_specialist"]["retry_attempts"] == 2
+    assert llm_by_role["weather_specialist"]["stream"] is True
     assert llm_by_role["hotel_specialist"]["base_url"] == "https://hotels.example.test/v1"
     assert llm_by_role["hotel_specialist"]["api_key"] == "hotel-key"
+    assert llm_by_role["hotel_specialist"]["max_tokens"] == 1800
+    assert llm_by_role["hotel_specialist"]["stream"] is True
     assert llm_by_role["transport_specialist"]["base_url"] == "https://default.example.test/v1"
+    assert llm_by_role["transport_specialist"]["max_tokens"] == 1600
+    assert llm_by_role["transport_specialist"]["stream"] is True
+    assert llm_by_role["itinerary_planner"]["base_url"] == "https://default.example.test/v1"
+    assert llm_by_role["itinerary_planner"]["stream"] is True
     assert len(result.trace.agent_runs) == 6
     assert all(run.prompt_version for run in result.trace.agent_runs)
     assert any("business-specialist" in note.lower() for note in result.trace.notes)
     assert any("not a live forecast feed" in note.lower() for note in result.trace.notes)
+    assert any(run.key == "poi_specialist" for run in result.trace.agent_runs)
     assert result.days[0].items[0].booking_info is not None
     assert result.days[0].items[0].booking_info.official_booking_url == "https://www.city.kyoto.lg.jp/official/ginkakuji"
     assert result.days[0].items[0].visit_requirements is not None
+    assert all(item.type not in {"meal", "food", "restaurant", "cafe", "dining", "snack"} for day in result.days for item in day.items)
     assert result.transport_booking_summary is not None
     assert result.transport_booking_summary.official_booking_url == "https://rail.example.test/kyoto"
     assert result.transport_booking_summary.booking_required is True
+    assert result.stay_recommendation is not None
+    assert result.stay_recommendation.final_recommended_hotel is not None
+    assert result.stay_recommendation.final_recommended_hotel.name == "Downtown Kyoto Hotel"
+    assert result.stay_recommendation.recommended_areas == ["Downtown Kyoto", "Higashiyama"]
     assert result.budget_summary is not None
     assert result.budget_summary.breakdown.tickets >= 25
+
+
+def test_helloagents_orchestrator_serializes_shared_streaming_grok_endpoint_roles():
+    config = LlmConfig.from_mapping(
+        {
+            "base_url": "https://default.example.test/v1",
+            "api_key": "default-key",
+            "model": "gpt-default",
+            "wire_api": "responses",
+            "role_overrides": {
+                "poi_specialist": {
+                    "base_url": "https://newapi.rainflow.foo/v1",
+                    "api_key": "shared-key",
+                    "model": "grok-4.20-multi-agent-xhigh",
+                    "wire_api": "chat_completions",
+                    "provider_protocol": "newapi",
+                },
+                "weather_specialist": {
+                    "base_url": "https://newapi.rainflow.foo/v1",
+                    "api_key": "shared-key",
+                    "model": "grok-4.20-multi-agent-medium",
+                    "wire_api": "chat_completions",
+                    "provider_protocol": "newapi",
+                },
+            },
+        }
+    )
+    assert config is not None
+    orchestrator = HelloAgentsOrchestrator(config, maps_provider=StubMapsPoiProvider())
+    role_configs = orchestrator._build_role_configs(_planning_request())
+    role_llm_configs = orchestrator._build_role_llm_configs()
+
+    assert orchestrator._should_serialize_role_batch_for_endpoint_limit(
+        {
+            "poi_specialist": role_configs["poi_specialist"],
+            "weather_specialist": role_configs["weather_specialist"],
+        },
+        role_llm_configs,
+    )
 
 
 
@@ -1362,6 +2005,111 @@ def test_helloagents_orchestrator_fails_when_specialist_role_fails(monkeypatch):
     assert calls[0] == "brief_parser"
     assert "weather_specialist" in calls
     assert "itinerary_planner" not in calls
+
+
+def test_helloagents_orchestrator_fails_when_poi_role_fails_even_with_tool_evidence(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        helloagents_module,
+        "import_module",
+        lambda _: _fake_helloagents_module(calls, failing_role="poi_specialist"),
+    )
+
+    def fake_augment(self, role_name, input_payload):
+        del self
+        if role_name == "poi_specialist":
+            input_payload["tool_results"] = {
+                "search_tool": "web_search",
+                "search_query": "Kyoto named POIs temples coffee market",
+                "poi_source": "web_search_crawl",
+                "search": {
+                    "content": "- **Ginkaku-ji**: temple with calm scenic walks.\n- **Nishiki Market**: food market with lunch snacks.",
+                    "sources": [
+                        {"title": "Ginkaku-ji official guide", "url": "https://source.example.test/ginkakuji"},
+                        {"title": "Nishiki Market food guide", "url": "https://source.example.test/nishiki"},
+                    ],
+                },
+            }
+        return input_payload
+
+    monkeypatch.setattr(HelloAgentsOrchestrator, "_augment_payload_with_tool_results", fake_augment)
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    with pytest.raises(RuntimeError, match="poi_specialist"):
+        orchestrator.plan_trip(_planning_request())
+
+    assert "poi_specialist" in calls
+    assert "itinerary_planner" not in calls
+    checkpoint = orchestrator.get_resume_checkpoint()
+    assert checkpoint is not None
+    assert checkpoint["failed_role"] == "poi_specialist"
+
+
+def test_helloagents_orchestrator_does_not_use_sparse_poi_fallback_without_evidence(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        helloagents_module,
+        "import_module",
+        lambda _: _fake_helloagents_module(calls, failing_role="poi_specialist"),
+    )
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    with pytest.raises(RuntimeError, match="poi_specialist"):
+        orchestrator.plan_trip(_planning_request())
+
+    assert "poi_specialist" in calls
+    assert "itinerary_planner" not in calls
+    checkpoint = orchestrator.get_resume_checkpoint()
+    assert checkpoint is not None
+    assert checkpoint["failed_role"] == "poi_specialist"
+
+
+def test_helloagents_orchestrator_does_not_resume_poi_fallback_checkpoint():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    request = _planning_request()
+    orchestrator.set_resume_checkpoint(
+        {
+            "version": 1,
+            "workflow": "helloagents_trip_generate",
+            "trip_id": request.trip_id,
+            "roles": {
+                "poi_specialist": {
+                    "status": "completed",
+                    "fallback_used": True,
+                    "fallback_reason": "stream did not contain assistant text",
+                    "parsed": {
+                        "candidate_areas": [request.destination],
+                        "featured_pois": [
+                            {
+                                "name": request.destination,
+                                "kind": "mixed_area",
+                                "area": request.destination,
+                                "reason": "Recovered from trip context.",
+                                "confidence": "low",
+                            }
+                        ],
+                    },
+                }
+            },
+        }
+    )
+    orchestrator._start_resume_checkpoint(request, orchestrator._build_trip_payload(request))
+
+    assert orchestrator._load_checkpoint_model("poi_specialist", HelloAgentsPoiGrounding) is None
+    checkpoint = orchestrator.get_resume_checkpoint()
+    assert checkpoint is not None
+    assert "poi_specialist" not in checkpoint["roles"]
+    assert "poi_specialist" not in checkpoint["completed_roles"]
+
 
 def _zh_planning_request() -> PlanningRequest:
     return _planning_request().model_copy(
@@ -1539,8 +2287,84 @@ def test_helloagents_orchestrator_embeds_daily_weather_into_days(monkeypatch):
     assert result.days[0].weather is not None
     assert result.days[0].weather.summary.startswith("Day 1:")
     assert result.days[0].weather.notes
+    assert len(result.days[0].weather.notes) <= 2
     assert result.days[1].weather is not None
     assert result.days[1].weather.summary.startswith("Day 2:")
+    assert len(result.days[1].weather.notes) <= 2
+
+
+def test_helloagents_planner_hotels_payload_filters_unverified_concrete_hotels():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    unverified = HelloAgentsHotelCandidate(
+        name="大理中央地标酒店",
+        area="大理古城",
+        reason="Looks central, but no source URL was returned.",
+        price_hint="current search snapshot",
+        booking_confidence="medium",
+    )
+    hotel = HelloAgentsHotelRecommendation(
+        recommended_areas=["大理古城"],
+        final_recommended_hotel=unverified,
+        hotel_candidates=[unverified],
+        stay_strategy=["住在古城步行范围内，减少来回打车。"],
+    )
+
+    payload = orchestrator._build_planner_hotels_payload(hotel)
+
+    assert payload["final_recommended_hotel"] is None
+    assert payload["hotel_candidates"] == []
+    assert "source URLs" in " ".join(payload["hotel_risks"])
+    assert "大理中央地标酒店" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_helloagents_planner_hotels_payload_keeps_source_backed_hotels():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    verified = HelloAgentsHotelCandidate(
+        name="Verified Dali Hotel",
+        area="Dali Old Town",
+        reason="Source-backed listing near the planned POI cluster.",
+        booking_confidence="medium",
+        source_urls=["https://hotel.example.test/dali-verified"],
+    )
+    hotel = HelloAgentsHotelRecommendation(
+        recommended_areas=["Dali Old Town"],
+        final_recommended_hotel=verified,
+        hotel_candidates=[verified],
+    )
+
+    payload = orchestrator._build_planner_hotels_payload(hotel)
+
+    assert payload["final_recommended_hotel"]["name"] == "Verified Dali Hotel"
+    assert payload["hotel_candidates"][0]["source_urls"] == ["https://hotel.example.test/dali-verified"]
+
+
+def test_helloagents_planner_poi_payload_excludes_food_pois():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    payload = orchestrator._build_planner_poi_collection_payload(
+        {
+            "pois": [
+                {"kind": "attraction", "name": "大理古城", "area": "大理古城片区"},
+                {"kind": "food", "name": "在回首", "area": "大理古城"},
+                {"kind": "cafe", "name": "古城咖啡馆", "area": "大理古城"},
+                {"kind": "market", "name": "大理古城夜市", "area": "大理古城"},
+                {"kind": "experience", "name": "洱海生态廊道", "area": "洱海沿岸"},
+            ],
+            "top_areas": ["大理古城", "洱海沿岸"],
+        }
+    )
+
+    assert [item["name"] for item in payload["pois"]] == ["大理古城", "洱海生态廊道"]
+    assert payload["food_pois"] == []
+    assert any("Excluded 3 food/cafe/market POIs" in item for item in payload["risks"])
 
 
 
@@ -1550,12 +2374,14 @@ def test_helloagents_orchestrator_adds_grounding_links_to_agent_citations_and_te
 
     def fake_augment(self, role_name, input_payload):
         del self
-        if role_name == "attraction_specialist":
+        if role_name == "poi_specialist":
             input_payload["tool_results"] = {
                 "grounding_docs": [
                     {"url": "https://www.xiaohongshu.com/explore/attraction-post"},
                     {"url": "https://official.example.test/guide"},
-                ]
+                    {"url": "https://www.xiaohongshu.com/explore/food-post"},
+                ],
+                "crawl_urls": ["https://food.example.test/detail"],
             }
         elif role_name == "hotel_specialist":
             input_payload["tool_results"] = {
@@ -1570,6 +2396,10 @@ def test_helloagents_orchestrator_adds_grounding_links_to_agent_citations_and_te
                 "answer": {
                     "text": "Forecast temperatures around 24?C to 30?C with afternoon rain risk.",
                 },
+                "grounding_docs": [
+                    {"url": "https://weather.example.test/climate-guide"},
+                    {"url": "https://transport.example.test/rail-fares"},
+                ],
             }
         elif role_name == "transport_specialist":
             input_payload["tool_results"] = {
@@ -1588,16 +2418,55 @@ def test_helloagents_orchestrator_adds_grounding_links_to_agent_citations_and_te
 
     result = orchestrator.plan_trip(_planning_request())
 
-    attraction_run = next(run for run in result.trace.agent_runs if run.key == "attraction_specialist")
+    poi_run = next(run for run in result.trace.agent_runs if run.key == "poi_specialist")
     hotel_run = next(run for run in result.trace.agent_runs if run.key == "hotel_specialist")
     transport_run = next(run for run in result.trace.agent_runs if run.key == "transport_specialist")
 
-    assert "https://www.xiaohongshu.com/explore/attraction-post" in attraction_run.citations
+    assert "https://www.xiaohongshu.com/explore/attraction-post" in poi_run.citations
+    assert "https://www.xiaohongshu.com/explore/food-post" in poi_run.citations
+    assert "https://food.example.test/detail" in poi_run.citations
     assert "https://www.xiaohongshu.com/explore/hotel-post" in hotel_run.citations
     assert "https://hotel.example.test/detail" in hotel_run.citations
     assert "https://transport.example.test/rail-fares" in transport_run.citations
     assert result.days[0].weather is not None
     assert "24" in result.days[0].weather.summary
+    grounding_urls = [doc.get("url") for doc in result.trace.grounding_documents]
+    assert "https://weather.example.test/climate-guide" in grounding_urls
+    assert grounding_urls.count("https://transport.example.test/rail-fares") == 1
+
+
+
+def test_helloagents_poi_specialist_records_input_and_output_snapshots(monkeypatch):
+    calls: list[str] = []
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
+
+    def fake_log_job_event(event, **payload):
+        events.append({"event": event, "payload": payload})
+        return None
+
+    monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    result = orchestrator.plan_trip(_planning_request())
+
+    poi_run = next(run for run in result.trace.agent_runs if run.key == "poi_specialist")
+    assert any("POI input snapshot:" in note for note in poi_run.notes)
+    assert any("POI tool snapshot: search_tool=none, search_query=none" in note for note in poi_run.notes)
+    assert any("POI output snapshot:" in note and "Ginkaku-ji" in note for note in poi_run.notes)
+
+    input_event = next(item for item in events if item["event"] == "helloagents_poi_specialist_input_snapshot")
+    output_event = next(item for item in events if item["event"] == "helloagents_poi_specialist_output_snapshot")
+    input_snapshot = input_event["payload"]["snapshot"]
+    output_snapshot = output_event["payload"]["snapshot"]
+
+    assert input_snapshot["trip_request"]["destination"] == "Kyoto"
+    assert input_snapshot["tool_results"] == {}
+    assert any(item["name"] == "Ginkaku-ji" and item["kind"] == "attraction" for item in output_snapshot["featured_pois"])
+    assert any(item["name"] == "Nishiki Market brunch" and item["kind"] == "market" for item in output_snapshot["featured_pois"])
 
 
 
@@ -1659,6 +2528,7 @@ def test_helloagents_weather_tool_results_use_deep_research_when_available(monke
     assert result["research_tool"] == "deep_researcher_start"
     assert [name for name, _ in calls] == ["deep_researcher_start", "deep_researcher_check"]
     assert "https://weather.example.test/forecast" in result["citations"]
+    assert result["research"]["deep_research_completed"] is True
 
 
 
@@ -1707,55 +2577,6 @@ def test_helloagents_hotel_tool_results_crawl_top_search_urls_when_available(mon
         "https://stay.example.test/hotel-beta",
     ]
     assert [name for name, _ in calls] == ["search", "contents"]
-
-
-
-def test_helloagents_attraction_tool_results_include_grounding_docs(monkeypatch):
-    monkeypatch.setattr(
-        helloagents_module,
-        "search_documents",
-        lambda query, destination, manual_links, *, interests=None, social_context="general", search_service_config=None, xhs_source_enabled=True, xhs_user_id=None: [
-            SearchDocumentResponse(
-                id="src_1",
-                platform="xiaohongshu",
-                title="Kyoto quiet walk",
-                url="https://www.xiaohongshu.com/explore/xhs_1",
-                summary="Local quiet walk guide.",
-                destination=destination,
-                place_name="Kyoto",
-                category="social-guide",
-                source_type="social-guide-post",
-                scores=ScoreBreakdown(
-                    trust_score=0.78,
-                    quality_score=0.8,
-                    freshness_score=0.9,
-                    ad_score=0.14,
-                    final_score=0.8,
-                    reasons=["Local traveler-generated guide"],
-                ),
-            )
-        ],
-    )
-    monkeypatch.setattr(
-        HelloAgentsOrchestrator,
-        "_call_search_like_tool",
-        lambda self, client, tool_name, query, num_results, *, role_name: {"results": [{"url": "https://example.test/a"}]},
-    )
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    result = orchestrator._collect_attraction_tool_results(
-        object(),
-        {"search"},
-        {
-            "trip_request": {"destination": "Kyoto", "pace": "balanced"},
-            "planning_brief": {"destination": "Kyoto", "must_have": ["coffee"]},
-        },
-    )
-
-    assert result["grounding_docs"][0]["platform"] == "xiaohongshu"
 
 
 
@@ -1834,26 +2655,275 @@ def test_helloagents_weather_tool_results_do_not_include_social_grounding(monkey
     assert "grounding_docs" not in result
 
 
-def test_helloagents_attraction_tool_results_use_groksearch_web_fetch(monkeypatch):
-    calls: list[tuple[str, dict[str, object]]] = []
+def test_helloagents_poi_specialist_augment_skips_tool_collection_with_native_search(monkeypatch):
+    events: list[dict[str, object]] = []
+
+    def fake_log_job_event(event, **payload):
+        events.append({"event": event, "payload": payload})
+
+    def forbidden_build_role_mcp_clients(self, role_name):
+        del self
+        raise AssertionError(f"POI specialist should not build tool clients for {role_name}")
+
+    monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
+    monkeypatch.setattr(HelloAgentsOrchestrator, "_build_role_mcp_clients", forbidden_build_role_mcp_clients)
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://rainflow.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    payload = {
+        "trip_request": {"destination": "Dali"},
+        "planning_brief": {"destination": "Dali", "interests": ["ancient town", "lake"]},
+        "poi_context": {"interests": ["city walk", "附近吃饭", "湖边随便逛"]},
+    }
+
+    result = orchestrator._augment_payload_with_tool_results("poi_specialist", payload)
+
+    assert result is payload
+    assert result["tool_results"] == {"poi_source": "native_search"}
+    skip_event = next(item for item in events if item["event"] == "helloagents_poi_tool_collection_skipped")
+    assert skip_event["payload"]["role"] == "poi_specialist"
+    assert skip_event["payload"]["external_tool_collection"] is False
+    assert skip_event["payload"]["native_search_allowed"] is True
+    assert skip_event["payload"]["poi_specialist_uses_search"] is True
+
+
+def test_helloagents_poi_specialist_augment_collects_mcp_evidence_without_native_search(monkeypatch):
     monkeypatch.setattr(
         helloagents_module,
         "search_documents",
-        lambda query, destination, manual_links, *, interests=None, social_context="general", search_service_config=None, xhs_source_enabled=True: [],
+        lambda query, destination, manual_links, **kwargs: [],
+    )
+    fake_client = SimpleNamespace(
+        config=SearchServiceConfig(provider="groksearch", transport="mcp", base_url="https://groksearch.example.test/mcp", api_key="test-key")
+    )
+    monkeypatch.setattr(
+        HelloAgentsOrchestrator,
+        "_build_role_mcp_clients",
+        lambda self, role_name: [(fake_client, {"web_search"})],
+    )
+    monkeypatch.setattr(
+        HelloAgentsOrchestrator,
+        "_call_mcp_tool",
+        lambda self, client, tool_name, arguments, *, role_name: {
+            "sources": [{"url": "https://example.test/kyoto-guide", "title": "Kyoto guide"}]
+        },
+    )
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    payload = {
+        "trip_request": {"destination": "Kyoto", "pace": "balanced"},
+        "planning_brief": {"destination": "Kyoto", "must_have": ["temples"], "interests": ["temples"]},
+        "poi_context": {"interests": ["temples"], "must_have": ["temples"]},
+        "candidate_pois": [{"name": "Ginkaku-ji"}],
+    }
+
+    result = orchestrator._augment_payload_with_tool_results("poi_specialist", payload)
+
+    assert result["tool_results"]["poi_source"] == "search_evidence"
+    assert result["tool_results"]["search_tool"] == "web_search"
+    assert result["tool_results"]["citations"] == ["https://example.test/kyoto-guide"]
+
+
+def test_helloagents_has_native_search_unifies_rainflow_and_grok_detection():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    def endpoint(base_url, model):
+        return LlmConfig(base_url=base_url, api_key="test-key", model=model, wire_api="responses").config_for_role("poi_specialist")
+
+    assert orchestrator._has_native_search("poi_specialist", endpoint("https://api.x.ai/v1", "grok-4")) is True
+    assert orchestrator._has_native_search("poi_specialist", endpoint("https://proxy.example.test/v1", "grok-4-fast")) is True
+    assert orchestrator._has_native_search("poi_specialist", endpoint("https://rainflow.example.test/v1", "gpt-test")) is True
+    assert orchestrator._has_native_search("weather_specialist", endpoint("https://rainflow.example.test/v1", "gpt-test")) is True
+    assert orchestrator._has_native_search("poi_specialist", endpoint("https://llm.example.test/v1", "gpt-test")) is False
+    assert orchestrator._has_native_search("itinerary_planner", endpoint("https://rainflow.example.test/v1", "gpt-test")) is False
+    assert orchestrator._has_native_search("poi_specialist", None) is False
+    assert orchestrator._role_config_uses_search_capable_grok(
+        "poi_specialist", endpoint("https://rainflow.example.test/v1", "gpt-test")
+    ) is True
+
+
+def _booking_orchestrator() -> HelloAgentsOrchestrator:
+    return HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+
+def test_food_booking_info_negated_reservation_hint_is_not_required():
+    orchestrator = _booking_orchestrator()
+    for hint in ("无需预约，随到随吃", "无须预约", "不需要预约", "不用预约", "免预约", "No reservation needed", "Reservation not required", "Walk-in only", "walk in welcome"):
+        booking = orchestrator._build_food_booking_info(
+            helloagents_module.HelloAgentsFoodPoi(name="Test Diner", reservation_hint=hint)
+        )
+        assert booking is not None, hint
+        assert booking.reservation_required is False, hint
+        assert booking.booking_required is False, hint
+
+
+def test_food_booking_info_positive_reservation_hint_is_required():
+    orchestrator = _booking_orchestrator()
+    for hint in ("需要预约", "需预约", "建议预约", "请提前订位", "Reservation required", "Please reserve ahead"):
+        booking = orchestrator._build_food_booking_info(
+            helloagents_module.HelloAgentsFoodPoi(name="Test Diner", reservation_hint=hint)
+        )
+        assert booking is not None, hint
+        assert booking.reservation_required is True, hint
+        assert booking.booking_required is True, hint
+
+
+def test_helloagents_direct_grok_specialist_skips_mcp_tool_collection(monkeypatch):
+    events: list[dict[str, object]] = []
+
+    def fake_log_job_event(event, **payload):
+        events.append({"event": event, "payload": payload})
+
+    def forbidden_build_role_mcp_clients(self, role_name):
+        del self
+        raise AssertionError(f"Grok direct specialist should not build tool clients for {role_name}")
+
+    monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
+    monkeypatch.setattr(HelloAgentsOrchestrator, "_build_role_mcp_clients", forbidden_build_role_mcp_clients)
+    config = LlmConfig.from_mapping(
+        {
+            "base_url": "https://default.example.test/v1",
+            "api_key": "default-key",
+            "model": "gpt-default",
+            "wire_api": "responses",
+            "role_overrides": {
+                "weather_specialist": {
+                    "base_url": "https://api.x.ai/v1",
+                    "api_key": "grok-key",
+                    "model": "grok-4.20-beta",
+                    "wire_api": "chat_completions",
+                    "provider_protocol": "newapi",
+                }
+            },
+        }
+    )
+    orchestrator = HelloAgentsOrchestrator(config, maps_provider=StubMapsPoiProvider())
+    payload = {
+        "trip_request": {"destination": "Kyoto"},
+        "planning_brief": {"destination": "Kyoto"},
+        "weather_segments": [{"name": "Kyoto"}],
+    }
+
+    result = orchestrator._augment_payload_with_tool_results("weather_specialist", payload)
+
+    assert result is payload
+    assert "tool_results" not in result
+    skip_event = next(item for item in events if item["event"] == "helloagents_direct_grok_tool_collection_skipped")
+    assert skip_event["payload"]["role"] == "weather_specialist"
+    assert skip_event["payload"]["model"] == "grok-4.20-beta"
+
+
+def test_poi_specialist_prompt_allows_native_search_and_constrains_dirty_names():
+    prompt = build_poi_specialist_prompt()
+    text = prompt.system_prompt
+
+    assert "用户的出发地、目的地、日期、预算、人数、兴趣、节奏" in text
+    assert "全网公开信息" in text
+    assert "小红书" in text
+    assert "知乎" in text
+    assert "马蜂窝" in text
+    assert "携程" in text
+    assert "必须先使用模型自带联网检索能力" in text
+    assert "交叉参考" in text
+    assert "不要调用外部工具" in text
+    assert "不要输出搜索摘要" in text
+    assert "6 到 10 个" in text
+    assert "name 必须是真实、可搜索、位于目的地或其合理一日游范围内的景点、街区、自然风景或体验名" in text
+    assert "真实、可搜索、位于目的地或其合理一日游范围内" in text
+    assert "city walk route" in text
+    assert "古城晨间散步" in text
+    assert "湖边随便逛" in text
+    assert "Central Landmark" in text
+    assert "Market Hall" in text
+    assert "Riverside Walk" in text
+    assert "center zone" in text
+    assert "每个 top_poi 只输出 8 个字段" in text
+    assert "highlights 保留 2-4 个短词组" in text
+    assert "真实可搜索的子景点" in text
+    assert "南门城楼" in text
+    assert "source_url 最多 1 个" in text
+    assert "每个 top_poi 都应带 source_url" in text
+    assert "source_url 为空，confidence 必须是 low" in text
+    assert "这类无来源 POI 不要超过 2 个" in text
+    assert "不要推荐餐厅、小吃店、咖啡馆、夜市、美食街、菜市场" in text
+    assert "餐饮词也不要出现在 name、kind、highlights 或 reason 中" in text
+    assert "不要把小吃街、菜市场、夜市、咖啡馆包装成 district 或 experience" in text
+    assert "area 必须写真实行政区、县、岛屿、街区或景区片区" in text
+    assert "kind 只能从 attraction、district、experience 中选择" in text
+    assert "kind 只能从 attraction、food、market、cafe、district、experience 中选择" not in text
+    assert "evidence_notes" not in text
+    assert "source_urls" not in text
+    assert "does not search the web" not in text
+    assert "tool_results" not in text
+    assert "trip_request" not in text
+    assert "planning_brief" not in text
+    assert "poi_context" not in text
+
+
+def test_weather_specialist_prompt_keeps_weather_as_planning_support():
+    prompt = build_weather_specialist_prompt()
+    text = prompt.system_prompt
+
+    assert "天气只作为行程编排辅助" in text
+    assert "daily_outlook 每天最多 1 句" in text
+    assert "segments 最多 2 个" in text
+
+
+def test_hotel_specialist_prompt_rejects_unsourced_concrete_hotel_names():
+    prompt = build_hotel_specialist_prompt()
+    text = prompt.system_prompt
+
+    assert "每个具体酒店必须带 source_urls" in text
+    assert "source-backed 的最低标准不是 URL 不为空" in text
+    assert "酒店精确名称、所在城市/区域、地址或地标位置、近期评价/评分/设施信号" in text
+    assert "中国大陆目的地优先输出来源中的中文本地展示名" in text
+    assert "不要只输出英文名" in text
+    assert "如果只有海外英文 OTA 页面，最多作为候选，不能直接定为最终推荐" in text
+    assert "final_recommended_hotel 设为 null" in text
+    assert "严禁为了满足字段而编造酒店名" in text
+    assert "hotel_candidates 输出 2-3 个来源充足的备选" in text
+    assert "预算是上限和舒适度约束，不是越便宜越好" in text
+    assert "不要因为低价选择质量信号弱的酒店" in text
+    assert "你必须在 final_recommended_hotel 中选择一个具体酒店名称" not in text
+
+
+def test_helloagents_poi_tool_results_use_groksearch_search_evidence_only(monkeypatch):
+    calls: list[tuple[str, dict[str, object], str]] = []
+    monkeypatch.setattr(
+        helloagents_module,
+        "search_documents",
+        lambda query, destination, manual_links, **kwargs: [],
     )
 
     def fake_call(self, client, tool_name, arguments, *, role_name):
-        del self, client, role_name
-        calls.append((tool_name, arguments))
+        del self, client
+        calls.append((tool_name, arguments, role_name))
         if tool_name == "web_search":
+            query = str(arguments["query"])
+            assert "Kyoto" in query
+            assert "Ginkaku-ji" in query
+            assert "temples" in query
+            assert "Kyoto Cafe" not in query
+            assert "coffee" not in query
+            assert "cafe" not in query.lower()
+            assert "restaurant" not in query.lower()
+            assert "搜索任务：" not in query
+            assert "输出一个具名 POI 池" not in query
             return {
                 "sources": [
-                    {"url": "https://example.test/a", "title": "Guide A"},
-                    {"url": "https://example.test/b", "title": "Guide B"},
+                    {"url": "https://example.test/kyoto-guide", "title": "Kyoto guide"},
+                    {"url": "https://attraction.example.test/philosopher-path", "title": "Philosopher Path guide"},
                 ]
             }
-        if tool_name == "web_fetch":
-            return {"text": "Grounded attraction details."}
         raise AssertionError(f"Unexpected MCP tool: {tool_name}")
 
     monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
@@ -1862,22 +2932,119 @@ def test_helloagents_attraction_tool_results_use_groksearch_web_fetch(monkeypatc
         maps_provider=StubMapsPoiProvider(),
     )
 
-    result = orchestrator._collect_attraction_tool_results(
+    result = orchestrator._collect_poi_tool_results(
         SimpleNamespace(config=SearchServiceConfig(provider="groksearch", transport="mcp", base_url="https://groksearch.example.test/mcp", api_key="test-key")),
         {"web_search", "web_fetch"},
         {
-            "trip_request": {"destination": "Kyoto", "pace": "balanced"},
-            "planning_brief": {"destination": "Kyoto", "must_have": ["coffee"]},
+            "trip_request": {"destination": "Kyoto", "pace": "balanced", "raw_user_input": "I want quiet coffee and temple neighborhoods in Kyoto"},
+            "planning_brief": {"destination": "Kyoto", "must_have": ["temples"], "interests": ["coffee"]},
+            "poi_request": {"task": "Find named Kyoto POIs worth visiting."},
+            "poi_context": {"interests": ["temples"], "food_interests": ["coffee"], "must_have": ["temples"]},
+            "candidate_pois": [{"name": "Ginkaku-ji"}],
+            "candidate_food_pois": [{"name": "Kyoto Cafe"}],
         },
     )
 
     assert result["search_tool"] == "web_search"
-    assert result["crawl_tool"] == "web_fetch"
-    assert result["crawl_urls"] == [
-        "https://example.test/a",
-        "https://example.test/b",
+    assert result["poi_source"] == "search_evidence"
+    assert result["citations"] == [
+        "https://example.test/kyoto-guide",
+        "https://attraction.example.test/philosopher-path",
     ]
-    assert [name for name, _ in calls] == ["web_search", "web_fetch", "web_fetch"]
+    assert "crawl_tool" not in result
+    assert "crawl_urls" not in result
+    assert [name for name, _, _ in calls] == ["web_search"]
+    assert all(role_name == "poi_specialist" for _, _, role_name in calls)
+
+
+def test_helloagents_poi_tool_results_fall_back_to_groksearch_answer_when_web_search_is_unavailable(monkeypatch):
+    calls: list[tuple[str, dict[str, object], str]] = []
+    monkeypatch.setattr(
+        helloagents_module,
+        "search_documents",
+        lambda query, destination, manual_links, **kwargs: [],
+    )
+
+    def fake_call(self, client, tool_name, arguments, *, role_name):
+        del self, client
+        calls.append((tool_name, arguments, role_name))
+        assert tool_name == "answer"
+        query = str(arguments["query"])
+        assert "Kyoto" in query
+        assert "POI" in query
+        assert "restaurant" not in query.lower()
+        assert "cafe" not in query.lower()
+        assert arguments["include_text"] is True
+        return {
+            "answer": "Use Ginkaku-ji and Kiyomizu-dera as grounded sightseeing POIs.",
+            "sources": [{"url": "https://example.test/kyoto-poi", "title": "Kyoto POI guide"}],
+        }
+
+    monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    result = orchestrator._collect_poi_tool_results(
+        SimpleNamespace(config=SearchServiceConfig(provider="groksearch", transport="mcp", base_url="https://groksearch.example.test/mcp", api_key="test-key")),
+        {"answer"},
+        {
+            "trip_request": {"destination": "Kyoto", "pace": "balanced"},
+            "planning_brief": {"destination": "Kyoto", "must_have": ["temples"], "interests": ["markets"]},
+            "poi_context": {"interests": ["temples"], "food_interests": ["markets"], "must_have": ["temples"]},
+            "candidate_pois": [],
+            "candidate_food_pois": [],
+        },
+    )
+
+    assert result["search_tool"] == "answer"
+    assert result["research_tool"] == "answer"
+    assert result["poi_source"] == "search_evidence"
+    assert result["citations"] == ["https://example.test/kyoto-poi"]
+    assert [name for name, _, _ in calls] == ["answer"]
+    assert all(role_name == "poi_specialist" for _, _, role_name in calls)
+
+
+def test_helloagents_mcp_tool_call_logs_request_and_response_snapshots(monkeypatch):
+    events: list[dict[str, object]] = []
+
+    def fake_log_job_event(event, **payload):
+        events.append({"event": event, "payload": payload})
+
+    class FakeGateway:
+        def call_operation(self, name, arguments):
+            assert name == "web_search"
+            assert arguments == {"query": "大理 POI 美食 评分"}
+            return {
+                "session_id": "session_123",
+                "sources": [
+                    {
+                        "title": "大理旅行攻略",
+                        "url": "https://example.test/dali-guide",
+                        "snippet": "大理古城、洱海和喜洲古镇。",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    result = orchestrator._call_mcp_tool(FakeGateway(), "web_search", {"query": "大理 POI 美食 评分"}, role_name="poi_specialist")
+
+    assert result["session_id"] == "session_123"
+    request_event = next(item for item in events if item["event"] == "helloagents_mcp_tool_request")
+    response_event = next(item for item in events if item["event"] == "helloagents_mcp_tool_response")
+    assert request_event["payload"]["role"] == "poi_specialist"
+    assert request_event["payload"]["tool"] == "web_search"
+    assert request_event["payload"]["arguments"]["query"] == "大理 POI 美食 评分"
+    response_snapshot = response_event["payload"]["response"]
+    assert response_snapshot["session_id"] == "session_123"
+    assert response_snapshot["sources"][0]["url"] == "https://example.test/dali-guide"
+    assert response_snapshot["citations"] == ["https://example.test/dali-guide"]
 
 
 def test_helloagents_weather_tool_results_use_groksearch_web_search(monkeypatch):
@@ -1905,21 +3072,20 @@ def test_helloagents_weather_tool_results_use_groksearch_web_search(monkeypatch)
     assert result["citations"] == ["https://weather.example.test/forecast"]
 
 
-def test_helloagents_hotel_tool_results_use_groksearch_web_fetch(monkeypatch):
+def test_helloagents_hotel_tool_results_use_groksearch_answer_without_fetch(monkeypatch):
     calls: list[tuple[str, dict[str, object]]] = []
 
     def fake_call(self, client, tool_name, arguments, *, role_name):
         del self, client, role_name
         calls.append((tool_name, arguments))
-        if tool_name == "web_search":
+        if tool_name == "answer":
             return {
+                "answer": "Stay near Hotel Alpha or Hotel Beta for a quiet, transit-friendly Kyoto base.",
                 "sources": [
                     {"url": "https://stay.example.test/hotel-alpha", "title": "Hotel Alpha"},
                     {"url": "https://stay.example.test/hotel-beta", "title": "Hotel Beta"},
-                ]
+                ],
             }
-        if tool_name == "web_fetch":
-            return {"text": "Transit-friendly stay."}
         raise AssertionError(f"Unexpected MCP tool: {tool_name}")
 
     monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
@@ -1935,7 +3101,7 @@ def test_helloagents_hotel_tool_results_use_groksearch_web_fetch(monkeypatch):
 
     result = orchestrator._collect_hotel_tool_results(
         SimpleNamespace(config=SearchServiceConfig(provider="groksearch", transport="mcp", base_url="https://groksearch.example.test/mcp", api_key="test-key")),
-        {"web_search", "web_fetch"},
+        {"answer", "web_search", "web_fetch"},
         {
             "trip_request": {"destination": "Kyoto", "accommodation_preference": "Quiet boutique hotel"},
             "planning_brief": {"destination": "Kyoto", "accommodation": "Quiet boutique hotel"},
@@ -1943,30 +3109,34 @@ def test_helloagents_hotel_tool_results_use_groksearch_web_fetch(monkeypatch):
         },
     )
 
-    assert result["search_tool"] == "web_search"
-    assert result["crawl_tool"] == "web_fetch"
-    assert result["crawl_urls"] == [
+    assert result["search_tool"] == "answer"
+    assert result["research_tool"] == "answer"
+    assert "answer" in result
+    assert "search" not in result
+    assert "crawl_tool" not in result
+    assert "crawl" not in result
+    assert result["citations"] == [
         "https://stay.example.test/hotel-alpha",
         "https://stay.example.test/hotel-beta",
     ]
-    assert [name for name, _ in calls] == ["web_search", "web_fetch", "web_fetch"]
+    assert [name for name, _ in calls] == ["answer"]
+    assert calls[0][1]["include_text"] is True
 
 
-def test_helloagents_transport_tool_results_use_groksearch_web_fetch(monkeypatch):
+def test_helloagents_transport_tool_results_use_groksearch_answer_without_fetch(monkeypatch):
     calls: list[tuple[str, dict[str, object]]] = []
 
     def fake_call(self, client, tool_name, arguments, *, role_name):
         del self, client, role_name
         calls.append((tool_name, arguments))
-        if tool_name == "web_search":
+        if tool_name == "answer":
             return {
+                "answer": "Use rail between Osaka and Kyoto, then rely on local transit passes for city movement.",
                 "sources": [
                     {"url": "https://transport.example.test/rail-fares", "title": "Rail fares"},
                     {"url": "https://transport.example.test/local-pass", "title": "Local pass"},
-                ]
+                ],
             }
-        if tool_name == "web_fetch":
-            return {"text": "Grounded transport pricing."}
         raise AssertionError(f"Unexpected MCP tool: {tool_name}")
 
     monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
@@ -1982,7 +3152,7 @@ def test_helloagents_transport_tool_results_use_groksearch_web_fetch(monkeypatch
 
     result = orchestrator._collect_transport_tool_results(
         SimpleNamespace(config=SearchServiceConfig(provider="groksearch", transport="mcp", base_url="https://groksearch.example.test/mcp", api_key="test-key")),
-        {"web_search", "web_fetch"},
+        {"answer", "web_search", "web_fetch"},
         {
             "trip_request": {
                 "origin": "Osaka",
@@ -1997,17 +3167,18 @@ def test_helloagents_transport_tool_results_use_groksearch_web_fetch(monkeypatch
         },
     )
 
-    assert result["search_tool"] == "web_search"
-    assert result["crawl_tool"] == "web_fetch"
-    assert result["crawl_urls"] == [
-        "https://transport.example.test/rail-fares",
-        "https://transport.example.test/local-pass",
-    ]
+    assert result["search_tool"] == "answer"
+    assert result["research_tool"] == "answer"
+    assert "answer" in result
+    assert "search" not in result
+    assert "crawl_tool" not in result
+    assert "crawl" not in result
     assert result["citations"] == [
         "https://transport.example.test/rail-fares",
         "https://transport.example.test/local-pass",
     ]
-    assert [name for name, _ in calls] == ["web_search", "web_fetch", "web_fetch"]
+    assert [name for name, _ in calls] == ["answer"]
+    assert calls[0][1]["include_text"] is True
 
 
 def test_helloagents_extract_urls_from_text_payload():
@@ -2052,6 +3223,237 @@ def test_helloagents_role_prompt_payload_strips_tool_url_metadata():
     assert "https://" not in serialized_tool_results
     assert "Hotel Alpha" in serialized_tool_results
     assert raw_payload["tool_results"]["citations"] == ["https://sources.example.test/noise"]
+
+
+def test_helloagents_hotel_prompt_payload_compacts_large_tool_results():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    long_page = "Hotel Alpha central location with food street access. " * 800
+
+    prompt_payload = orchestrator._build_role_prompt_payload(
+        {
+            "trip_request": {"destination": "Shantou"},
+            "tool_results": {
+                "search_tool": "web_search",
+                "search_query": "Shantou downtown hotel food street",
+                "search": {
+                    "content": "Use MIXC or Small Park as stay bases.",
+                    "sources": [
+                        {
+                            "url": "https://stay.example.test/alpha",
+                            "title": "Hotel Alpha",
+                            "snippet": "Central, walkable to food streets.",
+                        }
+                    ],
+                },
+                "crawl_tool": "web_fetch",
+                "crawl_urls": ["https://stay.example.test/alpha"],
+                "crawl": {
+                    "results": [
+                        {
+                            "url": "https://stay.example.test/alpha",
+                            "title": "Hotel Alpha page",
+                            "text": long_page,
+                        }
+                    ]
+                },
+            },
+        },
+        role_name="hotel_specialist",
+    )
+
+    tool_results = prompt_payload["tool_results"]
+    serialized = json.dumps(tool_results, ensure_ascii=False)
+    assert "search" not in tool_results
+    assert "crawl" not in tool_results
+    assert "evidence_brief" in tool_results
+    assert "Hotel Alpha central location" in serialized
+    assert len(serialized) < 2200
+    assert len(json.dumps(prompt_payload, ensure_ascii=False)) < 3000
+
+
+def test_helloagents_transport_prompt_payload_compacts_large_tool_results():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    long_page = "Rail fare table and station transfer details. " * 700
+
+    prompt_payload = orchestrator._build_role_prompt_payload(
+        {
+            "trip_request": {"origin": "Guangzhou", "destination": "Shantou"},
+            "tool_results": {
+                "search_tool": "web_search",
+                "search_query": "Guangzhou to Shantou rail fares transfer",
+                "search": {
+                    "content": "Direct rail is the practical intercity option.",
+                    "sources": [
+                        {
+                            "url": "https://transport.example.test/rail",
+                            "title": "Rail fares",
+                            "snippet": "Fast trains connect Guangzhou and Shantou.",
+                        }
+                    ],
+                },
+                "crawl_tool": "web_fetch",
+                "crawl_urls": ["https://transport.example.test/rail"],
+                "crawl": {
+                    "results": [
+                        {
+                            "url": "https://transport.example.test/rail",
+                            "title": "Rail fare table",
+                            "text": long_page,
+                        }
+                    ]
+                },
+                "citations": ["https://transport.example.test/rail"],
+            },
+        },
+        role_name="transport_specialist",
+    )
+
+    tool_results = prompt_payload["tool_results"]
+    serialized = json.dumps(tool_results, ensure_ascii=False)
+    assert "search" not in tool_results
+    assert "crawl" not in tool_results
+    assert "evidence_brief" in tool_results
+    assert "Rail fare table" in serialized
+    assert len(serialized) < 2200
+    assert len(json.dumps(prompt_payload, ensure_ascii=False)) < 3000
+
+
+def test_helloagents_poi_prompt_payload_uses_compact_evidence_brief():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    long_crawl_text = "大理古城、洱海、苍山、喜洲古镇。 " * 500
+
+    prompt_payload = orchestrator._build_role_prompt_payload(
+        {
+            "trip_request": {"destination": "大理"},
+            "tool_results": {
+                "search_tool": "web_search",
+                "search_query": "大理 POI 美食 评分",
+                "poi_source": "web_search_crawl",
+                "search": {
+                    "content": "大理古城和洱海适合慢节奏旅行。",
+                    "sources": [
+                        {"url": "https://example.test/dali-guide", "title": "大理旅行攻略", "snippet": "大理古城、洱海、喜洲古镇。"},
+                    ],
+                },
+                "crawl_tool": "web_fetch",
+                "crawl_urls": ["https://example.test/dali-guide"],
+                "crawl": {"text": long_crawl_text},
+                "grounding_docs": [
+                    {
+                        "title": "大理古城与洱海路线",
+                        "url": "https://example.test/local-note",
+                        "summary": "大理古城、洱海和北门菜市场是高频点。",
+                        "place_name": "大理古城",
+                        "category": "city walk",
+                    }
+                ],
+            },
+        },
+        role_name="poi_specialist",
+    )
+
+    tool_results = prompt_payload["tool_results"]
+    assert "evidence_brief" in tool_results
+    assert "search" not in tool_results
+    assert "crawl" not in tool_results
+    assert set(tool_results["citations"]) == {"https://example.test/local-note", "https://example.test/dali-guide"}
+    serialized = json.dumps(tool_results, ensure_ascii=False)
+    assert len(serialized) < 2200
+    assert "大理古城" in serialized
+    assert "truncated" not in serialized.lower()
+
+
+def test_helloagents_poi_grounding_accepts_lightweight_top_pois_shape():
+    payload = {
+        "title": "去大理值得去的POI推荐列表",
+        "update": "2026年6月综合全网信息",
+        "best_season": "3-5月，9-11月",
+        "recommended_duration": "4-7天",
+        "general_tips": "适合慢节奏和环海玩法。",
+        "top_pois": [
+            {
+                "name": "大理古城",
+                "kind": "district",
+                "area": "大理古城片区",
+                "highlights": ["南门城楼", "洋人街", "白族民居", "夜景咖啡馆", "这条应该被截断"],
+                "reason": "大理旅行起点与灵魂。",
+                "suggested_time": "0.5-1天",
+                "confidence": "high",
+                "source_url": "https://example.test/dali-ancient-city",
+            },
+            {
+                "name": "洱海",
+                "kind": "attraction",
+                "area": "环海区域",
+                "highlights": ["生态廊道骑行", "双廊", "日落"],
+                "reason": "大理风花雪月核心。",
+                "suggested_time": "2-3天",
+                "confidence": "medium",
+            },
+            {
+                "name": "大理古城",
+                "kind": "district",
+                "highlights": ["重复名称应被去重"],
+            },
+            {
+                "name": "",
+                "kind": "attraction",
+                "highlights": ["空名称应被丢弃"],
+            },
+            {
+                "name": "this is a very long explanatory sentence that should not be accepted as a poi name because it is not a place",
+                "kind": "attraction",
+                "highlights": ["过长名称应被丢弃"],
+            },
+        ],
+    }
+
+    grounding = HelloAgentsPoiGrounding.model_validate(payload)
+
+    assert grounding.title == "去大理值得去的POI推荐列表"
+    assert len(grounding.top_pois) == 2
+    assert [poi.name for poi in grounding.featured_pois] == ["大理古城", "洱海"]
+    assert grounding.featured_pois[0].kind == "mixed_area"
+    assert grounding.featured_pois[1].kind == "attraction"
+    assert grounding.featured_pois[0].area == "大理古城片区"
+    assert grounding.featured_pois[1].area == "环海区域"
+    assert grounding.featured_pois[0].reason == "大理旅行起点与灵魂。"
+    assert grounding.featured_pois[0].highlights == ["南门城楼", "洋人街", "白族民居", "夜景咖啡馆"]
+    assert grounding.featured_pois[0].confidence == "high"
+    assert grounding.featured_pois[0].source_urls == ["https://example.test/dali-ancient-city"]
+    assert grounding.featured_pois[0].evidence_notes == []
+    assert grounding.featured_pois[1].confidence == "medium"
+    assert grounding.poi_risks
+
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    snapshot = orchestrator._build_poi_output_snapshot(grounding)
+    assert snapshot["featured_pois"][0]["highlights"] == ["南门城楼", "洋人街", "白族民居", "夜景咖啡馆"]
+
+    collection = orchestrator._build_poi_collection(grounding)
+    assert collection["pois"][0] == {
+        "kind": "mixed-area",
+        "name": "大理古城",
+        "area": "大理古城片区",
+        "highlights": ["南门城楼", "洋人街", "白族民居", "夜景咖啡馆"],
+        "reason": "大理旅行起点与灵魂。",
+        "suggested_time": "0.5-1天",
+        "confidence": "high",
+        "source_url": "https://example.test/dali-ancient-city",
+    }
+    snapshot = orchestrator._build_poi_output_snapshot(grounding)
+    assert snapshot["featured_pois"][0]["highlights"] == ["南门城楼", "洋人街", "白族民居", "夜景咖啡馆"]
 
 
 def test_helloagents_orchestrator_warns_when_chinese_final_payload_is_not_localized(monkeypatch):
@@ -2104,6 +3506,114 @@ def test_parse_planning_response_unwraps_nested_itinerary_payload():
 
     assert payload.summary == "两天京都行程。"
     assert len(payload.days) == 1
+
+
+def test_parse_planning_response_normalizes_natural_language_times():
+    content = json.dumps(
+        {
+            "summary": "Dali trip.",
+            "total_budget_estimate": 6800,
+            "risks": [],
+            "days": [
+                {
+                    "title": "Arrival day",
+                    "summary": "Rail arrival and hotel check-in.",
+                    "total_cost": 1200,
+                    "items": [
+                        {
+                            "type": "transport",
+                            "name": "Rail to Dali",
+                            "start_time": "\u6839\u636e\u6240\u9009\u8f66\u6b21",
+                            "end_time": "\u9884\u8ba1\u508d\u665a\u524d\u62b5\u8fbe",
+                            "location": "Dali",
+                            "score": 0.8,
+                            "note": "Confirm the exact train before booking.",
+                        },
+                        {
+                            "type": "transfer",
+                            "name": "Transfer to hotel",
+                            "start_time": "\u62b5\u8fbe\u540e",
+                            "end_time": "\u7ea640-60\u5206\u949f",
+                            "location": "Dali",
+                            "score": 0.8,
+                            "note": "",
+                        },
+                        {
+                            "type": "hotel",
+                            "name": "Hotel check-in",
+                            "start_time": "\u5165\u4f4f",
+                            "end_time": "\u79bb\u5e97",
+                            "location": "Dali",
+                            "score": 0.8,
+                            "note": "",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    payload = parse_planning_response(content)
+
+    assert [(item.start_time, item.end_time) for item in payload.days[0].items] == [
+        ("09:00", "17:30"),
+        ("18:00", "19:00"),
+        ("19:30", "20:00"),
+    ]
+    assert "Original timing hint: start_time=" in payload.days[0].items[0].note
+
+
+def test_parse_planning_response_normalizes_unknown_boolean_hints():
+    content = json.dumps(
+        {
+            "summary": "Shanghai trip.",
+            "total_budget_estimate": 6800,
+            "risks": [],
+            "transport_booking_summary": {
+                "summary": "Rail is suitable.",
+                "booking_required": "unknown",
+            },
+            "days": [
+                {
+                    "title": "City walk",
+                    "summary": "Museum and waterfront.",
+                    "total_cost": 1200,
+                    "items": [
+                        {
+                            "type": "sight",
+                            "name": "Shanghai Museum",
+                            "start_time": "09:00",
+                            "end_time": "11:00",
+                            "location": "Shanghai",
+                            "score": 0.9,
+                            "note": "Start with a cultural anchor.",
+                            "booking_info": {
+                                "booking_required": "unknown",
+                                "reservation_required": "required",
+                            },
+                            "visit_requirements": {
+                                "reservation_policy": "unknown",
+                                "timed_entry": "unknown",
+                                "identity_required": "not_required",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    payload = parse_planning_response(content)
+    item = payload.days[0].items[0]
+
+    assert payload.transport_booking_summary is not None
+    assert payload.transport_booking_summary.booking_required is False
+    assert item.booking_info is not None
+    assert item.booking_info.booking_required is False
+    assert item.booking_info.reservation_required is True
+    assert item.visit_requirements is not None
+    assert item.visit_requirements.timed_entry is False
+    assert item.visit_requirements.identity_required is False
 
 
 def test_stub_orchestrator_localizes_output_for_chinese_requests():

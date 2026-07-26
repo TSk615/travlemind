@@ -5,6 +5,7 @@ import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
 import { ApiError, api, getErrorMessage, type JobRecord } from "@/lib/api"
 import { formatDateTime } from "@/lib/format"
+import { isJobActive } from "@/lib/jobStatus"
 import { useI18n } from "@/lib/useI18n"
 import { useLlmSettingsStore } from "@/stores/llmSettings"
 
@@ -294,7 +295,7 @@ async function pollJob(jobId: string, generationId: string) {
   try {
     const job = await api.getJob(jobId)
     activeJob.value = job
-    if (job.status === "queued" || job.status === "running") {
+    if (isJobActive(job.status)) {
       clearPollTimer()
       pollTimer = window.setTimeout(() => {
         void pollJob(jobId, generationId)

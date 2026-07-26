@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 WireApi = Literal["chat_completions", "responses"]
 LlmProviderProtocol = Literal["openai", "gemini", "claude", "newapi", "neiapi"]
 _ROLE_OVERRIDE_ENV_PREFIX = "TRAVELMIND_LLM_ROLE_"
+_DIRECT_GROK_SEARCH_ROLES = ("weather_specialist", "hotel_specialist", "transport_specialist")
 
 
 _DEFAULT_BASE_URLS: dict[LlmProviderProtocol, str] = {
@@ -231,6 +232,39 @@ def _collect_role_overrides_from_env(*, default: LlmEndpointConfig) -> dict[str,
     return overrides
 
 
+def _grok_direct_search_config_from_env(*, default: LlmEndpointConfig) -> LlmEndpointConfig | None:
+    raw_payload = {
+        "base_url": os.getenv("TRAVELMIND_GROK_LLM_BASE_URL") or os.getenv("GROK_API_URL"),
+        "api_key": os.getenv("TRAVELMIND_GROK_LLM_API_KEY") or os.getenv("GROK_API_KEY"),
+        "model": os.getenv("TRAVELMIND_GROK_LLM_MODEL") or os.getenv("GROK_MODEL"),
+        "wire_api": os.getenv("TRAVELMIND_GROK_LLM_WIRE_API") or "chat_completions",
+        "provider_protocol": (
+            os.getenv("TRAVELMIND_GROK_LLM_PROVIDER_PROTOCOL")
+            or os.getenv("TRAVELMIND_GROK_LLM_PROTOCOL")
+            or "newapi"
+        ),
+        "timeout_seconds": os.getenv("TRAVELMIND_GROK_LLM_TIMEOUT_SECONDS") or getattr(default, "timeout_seconds", 30.0),
+    }
+    if not all(str(raw_payload[key] or "").strip() for key in ("base_url", "api_key", "model")):
+        return None
+    return _endpoint_config_from_mapping(raw_payload, default=default)
+
+
+def _merge_grok_direct_search_role_overrides(
+    overrides: dict[str, LlmEndpointConfig],
+    *,
+    default: LlmEndpointConfig,
+) -> dict[str, LlmEndpointConfig]:
+    grok_config = _grok_direct_search_config_from_env(default=default)
+    if grok_config is None:
+        return overrides
+
+    merged = dict(overrides)
+    for role_name in _DIRECT_GROK_SEARCH_ROLES:
+        merged.setdefault(role_name, grok_config)
+    return merged
+
+
 class LlmConfig(LlmEndpointConfig):
     role_overrides: dict[str, LlmEndpointConfig] = Field(default_factory=dict)
 
@@ -267,7 +301,10 @@ class LlmConfig(LlmEndpointConfig):
 
         return cls(
             **default_config.model_dump(),
-            role_overrides=_collect_role_overrides_from_env(default=default_config),
+            role_overrides=_merge_grok_direct_search_role_overrides(
+                _collect_role_overrides_from_env(default=default_config),
+                default=default_config,
+            ),
         )
 
     @classmethod
@@ -278,5 +315,8 @@ class LlmConfig(LlmEndpointConfig):
 
         return cls(
             **default_config.model_dump(),
-            role_overrides=_collect_role_overrides_from_mapping(payload, default=default_config),
+            role_overrides=_merge_grok_direct_search_role_overrides(
+                _collect_role_overrides_from_mapping(payload, default=default_config),
+                default=default_config,
+            ),
         )

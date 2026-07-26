@@ -21,6 +21,8 @@ class JobTimelineEntry(BaseModel):
     stage: str | None = None
     stage_message: str | None = None
     progress_percent: int | None = None
+    attempt_count: int = 0
+    max_attempts: int = 3
 
 
 class JobResponse(BaseModel):
@@ -28,6 +30,10 @@ class JobResponse(BaseModel):
     status: str
     type: str
     trip_id: str | None
+    can_resume: bool = False
+    resume_from_job_id: str | None = None
+    resume_failed_role: str | None = None
+    resume_reason: str | None = None
     created_at: datetime
     updated_at: datetime
     stage: str | None = None

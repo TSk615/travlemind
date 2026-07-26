@@ -17,11 +17,11 @@ RUN pip install --no-cache-dir --default-timeout=${PIP_DEFAULT_TIMEOUT} uv
 COPY apps/api/pyproject.toml /app/apps/api/pyproject.toml
 COPY apps/api/uv.lock /app/apps/api/uv.lock
 
-RUN uv sync --frozen --project /app/apps/api --no-install-project
+RUN uv sync --frozen --no-dev --project /app/apps/api --no-install-project
 
 COPY apps/api /app/apps/api
 
-RUN uv sync --frozen --project /app/apps/api
+RUN uv sync --frozen --no-dev --project /app/apps/api
 
 FROM python:3.11-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1

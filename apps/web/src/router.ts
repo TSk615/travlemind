@@ -1,17 +1,18 @@
 import { createRouter, createWebHistory } from "vue-router"
-import HomeView from "@/views/HomeView.vue"
-import LoginView from "@/views/LoginView.vue"
-import TripsView from "@/views/TripsView.vue"
-import NewTripView from "@/views/NewTripView.vue"
-import TripDetailView from "@/views/TripDetailView.vue"
-import ExportView from "@/views/ExportView.vue"
-import AIImageStudioView from "@/views/AIImageStudioView.vue"
-import CommunityFeedView from "@/views/CommunityFeedView.vue"
-import CommunityPostDetailView from "@/views/CommunityPostDetailView.vue"
-import SettingsView from "@/views/SettingsView.vue"
-import LlmDemoView from "@/views/LlmDemoView.vue"
-import AdminView from "@/views/AdminView.vue"
 import { useAuthStore } from "@/stores/auth"
+
+const HomeView = () => import("@/views/HomeView.vue")
+const LoginView = () => import("@/views/LoginView.vue")
+const TripsView = () => import("@/views/TripsView.vue")
+const NewTripView = () => import("@/views/NewTripView.vue")
+const TripDetailView = () => import("@/views/TripDetailView.vue")
+const ExportView = () => import("@/views/ExportView.vue")
+const AIImageStudioView = () => import("@/views/AIImageStudioView.vue")
+const CommunityFeedView = () => import("@/views/CommunityFeedView.vue")
+const CommunityPostDetailView = () => import("@/views/CommunityPostDetailView.vue")
+const SettingsView = () => import("@/views/SettingsView.vue")
+const LlmDemoView = () => import("@/views/LlmDemoView.vue")
+const AdminView = () => import("@/views/AdminView.vue")
 
 export const router = createRouter({
   history: createWebHistory(),

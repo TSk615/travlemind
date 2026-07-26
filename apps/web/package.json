@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -17,11 +19,13 @@
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@tailwindcss/vite": "4.1.7",
     "@vitejs/plugin-vue": "^5.2.1",
+    "tailwindcss": "4.1.7",
     "typescript": "^5.8.3",
     "vite": "^6.3.2",
-    "vue-tsc": "^2.2.8",
-    "tailwindcss": "4.1.7",
-    "@tailwindcss/vite": "4.1.7"
+    "vitest": "^4.1.10",
+    "vue-tsc": "^2.2.8"
   }
 }

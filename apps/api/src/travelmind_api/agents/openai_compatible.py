@@ -282,6 +282,8 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
                 merged.transport_booking_summary,
                 current_plan.transport_booking_summary,
             )
+        if current_plan.stay_recommendation is not None and merged.stay_recommendation is None:
+            merged.stay_recommendation = current_plan.stay_recommendation.model_copy(deep=True)
         return merged
 
     def _should_reuse_previous_item(self, previous_item: PlannedItem, next_item: PlannedItem) -> bool:

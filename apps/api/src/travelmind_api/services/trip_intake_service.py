@@ -12,6 +12,7 @@ from travelmind_api.db.models import User
 from travelmind_api.prompts.trip_intake import build_trip_intake_initial_prompt, build_trip_intake_system_prompt
 from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
 from travelmind_api.services.llm.parser import _extract_json_payload
+from travelmind_api.services.llm.user_config import build_user_poi_role_overrides
 
 REQUIRED_FIELDS = (
     "origin",
@@ -180,6 +181,7 @@ def _resolve_llm_config(user: User) -> LlmConfig:
             "model": user.llm_model,
             "wire_api": user.llm_wire_api,
             "provider_protocol": getattr(user, "llm_provider_protocol", None),
+            "role_overrides": build_user_poi_role_overrides(user),
         }
     )
     if config is None:

@@ -141,6 +141,13 @@ function buildQuery(params?: AdminListParams): string {
   return serialized ? `?${serialized}` : ""
 }
 
+function idempotencyHeaders(): Record<string, string> {
+  const key = typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return { "Idempotency-Key": key }
+}
+
 export function handleUnauthorizedStatus(status: number, enabled = true): void {
   if (enabled && status === 401) {
     notifyUnauthorizedSession()
@@ -148,7 +155,33 @@ export function handleUnauthorizedStatus(status: number, enabled = true): void {
 }
 
 const AUTH_REFRESH_PATH = "/api/v1/auth/refresh"
+const CSRF_COOKIE_NAME = "travelmind_csrf"
+const CSRF_HEADER_NAME = "X-CSRF-Token"
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"])
 let refreshSessionPromise: Promise<boolean> | null = null
+
+function readCookie(name: string): string | null {
+  const prefix = `${encodeURIComponent(name)}=`
+  const entry = document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith(prefix))
+  return entry ? decodeURIComponent(entry.slice(prefix.length)) : null
+}
+
+function browserRequestInit(init?: RequestInit): RequestInit {
+  const requestInit = init ?? {}
+  const method = String(requestInit.method ?? "GET").toUpperCase()
+  const headers = new Headers(requestInit.headers)
+  if (UNSAFE_METHODS.has(method) && !headers.has(CSRF_HEADER_NAME)) {
+    const csrfToken = readCookie(CSRF_COOKIE_NAME)
+    if (csrfToken) {
+      headers.set(CSRF_HEADER_NAME, csrfToken)
+    }
+  }
+  return {
+    ...requestInit,
+    credentials: "include",
+    headers
+  }
+}
 
 async function refreshUnauthorizedSession(): Promise<boolean> {
   if (refreshSessionPromise) {
@@ -157,13 +190,12 @@ async function refreshUnauthorizedSession(): Promise<boolean> {
 
   refreshSessionPromise = (async () => {
     try {
-      const response = await fetch(`${appConfig.apiBaseUrl}${AUTH_REFRESH_PATH}`, {
+      const response = await fetch(`${appConfig.apiBaseUrl}${AUTH_REFRESH_PATH}`, browserRequestInit({
         method: "POST",
-        credentials: "include",
         headers: {
           "Content-Type": "application/json"
         }
-      })
+      }))
       return response.ok
     } catch {
       return false
@@ -181,10 +213,7 @@ export async function apiFetch(path: string, init?: RequestInit, options?: { ret
   const requestUrl = `${appConfig.apiBaseUrl}${path}`
 
   const send = () =>
-    fetch(requestUrl, {
-      credentials: "include",
-      ...requestInit
-    })
+    fetch(requestUrl, browserRequestInit(requestInit))
 
   let response = await send()
   if (response.status !== 401 || !retryUnauthorized || path === AUTH_REFRESH_PATH) {
@@ -205,11 +234,11 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const response = await apiFetch(
     path,
     {
+      ...requestInit,
       headers: {
         "Content-Type": "application/json",
         ...((requestInit.headers ?? {}) as Record<string, string>)
-      },
-      ...requestInit
+      }
     },
     { retryUnauthorized }
   )
@@ -239,11 +268,11 @@ async function requestEnvelope<T>(path: string, init?: RequestOptions): Promise<
   const response = await apiFetch(
     path,
     {
+      ...requestInit,
       headers: {
         "Content-Type": "application/json",
         ...((requestInit.headers ?? {}) as Record<string, string>)
-      },
-      ...requestInit
+      }
     },
     { retryUnauthorized }
   )
@@ -448,12 +477,14 @@ export const api = {
   },
   generateTrip(id: string) {
     return request<JobRecord>(`/api/v1/trips/${id}/generate`, {
-      method: "POST"
+      method: "POST",
+      headers: idempotencyHeaders()
     })
   },
   refineTrip(id: string, payload: TripRefineInput) {
     return request<JobRecord>(`/api/v1/trips/${id}/refine`, {
       method: "POST",
+      headers: idempotencyHeaders(),
       body: JSON.stringify(payload)
     })
   },
@@ -495,7 +526,8 @@ export const api = {
   },
   enrichTripImages(id: string) {
     return request<JobRecord>(`/api/v1/trips/${id}/images/enrich`, {
-      method: "POST"
+      method: "POST",
+      headers: idempotencyHeaders()
     })
   },
   getLlmSettings() {
@@ -507,13 +539,13 @@ export const api = {
       body: JSON.stringify(payload)
     })
   },
-  listLlmModels(payload: { provider_protocol?: string; base_url?: string; api_key?: string; timeout_seconds?: number }) {
+  listLlmModels(payload: { scope?: "agent" | "poi"; provider_protocol?: string; base_url?: string; api_key?: string; timeout_seconds?: number }) {
     return request<LlmModelsResponse>("/api/v1/llm/models", {
       method: "POST",
       body: JSON.stringify(payload)
     })
   },
-  testLlmConnection(payload: { provider_protocol?: string; base_url?: string; api_key?: string; model?: string; wire_api?: string; timeout_seconds?: number }) {
+  testLlmConnection(payload: { scope?: "agent" | "poi"; provider_protocol?: string; base_url?: string; api_key?: string; model?: string; wire_api?: string; timeout_seconds?: number }) {
     return request<LlmConnectionTestResponse>("/api/v1/llm/test", {
       method: "POST",
       body: JSON.stringify(payload)
@@ -528,17 +560,30 @@ export const api = {
   exportPdf(trip_id: string) {
     return request<JobRecord>("/api/v1/exports/pdf", {
       method: "POST",
+      headers: idempotencyHeaders(),
       body: JSON.stringify({ trip_id })
     })
   },
   exportTrip(payload: TripExportPayload) {
     return request<JobRecord>("/api/v1/exports", {
       method: "POST",
+      headers: idempotencyHeaders(),
       body: JSON.stringify(payload)
     })
   },
   getJob(id: string) {
     return request<JobRecord>(`/api/v1/jobs/${id}`)
+  },
+  retryJob(id: string) {
+    return request<JobRecord>(`/api/v1/jobs/${id}/retry`, {
+      method: "POST",
+      headers: idempotencyHeaders()
+    })
+  },
+  cancelJob(id: string) {
+    return request<JobRecord>(`/api/v1/jobs/${id}/cancel`, {
+      method: "POST"
+    })
   },
   composeImagePrompt(payload: ImagePromptComposeInput) {
     return request<ImagePromptComposeResult>("/api/v1/images/prompts/compose", {
@@ -548,7 +593,8 @@ export const api = {
   },
   generateImage(formData: FormData) {
     return requestFormData<ImageGenerationStartResponse>("/api/v1/images/generate", formData, {
-      method: "POST"
+      method: "POST",
+      headers: idempotencyHeaders()
     })
   },
   listImages(params?: { mode?: string; status?: string; visibility?: string }) {

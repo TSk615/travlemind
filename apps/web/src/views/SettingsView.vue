@@ -30,6 +30,12 @@ const agentModelsError = ref<string | null>(null)
 const agentTestLoading = ref(false)
 const agentTestMessage = ref<string | null>(null)
 const agentTestError = ref<string | null>(null)
+const poiModelOptions = ref<LlmModelInfo[]>([])
+const poiModelsLoading = ref(false)
+const poiModelsError = ref<string | null>(null)
+const poiTestLoading = ref(false)
+const poiTestMessage = ref<string | null>(null)
+const poiTestError = ref<string | null>(null)
 let xhsPollTimer: number | null = null
 void settingsStore.bootstrap()
 
@@ -40,6 +46,11 @@ const form = reactive<{
   agent_model: string
   agent_wire_api: LlmWireApi
   agent_provider: LlmAgentProvider
+  poi_provider_protocol: LlmProviderProtocol
+  poi_base_url: string
+  poi_api_key: string
+  poi_model: string
+  poi_wire_api: LlmWireApi
   search_provider: SearchServiceProvider
   search_transport: SearchServiceTransport
   search_base_url: string
@@ -57,6 +68,11 @@ const form = reactive<{
   agent_model: "",
   agent_wire_api: "responses",
   agent_provider: "standard",
+  poi_provider_protocol: "openai",
+  poi_base_url: "",
+  poi_api_key: "",
+  poi_model: "",
+  poi_wire_api: "responses",
   search_provider: "groksearch",
   search_transport: "mcp",
   search_base_url: "",
@@ -101,6 +117,10 @@ const enCopy = {
   modelFetchSuccess: "Models loaded. Choose one from the model field.",
   modelFetchEmpty: "The provider returned no selectable models.",
   modelFetchError: "Unable to fetch models",
+  fetchedModelsLabel: "Fetched models",
+  fetchedModelsHint: "Pick a fetched model to fill the model field, or keep typing a custom model name.",
+  fetchedModelsPlaceholder: "Select a fetched model",
+  currentModelOption: "current value",
   testConnection: "Test connection",
   testingConnection: "Testing...",
   testConnectionSuccessTitle: "Connection test passed",
@@ -259,6 +279,7 @@ const xhsCopy = computed(() =>
       }
 )
 const agentStoredKeyText = computed(() => settingsStore.settings?.agent.api_key_masked?.trim() || copy.value.noStoredKey)
+const poiStoredKeyText = computed(() => settingsStore.settings?.agent.poi_api_key_masked?.trim() || copy.value.noStoredKey)
 const searchStoredKeyText = computed(() => settingsStore.settings?.search.api_key_masked?.trim() || copy.value.noStoredKey)
 const imageStoredKeyText = computed(() => settingsStore.settings?.image.api_key_masked?.trim() || copy.value.noStoredKey)
 const isGrokSearchProvider = computed(() => form.search_provider === "groksearch")
@@ -271,22 +292,46 @@ const agentProtocolDefaultBaseUrls: Record<LlmProviderProtocol, string> = {
   neiapi: "https://api.neiapi.com/v1"
 }
 const agentBaseUrlPlaceholder = computed(() => agentProtocolDefaultBaseUrls[form.agent_provider_protocol])
+const poiBaseUrlPlaceholder = computed(() => agentProtocolDefaultBaseUrls[form.poi_provider_protocol])
 const openAiWireApiLocked = computed(() => form.agent_provider_protocol === "openai")
-const agentEndpointPreview = computed(() => {
-  const base = (form.agent_base_url.trim() || agentBaseUrlPlaceholder.value).replace(/\/+$/, "")
-  if (form.agent_provider_protocol === "claude") {
+const openAiPoiWireApiLocked = computed(() => form.poi_provider_protocol === "openai")
+
+function buildEndpointPreview(
+  provider: LlmProviderProtocol,
+  baseUrl: string,
+  fallbackBaseUrl: string,
+  modelValue: string,
+  wireApi: LlmWireApi
+): string {
+  const base = (baseUrl.trim() || fallbackBaseUrl).replace(/\/+$/, "")
+  if (provider === "claude") {
     return base.endsWith("/messages") ? base : `${base}/messages`
   }
-  if (form.agent_provider_protocol === "gemini") {
-    const model = form.agent_model.trim() || "{model}"
+  if (provider === "gemini") {
+    const model = modelValue.trim() || "{model}"
     const normalized = base.endsWith("/models") ? base : `${base}/models`
     return `${normalized}/${model.startsWith("models/") ? model.slice("models/".length) : model}:generateContent`
   }
-  if (form.agent_wire_api === "responses") {
+  if (wireApi === "responses") {
     return base.endsWith("/responses") ? base : `${base}/responses`
   }
   return base.endsWith("/chat/completions") ? base : `${base}/chat/completions`
-})
+}
+
+const agentEndpointPreview = computed(() =>
+  buildEndpointPreview(form.agent_provider_protocol, form.agent_base_url, agentBaseUrlPlaceholder.value, form.agent_model, form.agent_wire_api)
+)
+const poiEndpointPreview = computed(() =>
+  buildEndpointPreview(form.poi_provider_protocol, form.poi_base_url, poiBaseUrlPlaceholder.value, form.poi_model, form.poi_wire_api)
+)
+const agentModelValue = computed(() => form.agent_model.trim())
+const agentModelValueInOptions = computed(() =>
+  agentModelOptions.value.some((model) => model.id === agentModelValue.value)
+)
+const poiModelValue = computed(() => form.poi_model.trim())
+const poiModelValueInOptions = computed(() =>
+  poiModelOptions.value.some((model) => model.id === poiModelValue.value)
+)
 
 function defaultWireApiForProtocol(protocol: LlmProviderProtocol): LlmWireApi {
   return protocol === "newapi" || protocol === "neiapi" ? "chat_completions" : "responses"
@@ -341,6 +386,11 @@ watch(
       form.agent_wire_api = "responses"
     }
     form.agent_provider = settings?.agent.agent_provider ?? "standard"
+    form.poi_provider_protocol = settings?.agent.poi_provider_protocol ?? "openai"
+    form.poi_base_url = settings?.agent.poi_base_url ?? ""
+    form.poi_api_key = ""
+    form.poi_model = settings?.agent.poi_model ?? ""
+    form.poi_wire_api = settings?.agent.poi_wire_api ?? defaultWireApiForProtocol(form.poi_provider_protocol)
     form.search_provider = settings?.search.provider ?? "groksearch"
     form.search_transport =
       settings?.search.provider === "groksearch"
@@ -360,6 +410,10 @@ watch(
     agentModelsError.value = null
     agentTestMessage.value = null
     agentTestError.value = null
+    poiModelOptions.value = []
+    poiModelsError.value = null
+    poiTestMessage.value = null
+    poiTestError.value = null
   },
   { immediate: true }
 )
@@ -379,6 +433,24 @@ watch(
     agentModelsError.value = null
     agentTestMessage.value = null
     agentTestError.value = null
+  }
+)
+
+watch(
+  () => form.poi_provider_protocol,
+  (provider, previousProvider) => {
+    const previousDefault = previousProvider ? agentProtocolDefaultBaseUrls[previousProvider] : ""
+    if (!form.poi_base_url.trim() || form.poi_base_url.trim() === previousDefault) {
+      form.poi_base_url = agentProtocolDefaultBaseUrls[provider]
+    }
+    const previousWireDefault = previousProvider ? defaultWireApiForProtocol(previousProvider) : null
+    if (provider === "openai" || !form.poi_wire_api || form.poi_wire_api === previousWireDefault) {
+      form.poi_wire_api = defaultWireApiForProtocol(provider)
+    }
+    poiModelOptions.value = []
+    poiModelsError.value = null
+    poiTestMessage.value = null
+    poiTestError.value = null
   }
 )
 
@@ -514,6 +586,14 @@ async function fetchAgentModels() {
   }
 }
 
+function handleAgentModelSelection(event: Event) {
+  form.agent_model = (event.target as HTMLSelectElement).value
+}
+
+function handlePoiModelSelection(event: Event) {
+  form.poi_model = (event.target as HTMLSelectElement).value
+}
+
 async function testAgentConnection() {
   agentTestLoading.value = true
   agentTestMessage.value = null
@@ -535,6 +615,54 @@ async function testAgentConnection() {
   }
 }
 
+async function fetchPoiModels() {
+  poiModelsLoading.value = true
+  poiModelsError.value = null
+  poiTestMessage.value = null
+  poiTestError.value = null
+  saveSuccess.value = null
+  try {
+    const result = await api.listLlmModels({
+      scope: "poi",
+      provider_protocol: form.poi_provider_protocol,
+      base_url: form.poi_base_url.trim() || undefined,
+      api_key: form.poi_api_key.trim() || undefined
+    })
+    form.poi_base_url = result.base_url || form.poi_base_url
+    poiModelOptions.value = result.models
+    if (result.models.length > 0 && !form.poi_model.trim()) {
+      form.poi_model = result.models[0].id
+    }
+    saveSuccess.value = result.models.length > 0 ? copy.value.modelFetchSuccess : copy.value.modelFetchEmpty
+  } catch (error) {
+    poiModelsError.value = getErrorMessage(error, copy.value.modelFetchError)
+  } finally {
+    poiModelsLoading.value = false
+  }
+}
+
+async function testPoiConnection() {
+  poiTestLoading.value = true
+  poiTestMessage.value = null
+  poiTestError.value = null
+  saveSuccess.value = null
+  try {
+    const result = await api.testLlmConnection({
+      scope: "poi",
+      provider_protocol: form.poi_provider_protocol,
+      base_url: form.poi_base_url.trim() || undefined,
+      api_key: form.poi_api_key.trim() || undefined,
+      model: form.poi_model.trim() || undefined,
+      wire_api: form.poi_wire_api
+    })
+    poiTestMessage.value = copy.value.testConnectionSuccess.replace("{latency}", String(result.latency_ms))
+  } catch (error) {
+    poiTestError.value = getErrorMessage(error, copy.value.testConnectionError)
+  } finally {
+    poiTestLoading.value = false
+  }
+}
+
 async function save() {
   saveSuccess.value = null
 
@@ -544,7 +672,11 @@ async function save() {
       base_url: form.agent_base_url.trim(),
       model: form.agent_model.trim(),
       wire_api: form.agent_wire_api,
-      agent_provider: form.agent_provider
+      agent_provider: form.agent_provider,
+      poi_provider_protocol: form.poi_provider_protocol,
+      poi_base_url: form.poi_base_url.trim(),
+      poi_model: form.poi_model.trim(),
+      poi_wire_api: form.poi_wire_api
     },
     search: {
       provider: form.search_provider,
@@ -568,6 +700,14 @@ async function save() {
     }
   }
 
+  const nextPoiApiKey = form.poi_api_key.trim()
+  if (nextPoiApiKey) {
+    payload.agent = {
+      ...payload.agent,
+      poi_api_key: nextPoiApiKey
+    }
+  }
+
   const nextSearchApiKey = form.search_api_key.trim()
   if (nextSearchApiKey) {
     payload.search = {
@@ -587,10 +727,13 @@ async function save() {
   try {
     await settingsStore.save(payload)
     form.agent_api_key = ""
+    form.poi_api_key = ""
     form.search_api_key = ""
     form.image_api_key = ""
     agentTestMessage.value = null
     agentTestError.value = null
+    poiTestMessage.value = null
+    poiTestError.value = null
     saveSuccess.value = copy.value.saveSuccessMessage
   } catch {
     // The store already exposes a user-facing save error state.
@@ -705,14 +848,23 @@ void refreshXhsStatus()
           <input
             id="agent-model"
             v-model="form.agent_model"
-            list="agent-model-options"
             :placeholder="copy.modelPlaceholder"
           />
-          <datalist id="agent-model-options">
-            <option v-for="model in agentModelOptions" :key="model.id" :value="model.id">
-              {{ model.name || model.id }}
+          <select
+            v-if="agentModelOptions.length > 0"
+            :value="agentModelValue"
+            :aria-label="copy.fetchedModelsLabel"
+            @change="handleAgentModelSelection"
+          >
+            <option value="">{{ copy.fetchedModelsPlaceholder }}</option>
+            <option v-if="agentModelValue && !agentModelValueInOptions" :value="agentModelValue">
+              {{ agentModelValue }} ({{ copy.currentModelOption }})
             </option>
-          </datalist>
+            <option v-for="model in agentModelOptions" :key="model.id" :value="model.id">
+              {{ model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id }}
+            </option>
+          </select>
+          <p v-if="agentModelOptions.length > 0" class="muted">{{ copy.fetchedModelsHint }}</p>
         </div>
 
         <div class="field">
@@ -745,6 +897,108 @@ void refreshXhsStatus()
         <div class="field field--full">
           <p class="muted"><strong>{{ copy.storedKeyLabel }}:</strong> {{ agentStoredKeyText }}</p>
           <p class="muted">{{ copy.keyHelp }}</p>
+        </div>
+
+        <div class="field field--full panel-subsection">
+          <p class="kicker">POI</p>
+          <p class="muted">Optional override for the POI specialist only. Use this when POI discovery should run on a different model such as Grok.</p>
+        </div>
+
+        <div class="field">
+          <label for="poi-provider-protocol">{{ copy.protocolLabel }}</label>
+          <select id="poi-provider-protocol" v-model="form.poi_provider_protocol">
+            <option value="openai">{{ copy.protocolOpenAI }}</option>
+            <option value="newapi">{{ copy.protocolNewApi }}</option>
+            <option value="gemini">{{ copy.protocolGemini }}</option>
+            <option value="claude">{{ copy.protocolClaude }}</option>
+            <option value="neiapi">{{ copy.protocolNeiApi }}</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="poi-wire-api">{{ copy.wireApiLabel }}</label>
+          <select id="poi-wire-api" v-model="form.poi_wire_api" :disabled="openAiPoiWireApiLocked">
+            <option value="responses">{{ copy.wireApiResponses }}</option>
+            <option value="chat_completions">{{ copy.wireApiChat }}</option>
+          </select>
+        </div>
+
+        <div class="field field--full">
+          <label for="poi-base-url">{{ copy.baseUrlLabel }}</label>
+          <input id="poi-base-url" v-model="form.poi_base_url" :placeholder="poiBaseUrlPlaceholder" />
+          <p class="muted"><strong>{{ copy.endpointPreviewLabel }}:</strong> {{ poiEndpointPreview }}</p>
+        </div>
+
+        <StatePanel
+          v-if="poiModelsError"
+          class="field field--full"
+          kind="error"
+          :title="copy.modelFetchError"
+          :message="poiModelsError"
+          compact
+        />
+        <StatePanel
+          v-if="poiTestMessage"
+          class="field field--full"
+          kind="info"
+          :title="copy.testConnectionSuccessTitle"
+          :message="poiTestMessage"
+          compact
+        />
+        <StatePanel
+          v-if="poiTestError"
+          class="field field--full"
+          kind="error"
+          :title="copy.testConnectionError"
+          :message="poiTestError"
+          compact
+        />
+
+        <div class="field">
+          <label for="poi-model">{{ copy.modelLabel }}</label>
+          <input id="poi-model" v-model="form.poi_model" :placeholder="'grok-4.20-multi-agent-xhigh'" />
+          <select
+            v-if="poiModelOptions.length > 0"
+            :value="poiModelValue"
+            :aria-label="copy.fetchedModelsLabel"
+            @change="handlePoiModelSelection"
+          >
+            <option value="">{{ copy.fetchedModelsPlaceholder }}</option>
+            <option v-if="poiModelValue && !poiModelValueInOptions" :value="poiModelValue">
+              {{ poiModelValue }} ({{ copy.currentModelOption }})
+            </option>
+            <option v-for="model in poiModelOptions" :key="model.id" :value="model.id">
+              {{ model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id }}
+            </option>
+          </select>
+          <p v-if="poiModelOptions.length > 0" class="muted">{{ copy.fetchedModelsHint }}</p>
+        </div>
+
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" :disabled="poiModelsLoading || settingsStore.pending" @click="fetchPoiModels">
+            {{ poiModelsLoading ? copy.fetchingModels : copy.fetchModels }}
+          </button>
+        </div>
+
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="button" :disabled="poiTestLoading || settingsStore.pending" @click="testPoiConnection">
+            {{ poiTestLoading ? copy.testingConnection : copy.testConnection }}
+          </button>
+        </div>
+
+        <div class="field">
+          <label for="poi-api-key">{{ copy.apiKeyLabel }}</label>
+          <input id="poi-api-key" v-model="form.poi_api_key" type="password" autocomplete="new-password" :placeholder="copy.apiKeyPlaceholder" />
+        </div>
+
+        <div class="field field--full">
+          <p class="muted">
+            <strong>{{ copy.storedKeyLabel }}:</strong>
+            {{ poiStoredKeyText }}
+          </p>
+          <p class="muted">Leave every POI field blank if you want POI to follow the main agent model.</p>
         </div>
 
         <div class="field field--full panel-subsection">

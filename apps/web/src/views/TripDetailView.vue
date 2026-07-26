@@ -26,6 +26,7 @@ import TmSelect from "@/components/ui/TmSelect.vue"
 import TmTextarea from "@/components/ui/TmTextarea.vue"
 import TmAnchorNav from "@/components/ui/TmAnchorNav.vue"
 import { api, getErrorMessage, type JobRecord } from "@/lib/api"
+import { isJobActive, isJobTerminal } from "@/lib/jobStatus"
 import { enrichGeneratedItineraryWithBudget } from "@/lib/budgeting"
 import { generateTripInBrowser, refineTripInBrowser } from "@/lib/browserPlanner"
 import { formatCurrency, formatDateRange, formatDateTime } from "@/lib/format"
@@ -91,6 +92,10 @@ const error = ref<string | null>(null)
 const activeJob = ref<JobRecord | null>(null)
 const generatePending = ref(false)
 const generateError = ref<string | null>(null)
+const resumeGeneratePending = ref(false)
+const resumeGenerateError = ref<string | null>(null)
+const cancelJobPending = ref(false)
+const cancelJobError = ref<string | null>(null)
 const exportPending = ref(false)
 const exportError = ref<string | null>(null)
 const imageEnrichPending = ref(false)
@@ -124,6 +129,7 @@ const communityNoteDraft = ref("")
 const communityEditorOpen = ref(false)
 const communityEditorMode = ref<"create" | "edit">("create")
 let timer: number | null = null
+const cancelRequestedJobIds = new Set<string>()
 const JOB_POLL_INTERVAL_MS = 3000
 
 const { locale, t } = useI18n()
@@ -136,6 +142,9 @@ const enCopy = {
   browserRefineMessage: "Calling the third-party model directly from this browser with the current itinerary and refine instruction.",
   browserSaved: "Saved back to backend",
   browserSavedMessage: "The generated itinerary has been persisted to your Trip record.",
+  resumeGenerationActionLabel: "Continue from failed node",
+  resumeGenerationRunningLabel: "Continuing...",
+  resumeGenerationFailedTitle: "Failed to continue generation",
   directModeTitle: "Browser-direct third-party model mode",
   directModeMessage: "Trip generation no longer depends on your backend model API. The browser now calls the third-party model endpoint directly.",
   quickRefineTitle: "Quick refine",
@@ -255,6 +264,9 @@ const zhCopy = {
   browserRefineMessage: "正在由当前浏览器结合当前行程和 refine 指令直接调用第三方模型。",
   browserSaved: "已回写到后端",
   browserSavedMessage: "生成后的行程已经写回当前 Trip 记录。",
+  resumeGenerationActionLabel: "从失败节点继续",
+  resumeGenerationRunningLabel: "继续生成中...",
+  resumeGenerationFailedTitle: "继续生成失败",
   directModeTitle: "浏览器直连第三方模型模式",
   directModeMessage: "Trip 生成已不再依赖后端模型 API。当前浏览器会直接调用第三方模型端点。",
   quickRefineTitle: "快速微调",
@@ -355,15 +367,27 @@ const zhCopy = {
 const copy = computed<typeof enCopy>(() => (locale.value === "zh-CN" ? (zhCopy as typeof enCopy) : enCopy))
 const exportActionLabel = computed(() => (locale.value === "zh-CN" ? "导出攻略包" : copy.value.exportActionLabel))
 const exportActionRunningLabel = computed(() => (locale.value === "zh-CN" ? "导出攻略包中..." : copy.value.exportActionRunningLabel))
+const cancelJobActionLabel = computed(() => (locale.value === "zh-CN" ? "停止任务" : "Stop task"))
+const cancelJobRunningLabel = computed(() => (locale.value === "zh-CN" ? "正在停止..." : "Stopping..."))
+const cancelJobFailedTitle = computed(() => (locale.value === "zh-CN" ? "停止任务失败" : "Failed to stop task"))
+const cancelJobConfirmMessage = computed(() =>
+  locale.value === "zh-CN"
+    ? "停止当前任务？已发出的上游请求可能会在后台短暂收尾，但页面会立即取消这个任务。"
+    : "Stop the current task? In-flight upstream requests may take a moment to unwind, but this job will be cancelled now."
+)
 const tripId = computed(() => String(props.id ?? ""))
 const routeJobId = computed(() => String(props.jobId ?? ""))
 const hasItinerary = computed(() => Boolean(trip.value?.itinerary))
-const isJobRunning = computed(() => activeJob.value?.status === "queued" || activeJob.value?.status === "running")
-const actionLocked = computed(() => generatePending.value || refinePending.value || exportPending.value || deletePending.value || itinerarySavePending.value || isJobRunning.value)
+const isJobRunning = computed(() => isJobActive(activeJob.value?.status))
+const canCancelActiveJob = computed(() => Boolean(activeJob.value && isJobRunning.value && !activeJob.value.job_id.startsWith("browser:")))
+const actionLocked = computed(() => generatePending.value || resumeGeneratePending.value || refinePending.value || exportPending.value || deletePending.value || itinerarySavePending.value || isJobRunning.value)
 const imageEnrichInProgress = computed(() => activeJob.value?.type === "trip.image_enrich" && isJobRunning.value)
 const canRetryImageEnrichment = computed(() => Boolean(hasItinerary.value && !imageEnrichPending.value && !imageEnrichInProgress.value))
 const canUseBrowserModel = computed(() => settingsStore.loaded && settingsStore.isConfigured)
 const canGenerate = computed(() => settingsStore.loaded && settingsStore.isConfigured)
+const canResumeGeneration = computed(() =>
+  Boolean(activeJob.value?.status === "failed" && activeJob.value?.type === "trip.generate" && activeJob.value?.can_resume && !resumeGeneratePending.value && !isJobRunning.value)
+)
 const usesHelloAgents = computed(() => settingsStore.usesHelloAgents)
 const communityPublication = computed(() => trip.value?.community_post ?? null)
 const communityActionLocked = computed(() => actionLocked.value || communityPending.value)
@@ -409,7 +433,7 @@ const shouldLockNavigation = computed(() => {
   if (!["trip.generate", "trip.refine"].includes(activeJob.value.type)) {
     return false
   }
-  return activeJob.value.status === "queued" || activeJob.value.status === "running"
+  return isJobActive(activeJob.value.status)
 })
 const deleteTripLabel = computed(() => (locale.value === "zh-CN" ? "删除行程" : "Delete trip"))
 const deletingTripLabel = computed(() => (locale.value === "zh-CN" ? "删除中..." : "Deleting..."))
@@ -939,6 +963,49 @@ const transportBookingSummary = computed<TransportBookingSummary | null>(() => {
   }
   return coerceTransportBookingSummary((latestTrace.value?.transport_guidance as Record<string, unknown> | null | undefined) ?? null)
 })
+const stayRecommendation = computed(() => trip.value?.itinerary?.stay_recommendation ?? null)
+const stayPanelTitle = computed(() => (locale.value === "zh-CN" ? "住宿推荐" : "Stay recommendation"))
+const stayHotelFields = computed(() => {
+  const hotel = stayRecommendation.value?.final_recommended_hotel
+  if (!hotel) {
+    return []
+  }
+  return [
+    { label: locale.value === "zh-CN" ? "推荐酒店" : "Recommended hotel", value: fieldValue(hotel.name) },
+    { label: locale.value === "zh-CN" ? "区域" : "Area", value: fieldValue(hotel.area) },
+    { label: locale.value === "zh-CN" ? "类型" : "Type", value: fieldValue(hotel.hotel_type) },
+    { label: locale.value === "zh-CN" ? "价格" : "Price", value: fieldValue(hotel.price_hint) },
+    { label: locale.value === "zh-CN" ? "评价" : "Reviews", value: fieldValue([hotel.review_score, hotel.review_count].filter(Boolean).join(" / ")) },
+    { label: locale.value === "zh-CN" ? "匹配度" : "Fit", value: fieldValue(hotel.preference_match || hotel.reason) }
+  ]
+})
+const stayHighlights = computed(() => {
+  const stay = stayRecommendation.value
+  if (!stay) {
+    return []
+  }
+  return uniqueCompactStrings([
+    ...(stay.recommended_areas ?? []).map((area) => `${locale.value === "zh-CN" ? "推荐区域" : "Area"}: ${area}`),
+    ...(stay.stay_strategy ?? []),
+    ...(stay.budget_notes ?? []),
+    ...(stay.review_notes ?? []),
+    ...(stay.preference_match_notes ?? []),
+    ...(stay.price_timeliness_notes ?? []),
+    ...(stay.hotel_risks ?? [])
+  ]).slice(0, 6)
+})
+const stayCandidateRows = computed(() => (stayRecommendation.value?.hotel_candidates ?? []).slice(0, 3))
+const staySourceUrls = computed(() => {
+  const stay = stayRecommendation.value
+  if (!stay) {
+    return []
+  }
+  return uniqueCompactStrings([
+    ...(stay.source_urls ?? []),
+    ...(stay.final_recommended_hotel?.source_urls ?? []),
+    ...stayCandidateRows.value.flatMap((candidate) => candidate.source_urls ?? [])
+  ]).slice(0, 4)
+})
 const transportBookingFields = computed(() => {
   const summary = transportBookingSummary.value
   if (!summary) {
@@ -1039,6 +1106,20 @@ function splitDraftLines(value: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
+}
+
+function uniqueCompactStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const normalized = (value ?? "").trim()
+    if (!normalized || seen.has(normalized)) {
+      continue
+    }
+    seen.add(normalized)
+    result.push(normalized)
+  }
+  return result
 }
 
 function normalizeDraftAmount(value: string | number | null | undefined): number {
@@ -1358,8 +1439,12 @@ function clampProgress(value?: number | null, status?: string): number {
   return 0
 }
 
+function isTerminalJobStatus(status?: string | null): boolean {
+  return isJobTerminal(status)
+}
+
 function formatProgress(value?: number | null, status?: string): string {
-  if (typeof value === "number" || status === "queued" || status === "running" || status === "completed") {
+  if (typeof value === "number" || isJobActive(status) || status === "completed") {
     return `${clampProgress(value, status)}%`
   }
   return copy.value.notAvailable
@@ -1419,6 +1504,9 @@ function transportLabel(value: string): string {
 function formatStage(value?: string | null): string {
   if (!value) {
     return copy.value.notAvailable
+  }
+  if (value === "cancelled") {
+    return locale.value === "zh-CN" ? "已取消" : "Cancelled"
   }
   return copy.value.jobStages[value] ?? value
 }
@@ -1844,7 +1932,10 @@ async function pollJob(jobId: string, kind: "generate" | "export" | "image_enric
 
   try {
     activeJob.value = await api.getJob(jobId)
-    if (activeJob.value.status === "completed" || activeJob.value.status === "failed") {
+    if (cancelRequestedJobIds.has(jobId) && activeJob.value.status !== "cancelled") {
+      return
+    }
+    if (isTerminalJobStatus(activeJob.value.status)) {
       if (kind === "generate" && activeJob.value.status === "completed") {
         const followupJobId = String(activeJob.value.result?.followup_job_id ?? "").trim()
         if (followupJobId) {
@@ -1869,7 +1960,7 @@ async function pollJob(jobId: string, kind: "generate" | "export" | "image_enric
           exportError.value = message
         }
       }
-      if (kind !== "export") {
+      if (kind !== "export" && activeJob.value.status !== "cancelled") {
         schedulePendingImageRefresh()
       }
       return
@@ -1966,6 +2057,49 @@ async function generate() {
     }
   } finally {
     generatePending.value = false
+  }
+}
+
+async function resumeFailedGeneration() {
+  const failedJobId = activeJob.value?.job_id
+  if (!failedJobId || !canResumeGeneration.value) {
+    return
+  }
+
+  resumeGeneratePending.value = true
+  resumeGenerateError.value = null
+  generateError.value = null
+
+  try {
+    const job = await api.retryJob(failedJobId)
+    activeJob.value = job
+    await pollJob(job.job_id, "generate")
+  } catch (value) {
+    resumeGenerateError.value = getErrorMessage(value, copy.value.resumeGenerationFailedTitle)
+  } finally {
+    resumeGeneratePending.value = false
+  }
+}
+
+async function cancelActiveJob() {
+  const job = activeJob.value
+  if (!job || !canCancelActiveJob.value || cancelJobPending.value || !window.confirm(cancelJobConfirmMessage.value)) {
+    return
+  }
+
+  cancelJobPending.value = true
+  cancelJobError.value = null
+  cancelRequestedJobIds.add(job.job_id)
+  try {
+    const cancelledJob = await api.cancelJob(job.job_id)
+    stopPolling()
+    activeJob.value = cancelledJob
+    await loadTrip(false)
+  } catch (value) {
+    cancelRequestedJobIds.delete(job.job_id)
+    cancelJobError.value = getErrorMessage(value, cancelJobFailedTitle.value)
+  } finally {
+    cancelJobPending.value = false
   }
 }
 
@@ -2214,6 +2348,8 @@ watch(
     stopPolling()
     activeJob.value = null
     generateError.value = null
+    cancelJobError.value = null
+    cancelRequestedJobIds.clear()
     exportError.value = null
     imageEnrichError.value = null
     refineError.value = null
@@ -2331,6 +2467,8 @@ onBeforeUnmount(() => {
       <LlmStatusNotice compact />
       <StatePanel v-if="isDebug" :kind="actualExecutionKind" :title="currentModeTitle" :message="currentModeMessage" compact />
       <StatePanel v-if="generateError" kind="error" :title="t('tripDetail.generationFailedTitle')" :message="generateError" compact />
+      <StatePanel v-if="resumeGenerateError" kind="error" :title="copy.resumeGenerationFailedTitle" :message="resumeGenerateError" compact />
+      <StatePanel v-if="cancelJobError" kind="error" :title="cancelJobFailedTitle" :message="cancelJobError" compact />
       <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="refineError" compact />
       <StatePanel v-if="exportError" kind="error" :title="t('tripDetail.exportFailedTitle')" :message="exportError" compact />
       <StatePanel v-if="imageEnrichError" kind="error" :title="copy.enrichImagesActionLabel" :message="imageEnrichError" compact />
@@ -2353,6 +2491,12 @@ onBeforeUnmount(() => {
                 <p class="tm-detail__section-desc">{{ activeJob ? activeJob.job_id : noActiveJobMessage }}</p>
               </div>
               <div class="tm-detail__section-actions">
+                <TmButton v-if="canCancelActiveJob || cancelJobPending" variant="danger" size="sm" :disabled="!canCancelActiveJob" :loading="cancelJobPending" @click="cancelActiveJob">
+                  {{ cancelJobPending ? cancelJobRunningLabel : cancelJobActionLabel }}
+                </TmButton>
+                <TmButton v-if="canResumeGeneration || resumeGeneratePending" variant="primary" size="sm" :disabled="!canResumeGeneration" :loading="resumeGeneratePending" @click="resumeFailedGeneration">
+                  {{ resumeGeneratePending ? copy.resumeGenerationRunningLabel : copy.resumeGenerationActionLabel }}
+                </TmButton>
                 <TmButton variant="ghost" size="sm" :disabled="!canRetryImageEnrichment" :loading="imageEnrichPending" @click="retryImageEnrichment">
                   {{ imageEnrichPending ? copy.enrichImagesActionRunningLabel : copy.enrichImagesActionLabel }}
                 </TmButton>
@@ -2486,11 +2630,34 @@ onBeforeUnmount(() => {
           </section>
 
           <!-- Transport & Booking -->
-          <section v-if="transportBookingSummary || reservationEntries.length" id="booking" class="tm-detail__section">
+          <section v-if="stayRecommendation || transportBookingSummary || reservationEntries.length" id="booking" class="tm-detail__section">
             <div class="tm-detail__section-header">
               <p class="tm-detail__section-kicker">{{ bookingPanelTitle }}</p>
               <h2 class="tm-detail__section-title">{{ bookingPanelTitle }}</h2>
               <p class="tm-detail__section-desc">{{ bookingPanelDescription }}</p>
+            </div>
+            <div v-if="stayRecommendation" class="tm-detail__subsection">
+              <h3>{{ stayPanelTitle }}</h3>
+              <dl v-if="stayHotelFields.length" class="tm-detail__data-grid">
+                <div v-for="field in stayHotelFields" :key="field.label" class="tm-detail__data-pair">
+                  <dt>{{ field.label }}</dt>
+                  <dd>{{ field.value }}</dd>
+                </div>
+              </dl>
+              <div v-if="stayHighlights.length" class="tm-detail__chips">
+                <span v-for="note in stayHighlights" :key="note" class="tm-detail__chip">{{ note }}</span>
+              </div>
+              <ul v-if="stayCandidateRows.length" class="tm-detail__list">
+                <li v-for="candidate in stayCandidateRows" :key="candidate.name">
+                  <strong>{{ candidate.name }}</strong>
+                  <span v-if="candidate.area"> · {{ candidate.area }}</span>
+                  <span v-if="candidate.price_hint"> · {{ candidate.price_hint }}</span>
+                  <p v-if="candidate.reason || candidate.preference_match" class="tm-detail__muted">{{ candidate.preference_match || candidate.reason }}</p>
+                </li>
+              </ul>
+              <div v-if="staySourceUrls.length" class="tm-detail__inline-links">
+                <a v-for="url in staySourceUrls" :key="url" class="tm-detail__link" :href="url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+              </div>
             </div>
             <div v-if="transportBookingSummary" class="tm-detail__subsection">
               <h3>{{ transportBookingTitle }}</h3>
@@ -2732,7 +2899,7 @@ onBeforeUnmount(() => {
                           <strong>{{ item.name }}</strong>
                           <div class="tm-detail__item-badges">
                             <span class="tm-detail__badge">{{ formatItemType(item.type) }}</span>
-                            <span v-if="formatImagePriorityTier(item.image_priority_tier)" class="tm-detail__badge">{{ formatImagePriorityTier(item.image_priority_tier) }}</span>
+                            <span v-if="formatImagePriorityTier(item.image_priority_tier)" class="tm-detail__badge" :title="item.image_priority_reason || undefined">{{ formatImagePriorityTier(item.image_priority_tier) }}</span>
                             <StatusPill :status="formatScore(item.score)" />
                           </div>
                         </div>
@@ -2742,7 +2909,6 @@ onBeforeUnmount(() => {
                           <li v-for="line in itemBookingLines(item)" :key="`${item.id}-${line}`">{{ line }}</li>
                         </ul>
                         <a v-if="item.booking_info?.official_booking_url" class="tm-detail__link" :href="item.booking_info.official_booking_url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
-                        <p v-if="item.image_priority_reason" class="tm-detail__muted">{{ item.image_priority_reason }}</p>
                         <p v-if="formatImageStatus(item.image_status)" class="tm-detail__muted">{{ formatImageStatus(item.image_status) }}</p>
                         <p v-if="item.image_status === 'failed' && item.image_failure_reason" class="tm-detail__muted">{{ item.image_failure_reason }}</p>
                         <div v-if="item.image_urls?.length" class="tm-detail__visual-images">
@@ -3144,6 +3310,7 @@ onBeforeUnmount(() => {
 
 .tm-detail__subsection { display: flex; flex-direction: column; gap: var(--tm-space-3); padding-top: var(--tm-space-3); border-top: var(--tm-border-hairline); }
 .tm-detail__subsection-header { display: flex; justify-content: space-between; align-items: center; }
+.tm-detail__inline-links { display: flex; flex-wrap: wrap; gap: var(--tm-space-2); }
 
 .tm-detail__data-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--tm-space-3); }
 .tm-detail__data-pair dt { font-size: var(--tm-text-xs); font-weight: 700; color: var(--tm-stone); text-transform: uppercase; letter-spacing: 0.05em; }

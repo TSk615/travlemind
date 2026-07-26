@@ -1,4 +1,4 @@
-export type JobStatus = "queued" | "running" | "completed" | "failed"
+export type JobStatus = "queued" | "running" | "retrying" | "completed" | "failed" | "cancelled"
 export type LlmWireApi = "chat_completions" | "responses"
 export type LlmProviderProtocol = "openai" | "newapi" | "gemini" | "claude" | "neiapi"
 export type LlmAgentProvider = "standard" | "helloagents"
@@ -117,6 +117,36 @@ export interface TransportBookingSummary {
   source_urls?: string[]
 }
 
+export interface StayHotelCandidate {
+  name: string
+  area?: string | null
+  hotel_type?: string | null
+  reason?: string | null
+  price_hint?: string | null
+  price_checked_at?: string | null
+  price_valid_for?: string | null
+  review_score?: string | null
+  review_count?: string | null
+  review_summary?: string | null
+  preference_match?: string | null
+  booking_confidence?: string | null
+  caveats?: string[]
+  source_urls?: string[]
+}
+
+export interface StayRecommendation {
+  recommended_areas: string[]
+  final_recommended_hotel?: StayHotelCandidate | null
+  hotel_candidates: StayHotelCandidate[]
+  stay_strategy: string[]
+  budget_notes: string[]
+  price_timeliness_notes: string[]
+  review_notes: string[]
+  preference_match_notes: string[]
+  hotel_risks: string[]
+  source_urls: string[]
+}
+
 export interface ItineraryItem {
   id: string
   type: string
@@ -182,6 +212,7 @@ export interface GeneratedItinerary {
   risks: string[]
   budget_summary?: BudgetSummary | null
   transport_booking_summary?: TransportBookingSummary | null
+  stay_recommendation?: StayRecommendation | null
 }
 
 export interface TripPreferenceInput {
@@ -313,6 +344,13 @@ export interface AgentSettings {
   wire_api: LlmWireApi | null
   agent_provider: LlmAgentProvider
   configured: boolean
+  poi_provider_protocol: LlmProviderProtocol
+  poi_base_url: string | null
+  poi_model: string | null
+  poi_api_key_masked: string | null
+  poi_has_api_key: boolean
+  poi_wire_api: LlmWireApi | null
+  poi_configured: boolean
 }
 
 export interface AgentSettingsInput {
@@ -322,6 +360,11 @@ export interface AgentSettingsInput {
   wire_api?: LlmWireApi
   agent_provider?: LlmAgentProvider
   api_key?: string
+  poi_provider_protocol?: LlmProviderProtocol
+  poi_base_url?: string
+  poi_model?: string
+  poi_wire_api?: LlmWireApi
+  poi_api_key?: string
 }
 
 export interface SearchSettings {
@@ -424,6 +467,8 @@ export interface JobTimelineEntry {
   stage?: string | null
   stage_message?: string | null
   progress_percent?: number | null
+  attempt_count?: number
+  max_attempts?: number
 }
 
 export interface ExportArtifact {
@@ -452,6 +497,10 @@ export interface ExportJob {
   status: JobStatus
   type: string
   trip_id?: string | null
+  can_resume?: boolean
+  resume_from_job_id?: string | null
+  resume_failed_role?: string | null
+  resume_reason?: string | null
   created_at: string
   updated_at: string
   stage?: string | null

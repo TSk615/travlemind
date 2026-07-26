@@ -3,7 +3,7 @@
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -58,6 +58,7 @@ def get_export_file(
 def export_trip_endpoint(
     payload: ExportRequest,
     background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
@@ -69,6 +70,7 @@ def export_trip_endpoint(
         owner_user_id=current_user.id,
         trip_id=trip.id,
         payload={"trip_id": trip.id, "formats": normalize_export_formats(payload.formats)},
+        idempotency_key=idempotency_key,
     )
     dispatch_job(job.id, settings, background_tasks)
     return success_response(serialize_job(job).model_dump(mode="json"))
@@ -78,6 +80,7 @@ def export_trip_endpoint(
 def export_pdf_endpoint(
     payload: ExportPdfRequest,
     background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
@@ -89,6 +92,7 @@ def export_pdf_endpoint(
         owner_user_id=current_user.id,
         trip_id=trip.id,
         payload={"trip_id": trip.id, "formats": ["pdf"]},
+        idempotency_key=idempotency_key,
     )
     dispatch_job(job.id, settings, background_tasks)
     return success_response(serialize_job(job).model_dump(mode="json"))

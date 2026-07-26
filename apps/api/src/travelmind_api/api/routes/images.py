@@ -4,7 +4,7 @@ import json
 import mimetypes
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -37,7 +37,7 @@ from travelmind_api.services.image_storage import (
     persist_upload_file,
     resolve_image_asset_path,
 )
-from travelmind_api.services.job_service import create_job, dispatch_job, serialize_job
+from travelmind_api.services.job_service import create_job, dispatch_job, get_job_by_idempotency_key, serialize_job
 from travelmind_api.services.llm import LlmConfig
 
 router = APIRouter(prefix="/images", tags=["images"])
@@ -125,6 +125,7 @@ def compose_image_prompt_endpoint(payload: ImagePromptComposeRequest, current_us
 @router.post("/generate")
 async def generate_image_endpoint(
     background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
@@ -141,6 +142,27 @@ async def generate_image_endpoint(
     source_image: UploadFile | None = File(default=None),
     reference_files: list[UploadFile] = File(default=[]),
 ):
+    existing_job = get_job_by_idempotency_key(
+        db,
+        owner_user_id=current_user.id,
+        job_type="image.generate",
+        idempotency_key=idempotency_key,
+    )
+    if existing_job is not None:
+        generation_id = str((existing_job.payload_json or {}).get("generation_id") or "")
+        existing_generation = db.query(ImageGeneration).filter(ImageGeneration.id == generation_id).one_or_none()
+        if existing_generation is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "idempotency_state_invalid", "message": "The existing idempotent image job has no generation record."},
+            )
+        return success_response(
+            ImageGenerationStartResponse(
+                generation=serialize_image_generation(existing_generation),
+                job=serialize_job(existing_job),
+            ).model_dump(mode="json")
+        )
+
     style_tags = [str(item).strip() for item in _parse_json_list(style_tags_json) if str(item).strip()]
     reference_urls = [str(item).strip() for item in _parse_json_list(reference_urls_json) if str(item).strip()]
     if mode == "image_to_image" and source_image is None:
@@ -187,6 +209,7 @@ async def generate_image_endpoint(
         owner_user_id=current_user.id,
         trip_id=None,
         payload={"generation_id": record.id},
+        idempotency_key=idempotency_key,
     )
     dispatch_job(job.id, settings, background_tasks)
     response = ImageGenerationStartResponse(

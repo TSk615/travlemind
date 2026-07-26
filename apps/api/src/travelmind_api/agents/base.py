@@ -91,6 +91,36 @@ class TransportBookingSummary(BaseModel):
     source_urls: list[str] = Field(default_factory=list)
 
 
+class StayHotelCandidate(BaseModel):
+    name: str
+    area: str | None = None
+    hotel_type: str | None = None
+    reason: str | None = None
+    price_hint: str | None = None
+    price_checked_at: str | None = None
+    price_valid_for: str | None = None
+    review_score: str | None = None
+    review_count: str | None = None
+    review_summary: str | None = None
+    preference_match: str | None = None
+    booking_confidence: str | None = None
+    caveats: list[str] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
+
+
+class StayRecommendation(BaseModel):
+    recommended_areas: list[str] = Field(default_factory=list)
+    final_recommended_hotel: StayHotelCandidate | None = None
+    hotel_candidates: list[StayHotelCandidate] = Field(default_factory=list)
+    stay_strategy: list[str] = Field(default_factory=list)
+    budget_notes: list[str] = Field(default_factory=list)
+    price_timeliness_notes: list[str] = Field(default_factory=list)
+    review_notes: list[str] = Field(default_factory=list)
+    preference_match_notes: list[str] = Field(default_factory=list)
+    hotel_risks: list[str] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
+
+
 class PlannedLocationReference(BaseModel):
     provider: str
     poi_id: str | None = None
@@ -182,6 +212,7 @@ class PlanningResult(BaseModel):
     trace: AgentTrace
     budget_summary: BudgetSummary | None = None
     transport_booking_summary: TransportBookingSummary | None = None
+    stay_recommendation: StayRecommendation | None = None
 
 
 class SourceSummary(BaseModel):

@@ -63,6 +63,13 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
             "wire_api": None,
             "agent_provider": "standard",
             "configured": False,
+            "poi_provider_protocol": "openai",
+            "poi_base_url": None,
+            "poi_api_key_masked": None,
+            "poi_has_api_key": False,
+            "poi_model": None,
+            "poi_wire_api": None,
+            "poi_configured": False,
         },
         "search": {
             "provider": "groksearch",
@@ -96,6 +103,11 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
                 "model": "gpt-5.4-mini",
                 "wire_api": "chat_completions",
                 "agent_provider": "helloagents",
+                "poi_provider_protocol": "newapi",
+                "poi_base_url": " https://poi.example.com/v1/ ",
+                "poi_api_key": "poi-secret-4321",
+                "poi_model": "grok-4.20-multi-agent-xhigh",
+                "poi_wire_api": "chat_completions",
             },
             "search": {
                 "provider": "groksearch",
@@ -126,6 +138,13 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
     assert updated["agent"]["api_key_masked"].startswith(raw_api_key[:4])
     assert updated["agent"]["api_key_masked"].endswith(raw_api_key[-4:])
     assert updated["agent"]["api_key_masked"] != raw_api_key
+    assert updated["agent"]["poi_provider_protocol"] == "newapi"
+    assert updated["agent"]["poi_base_url"] == "https://poi.example.com/v1"
+    assert updated["agent"]["poi_model"] == "grok-4.20-multi-agent-xhigh"
+    assert updated["agent"]["poi_wire_api"] == "chat_completions"
+    assert updated["agent"]["poi_has_api_key"] is True
+    assert updated["agent"]["poi_configured"] is True
+    assert updated["agent"]["poi_api_key_masked"].startswith("poi-")
     assert updated["search"]["provider"] == "groksearch"
     assert updated["search"]["transport"] == "mcp"
     assert updated["search"]["base_url"] == "https://search.example.com/mcp"
@@ -148,7 +167,18 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
     assert get_response.json()["data"] == updated
 
     from travelmind_api.core.database import SessionLocal
+    from travelmind_api.core.database import engine
+    from travelmind_api.core.credentials import ENCRYPTED_CREDENTIAL_PREFIX
     from travelmind_api.db.models import User
+
+    with engine.connect() as connection:
+        stored = connection.exec_driver_sql(
+            "SELECT llm_api_key, poi_llm_api_key, search_service_api_key, image_api_key FROM users WHERE email = ?",
+            ("planner@example.com",),
+        ).mappings().one()
+    assert all(value.startswith(ENCRYPTED_CREDENTIAL_PREFIX) for value in stored.values())
+    assert raw_api_key not in stored["llm_api_key"]
+    assert raw_search_key not in stored["search_service_api_key"]
 
     with SessionLocal() as session:
         user = session.query(User).filter(User.email == "planner@example.com").one()
@@ -158,6 +188,11 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
         assert user.llm_wire_api == "chat_completions"
         assert user.llm_provider_protocol == "newapi"
         assert user.llm_agent_provider == "helloagents"
+        assert user.poi_llm_base_url == "https://poi.example.com/v1"
+        assert user.poi_llm_api_key == "poi-secret-4321"
+        assert user.poi_llm_model == "grok-4.20-multi-agent-xhigh"
+        assert user.poi_llm_wire_api == "chat_completions"
+        assert user.poi_llm_provider_protocol == "newapi"
         assert user.search_service_provider == "groksearch"
         assert user.search_service_transport == "mcp"
         assert user.search_service_base_url == "https://search.example.com/mcp"
@@ -168,6 +203,34 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
         assert user.image_model == "gpt-image-1"
         assert user.image_api_key == "img-secret-9012"
         assert user.image_provider == "openai_compatible"
+
+
+def test_legacy_plaintext_credentials_are_migrated_in_place(client: TestClient):
+    _register(client)
+
+    from travelmind_api.core.credentials import ENCRYPTED_CREDENTIAL_PREFIX, migrate_legacy_plaintext_credentials
+    from travelmind_api.core.database import SessionLocal, engine
+    from travelmind_api.db.models import User
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE users SET llm_api_key = ? WHERE email = ?",
+            ("legacy-plaintext-key", "planner@example.com"),
+        )
+
+    assert migrate_legacy_plaintext_credentials(engine) == 1
+
+    with engine.connect() as connection:
+        stored = connection.exec_driver_sql(
+            "SELECT llm_api_key FROM users WHERE email = ?",
+            ("planner@example.com",),
+        ).scalar_one()
+    assert stored.startswith(ENCRYPTED_CREDENTIAL_PREFIX)
+    assert "legacy-plaintext-key" not in stored
+
+    with SessionLocal() as session:
+        user = session.query(User).filter(User.email == "planner@example.com").one()
+        assert user.llm_api_key == "legacy-plaintext-key"
 
 
 
@@ -251,6 +314,51 @@ def test_search_settings_accept_groksearch_mcp_and_reject_api_transport(client: 
     )
     assert invalid_response.status_code == 422, invalid_response.text
     assert invalid_response.json()["error"]["code"] == "invalid_search_transport"
+
+
+def test_poi_model_override_requires_complete_settings(client: TestClient):
+    _register(client)
+
+    response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "agent": {
+                "provider_protocol": "newapi",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "main-key",
+                "model": "gpt-5.4",
+                "wire_api": "chat_completions",
+                "poi_provider_protocol": "newapi",
+                "poi_base_url": "https://poi.example.com/v1",
+                "poi_api_key": "poi-key",
+                "poi_wire_api": "chat_completions",
+            }
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "poi_llm_override_incomplete"
+
+    valid_response = client.put(
+        "/api/v1/settings/llm",
+        json={
+            "agent": {
+                "provider_protocol": "newapi",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "main-key",
+                "model": "gpt-5.4",
+                "wire_api": "chat_completions",
+                "poi_provider_protocol": "newapi",
+                "poi_base_url": "https://poi.example.com/v1",
+                "poi_api_key": "poi-key",
+                "poi_model": "grok-poi",
+                "poi_wire_api": "chat_completions",
+            }
+        },
+    )
+
+    assert valid_response.status_code == 200, valid_response.text
+    assert valid_response.json()["data"]["agent"]["poi_configured"] is True
 
 
 def test_runtime_settings_reject_restricted_upstream_base_urls(client: TestClient):

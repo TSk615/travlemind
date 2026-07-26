@@ -1,0 +1,18 @@
+# The repository currently contains historical mixed line endings. EditorConfig
+# enforces UTF-8/LF for edited source files without creating a repository-wide
+# normalization diff. Normalize the remaining tracked files in a dedicated
+# formatting-only change later.
+.gitattributes text eol=lf
+.editorconfig text eol=lf
+.github/workflows/*.yml text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary

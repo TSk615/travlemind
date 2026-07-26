@@ -57,6 +57,7 @@ const sections: Array<{ key: AdminSection; label: string; path: string }> = [
 const jobStatusLabels: Record<string, string> = {
   queued: "排队中",
   running: "执行中",
+  retrying: "等待重试",
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消"
@@ -122,7 +123,7 @@ function statusClass(value?: string | null) {
   const normalized = String(value || "").toLowerCase()
   return {
     "admin-pill--ok": ["completed", "active", "public"].includes(normalized),
-    "admin-pill--warn": ["queued", "running"].includes(normalized),
+    "admin-pill--warn": ["queued", "running", "retrying"].includes(normalized),
     "admin-pill--danger": ["failed", "disabled"].includes(normalized)
   }
 }

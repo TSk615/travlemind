@@ -19,6 +19,7 @@ from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.security import (
     create_access_token,
     generate_identifier,
+    generate_csrf_token,
     generate_refresh_token,
     hash_password,
     hash_refresh_token,
@@ -28,6 +29,7 @@ from travelmind_api.core.upstream_urls import UpstreamUrlError, normalize_upstre
 from travelmind_api.db.models import RefreshSession, User
 from travelmind_api.services.images.provider import IMAGE_PROVIDER_OPENAI_COMPATIBLE, is_supported_image_provider, normalize_image_provider
 from travelmind_api.services.llm.config import is_supported_provider_protocol, normalize_provider_protocol, normalize_wire_api
+from travelmind_api.services.llm.user_config import user_poi_role_override_missing_fields
 from travelmind_api.services.search_connector import normalize_search_service_provider, normalize_search_service_transport
 
 
@@ -231,6 +233,13 @@ def serialize_runtime_settings(user: User, settings: Settings) -> RuntimeSetting
             wire_api=user.llm_wire_api,
             agent_provider=normalize_agent_provider(user.llm_agent_provider, default=normalize_agent_provider(settings.agent_provider)),
             configured=bool(user.llm_base_url and user.llm_api_key and user.llm_model),
+            poi_provider_protocol=normalize_provider_protocol(getattr(user, "poi_llm_provider_protocol", None)),
+            poi_base_url=getattr(user, "poi_llm_base_url", None),
+            poi_api_key_masked=mask_api_key(getattr(user, "poi_llm_api_key", None)),
+            poi_has_api_key=bool(getattr(user, "poi_llm_api_key", None)),
+            poi_model=getattr(user, "poi_llm_model", None),
+            poi_wire_api=getattr(user, "poi_llm_wire_api", None),
+            poi_configured=bool(getattr(user, "poi_llm_base_url", None) and getattr(user, "poi_llm_api_key", None) and getattr(user, "poi_llm_model", None)),
         ),
         search=SearchSettingsResponse(
             provider=search_provider,
@@ -313,17 +322,18 @@ def attach_auth_cookies(response: Response, access_token: str, refresh_token: st
         key=settings.access_cookie_name,
         value=access_token,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=settings.auth_cookie_secure,
+        samesite=settings.cookie_samesite,
         max_age=settings.access_token_minutes * 60,
         path="/",
     )
+    attach_csrf_cookie(response, settings)
     response.set_cookie(
         key=settings.refresh_cookie_name,
         value=refresh_token,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=settings.auth_cookie_secure,
+        samesite=settings.cookie_samesite,
         max_age=settings.refresh_token_days * 24 * 60 * 60,
         path="/",
     )
@@ -335,17 +345,43 @@ def attach_access_cookie(response: Response, access_token: str, settings: Settin
         key=settings.access_cookie_name,
         value=access_token,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=settings.auth_cookie_secure,
+        samesite=settings.cookie_samesite,
         max_age=settings.access_token_minutes * 60,
+        path="/",
+    )
+    attach_csrf_cookie(response, settings)
+
+
+def attach_csrf_cookie(response: Response, settings: Settings) -> None:
+    response.set_cookie(
+        key=settings.csrf_cookie_name,
+        value=generate_csrf_token(),
+        httponly=False,
+        secure=settings.auth_cookie_secure,
+        samesite=settings.cookie_samesite,
+        max_age=settings.refresh_token_days * 24 * 60 * 60,
         path="/",
     )
 
 
 
 def clear_auth_cookies(response: Response, settings: Settings) -> None:
-    response.delete_cookie(settings.access_cookie_name, path="/")
-    response.delete_cookie(settings.refresh_cookie_name, path="/")
+    cookie_options = {
+        "path": "/",
+        "secure": settings.auth_cookie_secure,
+        "httponly": True,
+        "samesite": settings.cookie_samesite,
+    }
+    response.delete_cookie(settings.access_cookie_name, **cookie_options)
+    response.delete_cookie(settings.refresh_cookie_name, **cookie_options)
+    response.delete_cookie(
+        settings.csrf_cookie_name,
+        path="/",
+        secure=settings.auth_cookie_secure,
+        httponly=False,
+        samesite=settings.cookie_samesite,
+    )
 
 
 
@@ -423,12 +459,48 @@ def update_user_runtime_settings(session: Session, user: User, payload: RuntimeS
         user.llm_wire_api = _normalize_wire_api_value(agent_updates["wire_api"])
     if "agent_provider" in agent_updates:
         user.llm_agent_provider = _normalize_agent_provider_value(agent_updates["agent_provider"])
+    if "poi_base_url" in agent_updates:
+        user.poi_llm_base_url = _normalize_base_url(agent_updates["poi_base_url"])
+    if "poi_provider_protocol" in agent_updates:
+        user.poi_llm_provider_protocol = _normalize_provider_protocol_value(agent_updates["poi_provider_protocol"])
+    if "poi_api_key" in agent_updates:
+        user.poi_llm_api_key = _normalize_api_key(agent_updates["poi_api_key"])
+    if "poi_model" in agent_updates:
+        user.poi_llm_model = _normalize_model(agent_updates["poi_model"])
+    if "poi_wire_api" in agent_updates:
+        user.poi_llm_wire_api = _normalize_wire_api_value(agent_updates["poi_wire_api"])
+    clearing_saved_poi_config = (
+        "poi_base_url" in agent_updates
+        and "poi_model" in agent_updates
+        and not user.poi_llm_base_url
+        and not user.poi_llm_model
+        and "poi_api_key" not in agent_updates
+    )
+    if clearing_saved_poi_config:
+        user.poi_llm_api_key = None
 
     normalized_llm_protocol = normalize_provider_protocol(getattr(user, "llm_provider_protocol", None))
     if normalized_llm_protocol == "openai":
         user.llm_wire_api = "responses"
     elif "provider_protocol" in agent_updates and "wire_api" not in agent_updates and normalized_llm_protocol in {"newapi", "neiapi"}:
         user.llm_wire_api = "chat_completions"
+
+    normalized_poi_llm_protocol = normalize_provider_protocol(getattr(user, "poi_llm_provider_protocol", None))
+    if getattr(user, "poi_llm_base_url", None) and getattr(user, "poi_llm_model", None):
+        if normalized_poi_llm_protocol == "openai":
+            user.poi_llm_wire_api = "responses"
+        elif "poi_provider_protocol" in agent_updates and "poi_wire_api" not in agent_updates and normalized_poi_llm_protocol in {"newapi", "neiapi"}:
+            user.poi_llm_wire_api = "chat_completions"
+    missing_poi_fields = user_poi_role_override_missing_fields(user)
+    if missing_poi_fields:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "poi_llm_override_incomplete",
+                "message": "Complete POI base URL, API key, and model, or clear all POI model fields.",
+                "missing_fields": missing_poi_fields,
+            },
+        )
 
     if search_updates:
         next_search_provider = normalize_search_service_provider(getattr(user, "search_service_provider", None), default="groksearch")

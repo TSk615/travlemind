@@ -10,6 +10,11 @@ class AgentSettingsUpdateRequest(BaseModel):
     model: str | None = Field(default=None, max_length=255)
     wire_api: str | None = Field(default=None, max_length=64)
     agent_provider: str | None = Field(default=None, max_length=64)
+    poi_provider_protocol: str | None = Field(default=None, max_length=64)
+    poi_base_url: str | None = Field(default=None, max_length=512)
+    poi_api_key: str | None = Field(default=None, max_length=2048)
+    poi_model: str | None = Field(default=None, max_length=255)
+    poi_wire_api: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="before")
     @classmethod
@@ -95,6 +100,13 @@ class AgentSettingsResponse(BaseModel):
     wire_api: str | None = None
     agent_provider: str = "standard"
     configured: bool = False
+    poi_provider_protocol: str = "openai"
+    poi_base_url: str | None = None
+    poi_api_key_masked: str | None = None
+    poi_has_api_key: bool = False
+    poi_model: str | None = None
+    poi_wire_api: str | None = None
+    poi_configured: bool = False
 
 
 class SearchSettingsResponse(BaseModel):

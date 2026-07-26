@@ -19,7 +19,7 @@ const messages: Record<LocaleCode, Record<string, unknown>> = {
       logOut: "Log out"
     },
     state: { kind: { loading: "Loading", error: "Error", empty: "Empty", info: "Info" } },
-    status: { queued: "Queued", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled" },
+    status: { queued: "Queued", running: "Running", retrying: "Retrying", completed: "Completed", failed: "Failed", cancelled: "Cancelled" },
     common: {
       retry: "Retry",
       createTrip: "Create trip",
@@ -189,7 +189,7 @@ const messages: Record<LocaleCode, Record<string, unknown>> = {
       logOut: "退出"
     },
     state: { kind: { loading: "加载中", error: "错误", empty: "空状态", info: "信息" } },
-    status: { queued: "排队中", running: "执行中", completed: "已完成", failed: "失败", cancelled: "已取消" },
+    status: { queued: "排队中", running: "执行中", retrying: "等待重试", completed: "已完成", failed: "失败", cancelled: "已取消" },
     common: {
       retry: "重试",
       createTrip: "创建行程",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
 from travelmind_api.api.schemas.common import success_response
@@ -189,6 +189,7 @@ def trip_intake_chat_endpoint(
 def generate_trip_endpoint(
     trip_id: str,
     background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
@@ -200,6 +201,7 @@ def generate_trip_endpoint(
         owner_user_id=current_user.id,
         trip_id=trip.id,
         payload={"trip_id": trip.id},
+        idempotency_key=idempotency_key,
     )
     dispatch_job(job.id, settings, background_tasks)
     return success_response(serialize_job(job).model_dump(mode="json"))
@@ -210,6 +212,7 @@ def refine_trip_endpoint(
     trip_id: str,
     payload: TripRefineRequest,
     background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
@@ -226,6 +229,7 @@ def refine_trip_endpoint(
             "scope": payload.scope,
             "day_index": payload.day_index,
         },
+        idempotency_key=idempotency_key,
     )
     dispatch_job(job.id, settings, background_tasks)
     return success_response(serialize_job(job).model_dump(mode="json"))
@@ -235,6 +239,7 @@ def refine_trip_endpoint(
 def enrich_trip_images_endpoint(
     trip_id: str,
     background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
@@ -248,6 +253,7 @@ def enrich_trip_images_endpoint(
         owner_user_id=current_user.id,
         trip_id=trip.id,
         payload={"trip_id": trip.id},
+        idempotency_key=idempotency_key,
     )
     dispatch_job(job.id, settings, background_tasks)
     return success_response(serialize_job(job).model_dump(mode="json"))

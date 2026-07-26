@@ -95,6 +95,11 @@ class ExportDocumentView:
     budget_lines_title: str
     budget_lines: list[ExportBudgetLineView]
     booking_title: str
+    stay_title: str
+    stay_fields: list[ExportField]
+    stay_highlights: list[str]
+    stay_candidates_title: str
+    stay_candidates: list[str]
     transport_booking_title: str
     transport_booking_fields: list[ExportField]
     reservation_lines_title: str
@@ -152,6 +157,15 @@ def _build_export_labels(zh_output: bool) -> dict[str, str]:
             "booking_title": "\u9884\u8ba2\u4e0e\u9884\u7ea6",
             "transport_booking_title": "\u4ea4\u901a\u9884\u8ba2\u6458\u8981",
             "reservation_lines_title": "\u666f\u70b9\u9884\u7ea6\u6e05\u5355",
+            "stay_title": "\u4f4f\u5bbf\u63a8\u8350",
+            "recommended_hotel": "\u63a8\u8350\u9152\u5e97",
+            "hotel_area": "\u533a\u57df",
+            "hotel_type": "\u7c7b\u578b",
+            "hotel_price": "\u4ef7\u683c",
+            "hotel_reviews": "\u8bc4\u4ef7",
+            "hotel_fit": "\u5339\u914d\u5ea6",
+            "recommended_areas": "\u63a8\u8350\u533a\u57df",
+            "stay_candidates": "\u5907\u9009\u9152\u5e97",
             "recommended_option": "\u63a8\u8350\u65b9\u6848",
             "intercity_estimate": "\u8de8\u57ce\u4ea4\u901a\u4f30\u7b97",
             "local_transport_estimate": "\u672c\u5730\u4ea4\u901a\u4f30\u7b97",
@@ -211,6 +225,15 @@ def _build_export_labels(zh_output: bool) -> dict[str, str]:
         "booking_title": "Booking And Reservations",
         "transport_booking_title": "Transport Booking Summary",
         "reservation_lines_title": "Attraction Booking Checklist",
+        "stay_title": "Stay Recommendation",
+        "recommended_hotel": "Recommended Hotel",
+        "hotel_area": "Area",
+        "hotel_type": "Type",
+        "hotel_price": "Price",
+        "hotel_reviews": "Reviews",
+        "hotel_fit": "Preference Fit",
+        "recommended_areas": "Recommended Area",
+        "stay_candidates": "Hotel Candidates",
         "recommended_option": "Recommended Option",
         "intercity_estimate": "Intercity Estimate",
         "local_transport_estimate": "Local Estimate",
@@ -332,6 +355,67 @@ def _build_transport_booking_fields(plan: PlanningResult, labels: dict[str, str]
             ("\u5efa\u8bae\u63d0\u524d\u9884\u8ba2" if zh_output else "Recommended") if summary.booking_required else ("\u6309\u9700" if zh_output else "As needed"),
         ),
     ]
+
+
+def _build_stay_fields(plan: PlanningResult, labels: dict[str, str]) -> list[ExportField]:
+    stay = plan.stay_recommendation
+    if stay is None or stay.final_recommended_hotel is None:
+        return []
+    hotel = stay.final_recommended_hotel
+    reviews = " / ".join(part.strip() for part in (hotel.review_score, hotel.review_count) if part and part.strip())
+    return [
+        ExportField(labels["recommended_hotel"], _normalize_text(hotel.name, labels)),
+        ExportField(labels["hotel_area"], _normalize_text(hotel.area, labels)),
+        ExportField(labels["hotel_type"], _normalize_text(hotel.hotel_type, labels)),
+        ExportField(labels["hotel_price"], _normalize_text(hotel.price_hint, labels)),
+        ExportField(labels["hotel_reviews"], _normalize_text(reviews, labels)),
+        ExportField(labels["hotel_fit"], _normalize_text(hotel.preference_match or hotel.reason, labels)),
+    ]
+
+
+def _build_stay_highlights(plan: PlanningResult, labels: dict[str, str]) -> list[str]:
+    stay = plan.stay_recommendation
+    if stay is None:
+        return []
+    candidates = [
+        *(f"{labels['recommended_areas']}: {area}" for area in stay.recommended_areas if area and area.strip()),
+        *stay.stay_strategy,
+        *stay.budget_notes,
+        *stay.review_notes,
+        *stay.preference_match_notes,
+        *stay.price_timeliness_notes,
+        *stay.hotel_risks,
+    ]
+    seen: set[str] = set()
+    highlights: list[str] = []
+    for note in candidates:
+        normalized = str(note or "").strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            highlights.append(normalized)
+    return highlights
+
+
+def _build_stay_candidate_lines(plan: PlanningResult) -> list[str]:
+    stay = plan.stay_recommendation
+    if stay is None:
+        return []
+    lines: list[str] = []
+    for candidate in stay.hotel_candidates:
+        name = str(candidate.name or "").strip()
+        if not name:
+            continue
+        parts = [name]
+        if candidate.area and candidate.area.strip():
+            parts.append(candidate.area.strip())
+        if candidate.price_hint and candidate.price_hint.strip():
+            parts.append(candidate.price_hint.strip())
+        line = " | ".join(parts)
+        note = str(candidate.preference_match or candidate.reason or "").strip()
+        if note:
+            line = f"{line}: {note}"
+        lines.append(line)
+    return lines
 
 
 def _build_reservation_lines(plan: PlanningResult, labels: dict[str, str], zh_output: bool) -> list[str]:
@@ -490,6 +574,9 @@ def _build_export_document(
         )
         for item in budget_summary.line_items
     ]
+    stay_fields = _build_stay_fields(enriched_plan, labels)
+    stay_highlights = _build_stay_highlights(enriched_plan, labels)
+    stay_candidates = _build_stay_candidate_lines(enriched_plan)
     transport_booking_fields = _build_transport_booking_fields(enriched_plan, labels, zh_output)
     reservation_lines = _build_reservation_lines(enriched_plan, labels, zh_output)
     metadata_fields = [
@@ -522,6 +609,11 @@ def _build_export_document(
         budget_lines_title=labels["budget_lines"],
         budget_lines=budget_lines,
         booking_title=labels["booking_title"],
+        stay_title=labels["stay_title"],
+        stay_fields=stay_fields,
+        stay_highlights=stay_highlights,
+        stay_candidates_title=labels["stay_candidates"],
+        stay_candidates=stay_candidates,
         transport_booking_title=labels["transport_booking_title"],
         transport_booking_fields=transport_booking_fields,
         reservation_lines_title=labels["reservation_lines_title"],
@@ -815,8 +907,20 @@ def _render_pdf(view: ExportDocumentView) -> bytes:
             ]
         )
 
-    if view.transport_booking_fields or view.reservation_lines:
+    has_stay = bool(view.stay_fields or view.stay_highlights or view.stay_candidates)
+    if has_stay or view.transport_booking_fields or view.reservation_lines:
         story.extend([Spacer(1, _SECTION_GAP), _paragraph(view.booking_title, styles["section"])])
+        if has_stay:
+            story.append(_paragraph(view.stay_title, styles["card_title"]))
+            if view.stay_fields:
+                story.append(_build_field_table(view.stay_fields, styles))
+            for note in view.stay_highlights:
+                story.append(_paragraph(f"- {note}", styles["base"]))
+            if view.stay_candidates:
+                story.extend([Spacer(1, 2 * mm), _paragraph(view.stay_candidates_title, styles["small"])])
+                for line in view.stay_candidates:
+                    story.append(_paragraph(f"- {line}", styles["base"]))
+            story.append(Spacer(1, 3 * mm))
         if view.transport_booking_fields:
             story.extend(
                 [
@@ -903,8 +1007,20 @@ def _render_markdown(view: ExportDocumentView) -> bytes:
                 label = f"{label} ({line.note})"
             lines.append(label)
 
-    if view.transport_booking_fields or view.reservation_lines:
+    has_stay = bool(view.stay_fields or view.stay_highlights or view.stay_candidates)
+    if has_stay or view.transport_booking_fields or view.reservation_lines:
         lines.extend(["", f"## {view.booking_title}", ""])
+        if has_stay:
+            lines.extend([f"### {view.stay_title}", ""])
+            for field in view.stay_fields:
+                lines.append(f"- {field.label}: {field.value}")
+            for note in view.stay_highlights:
+                lines.append(f"- {note}")
+            if view.stay_candidates:
+                lines.extend(["", f"#### {view.stay_candidates_title}", ""])
+                for line in view.stay_candidates:
+                    lines.append(f"- {line}")
+            lines.append("")
         if view.transport_booking_fields:
             lines.extend([f"### {view.transport_booking_title}", ""])
             for field in view.transport_booking_fields:

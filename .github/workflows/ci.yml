@@ -9,6 +9,25 @@ on:
   pull_request:
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check changed lines for whitespace errors
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+            git diff --check "origin/$GITHUB_BASE_REF...HEAD"
+          else
+            git diff-tree --check --no-commit-id --root -r HEAD
+          fi
+      - name: Compile Python sources and tests
+        run: python -m compileall -q apps/api/src apps/api/tests apps/worker/src
+
   web:
     runs-on: ubuntu-latest
     steps:
@@ -16,11 +35,39 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
+      - run: npm ci
+      - run: npm run test:web:unit
       - run: npm run build:web
+
+  web-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:web:e2e
 
   api:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: travelmind_test
+          POSTGRES_USER: travelmind
+          POSTGRES_PASSWORD: travelmind
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U travelmind -d travelmind_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TRAVELMIND_TEST_POSTGRES_URL: postgresql+psycopg://travelmind:travelmind@127.0.0.1:5432/travelmind_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,8 +85,8 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --python 3.11 --project apps/worker
-      - run: uv run --project apps/worker python -c "import sys; from pathlib import Path; sys.path.insert(0, str(Path('apps/api/src').resolve())); import travelmind_worker.worker"
+      - run: uv sync --python 3.11 --frozen --project apps/worker
+      - run: uv run --project apps/worker python -c "import travelmind_worker.worker"
 
   docker:
     runs-on: ubuntu-latest

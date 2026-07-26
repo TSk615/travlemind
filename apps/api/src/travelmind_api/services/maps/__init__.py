@@ -12,10 +12,12 @@ from travelmind_api.services.maps.base import (
     TravelMode,
     poi_to_route_stop,
 )
+from travelmind_api.services.maps.amap import AmapMapsPoiProvider
 from travelmind_api.services.maps.factory import build_maps_provider
 from travelmind_api.services.maps.stub import StubMapsPoiProvider
 
 __all__ = [
+    "AmapMapsPoiProvider",
     "GeoPoint",
     "MapsPoiProvider",
     "PoiDetail",
