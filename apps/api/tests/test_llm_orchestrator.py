@@ -1447,19 +1447,13 @@ def test_user_poi_role_override_requires_complete_saved_settings():
 
     assert config is not None
     assert set(overrides) == {"poi_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
-    for role_name in ("poi_specialist", "hotel_specialist", "transport_specialist"):
+    for role_name in ("poi_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"):
         role_config = config.config_for_role(role_name)
         assert role_config.base_url == "https://old-poi.example.test/v1"
         assert role_config.api_key == "poi-key"
         assert role_config.model == "grok-poi"
         assert role_config.wire_api == "responses"
         assert role_config.provider_protocol == "openai"
-    weather_config = config.config_for_role("weather_specialist")
-    assert weather_config.base_url == "https://old-poi.example.test/v1"
-    assert weather_config.api_key == "poi-key"
-    assert weather_config.model == "grok-4.20-multi-agent-medium"
-    assert weather_config.wire_api == "responses"
-    assert weather_config.provider_protocol == "openai"
 
 
 
@@ -1755,7 +1749,7 @@ def _fake_helloagents_module(
                 assert "food_pois" in poi_collection
                 assert poi_collection["food_pois"] == []
                 assert not any(poi["kind"] in {"food", "cafe", "market", "night_market"} for poi in poi_collection["pois"])
-                assert len(poi_collection["pois"]) <= 12
+                assert len(poi_collection["pois"]) <= 20
                 assert len(hotels["hotel_candidates"]) <= 4
                 assert len(transport["intercity_options"]) <= 3
                 return json.dumps(
@@ -1868,8 +1862,9 @@ def test_helloagents_orchestrator_returns_business_specialist_result(monkeypatch
 
     assert isinstance(result, PlanningResult)
     assert result.trace.provider == "helloagents-poc"
-    assert result.days[0].items[0].location_ref is not None
-    assert result.days[0].items[1].route_from_previous is not None
+    assert result.days[0].items[0].location_ref is None
+    assert result.days[0].items[1].route_from_previous is None
+    assert any("关闭占位坐标" in note for note in result.trace.notes)
     assert calls[0] == "brief_parser"
     assert calls[-1] == "itinerary_planner"
     assert set(calls[1:3]) == {"poi_specialist", "weather_specialist"}
@@ -1983,9 +1978,12 @@ def test_budgeting_classifies_grounded_prices_by_item_type(monkeypatch):
     result = orchestrator.plan_trip(_planning_request())
 
     assert result.budget_summary is not None
-    assert result.budget_summary.breakdown.tickets < result.budget_summary.breakdown.dining
-    assert result.budget_summary.breakdown.tickets < result.budget_summary.breakdown.accommodation
+    assert result.budget_summary.breakdown.tickets == 25
+    assert result.budget_summary.breakdown.dining == 0
+    assert result.budget_summary.breakdown.accommodation == 0
     assert result.budget_summary.breakdown.transport == 380
+    assert result.budget_summary.breakdown.total == sum(day.total_cost for day in result.days)
+    assert sum(item.amount for item in result.budget_summary.line_items) == result.budget_summary.estimated_total
 
 
 def test_helloagents_orchestrator_fails_when_specialist_role_fails(monkeypatch):
@@ -2495,6 +2493,49 @@ def test_helloagents_build_day_weather_uses_tool_temperature_hint_when_daily_out
     assert "18" in day_weather.summary
 
 
+def test_helloagents_build_day_weather_uses_matching_date_sources():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    weather_guidance = helloagents_module.HelloAgentsWeatherGuidance(
+        overall_outlook="Warm with showers.",
+        source_urls=["https://weather.example.test/city"],
+        daily_forecasts=[
+            helloagents_module.HelloAgentsDailyForecast(
+                date=date(2026, 4, 14),
+                outlook="18°C to 24°C.",
+                source_urls=["https://weather.example.test/2026-04-14"],
+            ),
+            helloagents_module.HelloAgentsDailyForecast(
+                date=date(2026, 4, 15),
+                outlook="19°C to 25°C.",
+                source_urls=["https://weather.example.test/2026-04-15"],
+            ),
+        ],
+    )
+
+    day_weather = orchestrator._build_day_weather(
+        2,
+        weather_guidance,
+        [
+            "https://weather.example.test/2026-04-14",
+            "https://weather.example.test/2026-04-15",
+            "https://weather.example.test/search-metadata",
+        ],
+        target_date=date(2026, 4, 15),
+        trip_start_date=date(2026, 4, 14),
+        expected_days=2,
+    )
+
+    assert day_weather is not None
+    assert day_weather.citations == [
+        "https://weather.example.test/2026-04-15",
+        "https://weather.example.test/city",
+        "https://weather.example.test/search-metadata",
+    ]
+
+
 
 def test_helloagents_weather_tool_results_use_deep_research_when_available(monkeypatch):
     calls: list[tuple[str, dict[str, object]]] = []
@@ -2668,7 +2709,7 @@ def test_helloagents_poi_specialist_augment_skips_tool_collection_with_native_se
     monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
     monkeypatch.setattr(HelloAgentsOrchestrator, "_build_role_mcp_clients", forbidden_build_role_mcp_clients)
     orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://rainflow.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        LlmConfig(base_url="https://rainflow.example.test/v1", api_key="test-key", model="Web/grok-chat-fast", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
     payload = {
@@ -2727,7 +2768,7 @@ def test_helloagents_poi_specialist_augment_collects_mcp_evidence_without_native
     assert result["tool_results"]["citations"] == ["https://example.test/kyoto-guide"]
 
 
-def test_helloagents_has_native_search_unifies_rainflow_and_grok_detection():
+def test_helloagents_has_native_search_requires_known_web_model():
     orchestrator = HelloAgentsOrchestrator(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
@@ -2736,15 +2777,15 @@ def test_helloagents_has_native_search_unifies_rainflow_and_grok_detection():
     def endpoint(base_url, model):
         return LlmConfig(base_url=base_url, api_key="test-key", model=model, wire_api="responses").config_for_role("poi_specialist")
 
-    assert orchestrator._has_native_search("poi_specialist", endpoint("https://api.x.ai/v1", "grok-4")) is True
-    assert orchestrator._has_native_search("poi_specialist", endpoint("https://proxy.example.test/v1", "grok-4-fast")) is True
-    assert orchestrator._has_native_search("poi_specialist", endpoint("https://rainflow.example.test/v1", "gpt-test")) is True
-    assert orchestrator._has_native_search("weather_specialist", endpoint("https://rainflow.example.test/v1", "gpt-test")) is True
+    assert orchestrator._has_native_search("poi_specialist", endpoint("https://proxy.example.test/v1", "Web/grok-chat-fast")) is True
+    assert orchestrator._has_native_search("weather_specialist", endpoint("https://proxy.example.test/v1", "Web/grok-chat-fast")) is True
+    assert orchestrator._has_native_search("poi_specialist", endpoint("https://api.x.ai/v1", "grok-4")) is False
+    assert orchestrator._has_native_search("poi_specialist", endpoint("https://rainflow.example.test/v1", "gpt-test")) is False
     assert orchestrator._has_native_search("poi_specialist", endpoint("https://llm.example.test/v1", "gpt-test")) is False
     assert orchestrator._has_native_search("itinerary_planner", endpoint("https://rainflow.example.test/v1", "gpt-test")) is False
     assert orchestrator._has_native_search("poi_specialist", None) is False
     assert orchestrator._role_config_uses_search_capable_grok(
-        "poi_specialist", endpoint("https://rainflow.example.test/v1", "gpt-test")
+        "poi_specialist", endpoint("https://proxy.example.test/v1", "Web/grok-chat-fast")
     ) is True
 
 
@@ -2799,7 +2840,7 @@ def test_helloagents_direct_grok_specialist_skips_mcp_tool_collection(monkeypatc
                 "weather_specialist": {
                     "base_url": "https://api.x.ai/v1",
                     "api_key": "grok-key",
-                    "model": "grok-4.20-beta",
+                    "model": "Web/grok-chat-fast",
                     "wire_api": "chat_completions",
                     "provider_protocol": "newapi",
                 }
@@ -2819,7 +2860,7 @@ def test_helloagents_direct_grok_specialist_skips_mcp_tool_collection(monkeypatc
     assert "tool_results" not in result
     skip_event = next(item for item in events if item["event"] == "helloagents_direct_grok_tool_collection_skipped")
     assert skip_event["payload"]["role"] == "weather_specialist"
-    assert skip_event["payload"]["model"] == "grok-4.20-beta"
+    assert skip_event["payload"]["model"] == "Web/grok-chat-fast"
 
 
 def test_poi_specialist_prompt_allows_native_search_and_constrains_dirty_names():
@@ -2832,11 +2873,12 @@ def test_poi_specialist_prompt_allows_native_search_and_constrains_dirty_names()
     assert "知乎" in text
     assert "马蜂窝" in text
     assert "携程" in text
-    assert "必须先使用模型自带联网检索能力" in text
+    assert "必须只使用当前模型自带的联网检索能力" in text
     assert "交叉参考" in text
     assert "不要调用外部工具" in text
     assert "不要输出搜索摘要" in text
-    assert "6 到 10 个" in text
+    assert "5天及以上返回15到20个" in text
+    assert "每个核心锚点可扩展1到3个周边点" in text
     assert "name 必须是真实、可搜索、位于目的地或其合理一日游范围内的景点、街区、自然风景或体验名" in text
     assert "真实、可搜索、位于目的地或其合理一日游范围内" in text
     assert "city walk route" in text
@@ -2850,9 +2892,10 @@ def test_poi_specialist_prompt_allows_native_search_and_constrains_dirty_names()
     assert "highlights 保留 2-4 个短词组" in text
     assert "真实可搜索的子景点" in text
     assert "南门城楼" in text
-    assert "source_url 最多 1 个" in text
-    assert "每个 top_poi 都应带 source_url" in text
-    assert "source_url 为空，confidence 必须是 low" in text
+    assert "source_urls 返回1到3个" in text
+    assert "政府网站根首页" in text
+    assert "每个 top_poi 都应带 source_urls" in text
+    assert "source_urls 为空，confidence 必须是 low" in text
     assert "这类无来源 POI 不要超过 2 个" in text
     assert "不要推荐餐厅、小吃店、咖啡馆、夜市、美食街、菜市场" in text
     assert "餐饮词也不要出现在 name、kind、highlights 或 reason 中" in text
@@ -2861,7 +2904,7 @@ def test_poi_specialist_prompt_allows_native_search_and_constrains_dirty_names()
     assert "kind 只能从 attraction、district、experience 中选择" in text
     assert "kind 只能从 attraction、food、market、cafe、district、experience 中选择" not in text
     assert "evidence_notes" not in text
-    assert "source_urls" not in text
+    assert "source_url\"" not in text
     assert "does not search the web" not in text
     assert "tool_results" not in text
     assert "trip_request" not in text
@@ -3431,7 +3474,7 @@ def test_helloagents_poi_grounding_accepts_lightweight_top_pois_shape():
     assert grounding.featured_pois[0].confidence == "high"
     assert grounding.featured_pois[0].source_urls == ["https://example.test/dali-ancient-city"]
     assert grounding.featured_pois[0].evidence_notes == []
-    assert grounding.featured_pois[1].confidence == "medium"
+    assert grounding.featured_pois[1].confidence == "low"
     assert grounding.poi_risks
 
     orchestrator = HelloAgentsOrchestrator(
@@ -3451,10 +3494,41 @@ def test_helloagents_poi_grounding_accepts_lightweight_top_pois_shape():
         "suggested_time": "0.5-1天",
         "confidence": "high",
         "source_url": "https://example.test/dali-ancient-city",
+        "source_urls": ["https://example.test/dali-ancient-city"],
     }
-    snapshot = orchestrator._build_poi_output_snapshot(grounding)
-    assert snapshot["featured_pois"][0]["highlights"] == ["南门城楼", "洋人街", "白族民居", "夜景咖啡馆"]
 
+
+def test_helloagents_poi_grounding_rejects_generic_homepage_evidence_and_keeps_detail_pages():
+    grounding = HelloAgentsPoiGrounding.model_validate(
+        {
+            "top_pois": [
+                {
+                    "name": "汕头小公园",
+                    "kind": "district",
+                    "confidence": "high",
+                    "source_urls": [
+                        "https://www.shantou.gov.cn/",
+                        "https://www.xiaohongshu.com/explore/note-123",
+                        "https://www.mafengwo.cn/poi/12345.html",
+                    ],
+                },
+                {
+                    "name": "汕头开埠文化陈列馆",
+                    "kind": "attraction",
+                    "confidence": "high",
+                    "source_url": "https://www.shantou.gov.cn/",
+                },
+            ]
+        }
+    )
+
+    assert grounding.featured_pois[0].source_urls == [
+        "https://www.xiaohongshu.com/explore/note-123",
+        "https://www.mafengwo.cn/poi/12345.html",
+    ]
+    assert grounding.featured_pois[0].confidence == "high"
+    assert grounding.featured_pois[1].source_urls == []
+    assert grounding.featured_pois[1].confidence == "low"
 
 def test_helloagents_orchestrator_warns_when_chinese_final_payload_is_not_localized(monkeypatch):
     calls: list[str] = []

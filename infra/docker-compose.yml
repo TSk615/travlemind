@@ -172,7 +172,8 @@
       GUDA_API_KEY: ${GUDA_API_KEY:-}
       GROK_API_URL: ${GROK_API_URL:-}
       GROK_API_KEY: ${GROK_API_KEY:-}
-      GROK_MODEL: ${GROK_MODEL:-grok-4.20-beta}
+      GROK_MODEL: ${GROK_MODEL:-Web/grok-chat-fast}
+      GROK_WIRE_API: ${GROK_WIRE_API:-chat_completions}
       TAVILY_ENABLED: ${TAVILY_ENABLED:-true}
       TAVILY_API_URL: ${TAVILY_API_URL:-}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}

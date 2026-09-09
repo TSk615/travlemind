@@ -4,6 +4,7 @@ import logging
 import json
 import re
 import time
+from datetime import date, timedelta
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
@@ -52,6 +53,7 @@ from travelmind_api.prompts.roles.helloagents import (
     build_weather_specialist_prompt,
 )
 from travelmind_api.services.llm.prompts import PLANNING_OUTPUT_SCHEMA
+from travelmind_api.services.llm.parser import LlmBookingInfo
 from travelmind_api.services.maps import MapsPoiProvider, PoiDetail, PoiSearchResult, poi_to_route_stop
 from travelmind_api.services.search_connector import ConfiguredSearchGateway, SearchServiceConfig
 from travelmind_api.services.search_service import search_documents
@@ -217,16 +219,16 @@ class HelloAgentsPoiGrounding(BaseModel):
     @classmethod
     def model_validate(cls, obj: Any, *args: Any, **kwargs: Any):  # type: ignore[override]
         instance = super().model_validate(obj, *args, **kwargs)
-        cleaned_featured = cls._dedupe_research_pois(instance.featured_pois)
+        cleaned_featured = [cls._sanitize_research_poi_sources(item) for item in cls._dedupe_research_pois(instance.featured_pois)]
         if cleaned_featured:
-            return instance.model_copy(update={"featured_pois": cleaned_featured[:10]})
-        cleaned_top_pois = cls._dedupe_top_pois(instance.top_pois)
+            return instance.model_copy(update={"featured_pois": cleaned_featured[:20]})
+        cleaned_top_pois = [cls._sanitize_top_poi_sources(item) for item in cls._dedupe_top_pois(instance.top_pois)]
         if not cleaned_top_pois:
             return instance.model_copy(update={"featured_pois": [], "top_pois": []})
         mapped = cls._map_top_pois_to_featured_pois(cleaned_top_pois)
         return instance.model_copy(
             update={
-                "top_pois": cleaned_top_pois[:10],
+                "top_pois": cleaned_top_pois[:20],
                 "featured_pois": mapped["featured_pois"],
                 "candidate_areas": instance.candidate_areas or mapped["candidate_areas"],
                 "sequencing_hints": instance.sequencing_hints or mapped["sequencing_hints"],
@@ -254,7 +256,7 @@ class HelloAgentsPoiGrounding(BaseModel):
                     continue
                 seen.add(key)
             deduped.append(item)
-        return deduped[:10]
+        return deduped[:20]
 
     @classmethod
     def _dedupe_top_pois(cls, top_pois: list[HelloAgentsTopPoiItem]) -> list[HelloAgentsTopPoiItem]:
@@ -266,7 +268,7 @@ class HelloAgentsPoiGrounding(BaseModel):
                 continue
             seen.add(key)
             deduped.append(item)
-        return deduped[:10]
+        return deduped[:20]
 
     @classmethod
     def _dedupe_research_pois(cls, pois: list[HelloAgentsResearchPoi]) -> list[HelloAgentsResearchPoi]:
@@ -278,12 +280,72 @@ class HelloAgentsPoiGrounding(BaseModel):
                 continue
             seen.add(key)
             deduped.append(poi)
-        return deduped[:10]
+        return deduped[:20]
 
     @staticmethod
-    def _map_top_pois_to_featured_pois(top_pois: list[HelloAgentsTopPoiItem]) -> dict[str, Any]:
+    def _is_generic_poi_source_url(value: str) -> bool:
+        """Reject home/channel/search pages that cannot substantiate a specific POI."""
+        try:
+            parsed = urlparse(str(value or "").strip())
+        except ValueError:
+            return True
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return True
+        host = parsed.netloc.casefold().split(":", 1)[0]
+        if host.startswith("www."):
+            host = host[4:]
+        path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/").casefold()
+        if not path:
+            return True
+        generic_paths = {
+            ("shantou.gov.cn", ""),
+            ("ctrip.com", "/sight/shantou"),
+            ("mafengwo.cn", "/poi"),
+            ("xiaohongshu.com", "/explore"),
+            ("zhihu.com", "/search"),
+        }
+        if (host, path) in generic_paths:
+            return True
+        if any(token in path for token in ("/search", "/searchresult", "/query")):
+            return True
+        return False
+
+    @classmethod
+    def _clean_poi_source_urls(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for value in values:
+            url = str(value or "").strip()
+            if not url or cls._is_generic_poi_source_url(url) or url in cleaned:
+                continue
+            cleaned.append(url)
+        return cleaned[:3]
+
+    @classmethod
+    def _sanitize_top_poi_sources(cls, item: HelloAgentsTopPoiItem) -> HelloAgentsTopPoiItem:
+        candidates = [
+            *([item.source_url] if str(item.source_url or "").strip() else []),
+            *item.source_urls,
+        ]
+        cleaned = cls._clean_poi_source_urls(candidates)
+        confidence = str(item.confidence or "").strip().lower()
+        return item.model_copy(
+            update={
+                "source_url": cleaned[0] if cleaned else "",
+                "source_urls": cleaned,
+                "confidence": confidence if cleaned else "low",
+            }
+        )
+
+    @classmethod
+    def _sanitize_research_poi_sources(cls, item: HelloAgentsResearchPoi) -> HelloAgentsResearchPoi:
+        cleaned = cls._clean_poi_source_urls(item.source_urls)
+        return item.model_copy(update={"source_urls": cleaned, "confidence": item.confidence if cleaned else "low"})
+
+    @classmethod
+    def _map_top_pois_to_featured_pois(cls, top_pois: list[HelloAgentsTopPoiItem]) -> dict[str, Any]:
         featured: list[HelloAgentsResearchPoi] = []
         candidate_areas: list[str] = []
+        source_usage: dict[str, int] = {}
         for item in top_pois:
             name = str(item.name or item.name_cn or item.name_en or "").strip()
             if not name:
@@ -291,19 +353,25 @@ class HelloAgentsPoiGrounding(BaseModel):
             category = str(item.kind or item.category or "").strip()
             area = str(item.area or "").strip()
             reason = str(item.reason or item.why_worth or item.description or "").strip()
-            source_urls = list(
-                dict.fromkeys(
-                    [
-                        *([str(item.source_url).strip()] if str(item.source_url or "").strip() else []),
-                        *[str(value).strip() for value in item.source_urls if str(value).strip()],
-                    ]
-                )
-            )[:1]
+            source_candidates = cls._clean_poi_source_urls(
+                [
+                    *([str(item.source_url).strip()] if str(item.source_url or "").strip() else []),
+                    *[str(value).strip() for value in item.source_urls if str(value).strip()],
+                ]
+            )
+            source_urls: list[str] = []
+            for source_url in source_candidates:
+                if source_usage.get(source_url, 0) >= 2:
+                    continue
+                source_usage[source_url] = source_usage.get(source_url, 0) + 1
+                source_urls.append(source_url)
             evidence_notes = [str(value).strip() for value in item.evidence_notes if str(value).strip()][:2]
             if not evidence_notes:
                 evidence_notes = [text for text in [str(item.description or "").strip(), str(item.tips or "").strip()] if text][:2]
             confidence_value = str(item.confidence or item.xhs_appeal or "").strip().lower()
             confidence = confidence_value if confidence_value in {"high", "medium", "low"} else "high" if str(item.xhs_appeal or "").strip() in {"极高", "高", "high"} else "medium"
+            if not source_urls:
+                confidence = "low"
             kind = HelloAgentsPoiGrounding._infer_kind_from_top_poi(item)
             featured.append(
                 HelloAgentsResearchPoi(
@@ -331,6 +399,14 @@ class HelloAgentsPoiGrounding(BaseModel):
         sequencing_hints = ["Group nearby POIs into half-day blocks."] if featured else []
         crowd_notes = ["Popular photo spots are better in the morning or around sunset."] if featured else []
         poi_risks = ["Some lightweight POI fields were backfilled from top_pois recommendations and may need later evidence enrichment."] if featured else []
+        source_hosts = {
+            urlparse(url).netloc.casefold().removeprefix("www.")
+            for poi in featured
+            for url in poi.source_urls
+            if urlparse(url).netloc
+        }
+        if len(featured) >= 4 and len(source_hosts) <= 1:
+            poi_risks.append("POI 可核验来源平台过于单一；已移除首页型链接，建议重新执行原生联网检索补充详情页。")
         return {
             "featured_pois": featured,
             "candidate_areas": candidate_areas,
@@ -366,9 +442,19 @@ class HelloAgentsPoiGrounding(BaseModel):
         return "attraction"
 
 
+class HelloAgentsDailyForecast(BaseModel):
+    date: date
+    outlook: str = Field(default="")
+    timing_advice: str = Field(default="")
+    risk: str = Field(default="")
+    source_urls: list[str] = Field(default_factory=list)
+
+
 class HelloAgentsWeatherGuidance(BaseModel):
     overall_outlook: str = Field(min_length=1)
+    source_urls: list[str] = Field(default_factory=list)
     daily_outlook: list[str] = Field(default_factory=list)
+    daily_forecasts: list[HelloAgentsDailyForecast] = Field(default_factory=list)
     segments: list["HelloAgentsWeatherSegment"] = Field(default_factory=list)
     packing_notes: list[str] = Field(default_factory=list)
     timing_guidance: list[str] = Field(default_factory=list)
@@ -481,6 +567,10 @@ class HelloAgentsTransportGuidance(BaseModel):
     sequencing_constraints: list[str] = Field(default_factory=list)
     estimated_intercity_cost: float = 0.0
     estimated_local_transport_cost: float = 0.0
+    departure_transfer_minutes: int = 0
+    station_buffer_minutes: int = 45
+    luggage_buffer_minutes: int = 30
+    minimum_departure_buffer_minutes: int = 120
     summary: str = Field(default="")
     recommended_option: str = Field(default="")
     booking_required: bool = False
@@ -500,6 +590,20 @@ class HelloAgentsTransportGuidance(BaseModel):
         except (TypeError, ValueError):
             match = re.search(r"-?\d+(?:\.\d+)?", str(value))
             return float(match.group()) if match else 0.0
+
+    @field_validator(
+        "departure_transfer_minutes",
+        "station_buffer_minutes",
+        "luggage_buffer_minutes",
+        "minimum_departure_buffer_minutes",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_minutes(cls, value: Any) -> int:
+        try:
+            return max(0, int(float(value)))
+        except (TypeError, ValueError):
+            return 0
 
     @field_validator("booking_required", mode="before")
     @classmethod
@@ -550,6 +654,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         self._current_job_id: str | None = None
         self._resume_checkpoint: dict[str, Any] | None = None
         self._last_checkpoint: dict[str, Any] | None = None
+        self._native_role_citations: dict[str, list[str]] = {}
 
     def set_resume_checkpoint(self, checkpoint: dict[str, Any] | None) -> None:
         self._resume_checkpoint = deepcopy(checkpoint) if isinstance(checkpoint, dict) else None
@@ -559,6 +664,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:
         self._role_search_gateway_cache = {}
+        self._native_role_citations = {}
         self._current_xhs_source_enabled = bool(getattr(request, "xhs_source_enabled", False))
         self._current_user_id = getattr(request, "user_id", None)
         self._current_search_service = getattr(request, "search_service", None) or SearchServiceConfig.from_env()
@@ -647,10 +753,32 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             and self._last_checkpoint["roles"][role].get("status") == "completed"
         ]
 
-    def _load_checkpoint_model(self, role_name: str, model_type: type[BaseModel]) -> Any | None:
+    def _load_checkpoint_model(
+        self,
+        role_name: str,
+        model_type: type[BaseModel],
+        *,
+        prompt_version: str | None = None,
+        model_name: str | None = None,
+    ) -> Any | None:
         checkpoint = self._last_checkpoint if isinstance(self._last_checkpoint, dict) else None
         roles = checkpoint.get("roles") if isinstance(checkpoint, dict) and isinstance(checkpoint.get("roles"), dict) else {}
         entry = roles.get(role_name) if isinstance(roles, dict) else None
+        if isinstance(entry, dict) and (
+            (prompt_version and entry.get("prompt_version") != prompt_version)
+            or (model_name and entry.get("model") != model_name)
+        ):
+            self._log_event(
+                "helloagents_resume_checkpoint_skipped",
+                message="Stored role checkpoint does not match the active prompt or model and will be rerun.",
+                role=role_name,
+                stored_prompt_version=entry.get("prompt_version"),
+                active_prompt_version=prompt_version,
+                stored_model=entry.get("model"),
+                active_model=model_name,
+            )
+            roles.pop(role_name, None)
+            return None
         if role_name == "poi_specialist" and isinstance(entry, dict) and entry.get("fallback_used"):
             self._log_event(
                 "helloagents_resume_checkpoint_skipped",
@@ -713,7 +841,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         self._start_resume_checkpoint(request, trip_payload)
 
         brief_role = role_configs["brief_parser"]
-        brief = self._load_checkpoint_model(brief_role.role_name, HelloAgentsBrief)
+        brief = self._load_checkpoint_model(
+            brief_role.role_name,
+            HelloAgentsBrief,
+            prompt_version=brief_role.prompt_version,
+            model_name=role_llm_configs[brief_role.role_name].model,
+        )
         if brief is None:
             self._emit_role_progress(brief_role)
             try:
@@ -724,7 +857,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     input_payload={"trip_request": trip_payload},
                 )
                 brief = self._parse_structured_response(brief_response, HelloAgentsBrief)
-                self._record_checkpoint_role(brief_role.role_name, brief)
+                self._record_checkpoint_role(
+                    brief_role.role_name,
+                    brief,
+                    prompt_version=brief_role.prompt_version,
+                    model=role_llm_configs[brief_role.role_name].model,
+                )
             except Exception as exc:
                 self._record_checkpoint_failure(brief_role.role_name, exc)
                 raise
@@ -737,8 +875,18 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         weather_role = role_configs["weather_specialist"]
 
         poi_fallback_reason: str | None = None
-        poi_grounding = self._load_checkpoint_model(poi_role.role_name, HelloAgentsPoiGrounding)
-        weather = self._load_checkpoint_model(weather_role.role_name, HelloAgentsWeatherGuidance)
+        poi_grounding = self._load_checkpoint_model(
+            poi_role.role_name,
+            HelloAgentsPoiGrounding,
+            prompt_version=poi_role.prompt_version,
+            model_name=role_llm_configs[poi_role.role_name].model,
+        )
+        weather = self._load_checkpoint_model(
+            weather_role.role_name,
+            HelloAgentsWeatherGuidance,
+            prompt_version=weather_role.prompt_version,
+            model_name=role_llm_configs[weather_role.role_name].model,
+        )
         initial_roles_to_run: dict[str, HelloAgentsRoleConfig] = {}
         if poi_grounding is None:
             initial_roles_to_run[poi_role.role_name] = poi_role
@@ -774,7 +922,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             if poi_grounding is None:
                 try:
                     poi_grounding = self._parse_structured_response(futures[poi_role.role_name].result(), HelloAgentsPoiGrounding)
-                    self._record_checkpoint_role(poi_role.role_name, poi_grounding)
+                    self._record_checkpoint_role(
+                        poi_role.role_name,
+                        poi_grounding,
+                        prompt_version=poi_role.prompt_version,
+                        model=role_llm_configs[poi_role.role_name].model,
+                    )
                 except Exception as exc:
                     self._record_checkpoint_failure(poi_role.role_name, exc)
                     self._log_event(
@@ -788,10 +941,21 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             if weather is None:
                 try:
                     weather = self._parse_structured_response(futures[weather_role.role_name].result(), HelloAgentsWeatherGuidance)
-                    self._record_checkpoint_role(weather_role.role_name, weather)
+                    weather.source_urls = list(dict.fromkeys([
+                        *[str(item).strip() for item in weather.source_urls if str(item).strip()],
+                        *self._native_role_citations.get(weather_role.role_name, []),
+                    ]))
+                    self._validate_weather_date_coverage(weather, request)
+                    self._record_checkpoint_role(
+                        weather_role.role_name,
+                        weather,
+                        prompt_version=weather_role.prompt_version,
+                        model=role_llm_configs[weather_role.role_name].model,
+                    )
                 except Exception as exc:
                     self._record_checkpoint_failure(weather_role.role_name, exc)
                     raise
+        self._validate_weather_date_coverage(weather, request)
         self._log_event("helloagents_initial_specialists_parallel_completed", message="Initial specialist roles completed.")
         weather_language_warning = self._weather_guidance_needs_language_repair(weather, request)
         poi_tool_source = (
@@ -818,8 +982,18 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         hotel_role = role_configs["hotel_specialist"]
         transport_role = role_configs["transport_specialist"]
 
-        hotel = self._load_checkpoint_model(hotel_role.role_name, HelloAgentsHotelRecommendation)
-        transport = self._load_checkpoint_model(transport_role.role_name, HelloAgentsTransportGuidance)
+        hotel = self._load_checkpoint_model(
+            hotel_role.role_name,
+            HelloAgentsHotelRecommendation,
+            prompt_version=hotel_role.prompt_version,
+            model_name=role_llm_configs[hotel_role.role_name].model,
+        )
+        transport = self._load_checkpoint_model(
+            transport_role.role_name,
+            HelloAgentsTransportGuidance,
+            prompt_version=transport_role.prompt_version,
+            model_name=role_llm_configs[transport_role.role_name].model,
+        )
         secondary_roles_to_run: dict[str, HelloAgentsRoleConfig] = {}
         if hotel is None:
             secondary_roles_to_run[hotel_role.role_name] = hotel_role
@@ -856,14 +1030,24 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             if hotel is None:
                 try:
                     hotel = self._parse_structured_response(futures[hotel_role.role_name].result(), HelloAgentsHotelRecommendation)
-                    self._record_checkpoint_role(hotel_role.role_name, hotel)
+                    self._record_checkpoint_role(
+                        hotel_role.role_name,
+                        hotel,
+                        prompt_version=hotel_role.prompt_version,
+                        model=role_llm_configs[hotel_role.role_name].model,
+                    )
                 except Exception as exc:
                     self._record_checkpoint_failure(hotel_role.role_name, exc)
                     raise
             if transport is None:
                 try:
                     transport = self._parse_structured_response(futures[transport_role.role_name].result(), HelloAgentsTransportGuidance)
-                    self._record_checkpoint_role(transport_role.role_name, transport)
+                    self._record_checkpoint_role(
+                        transport_role.role_name,
+                        transport,
+                        prompt_version=transport_role.prompt_version,
+                        model=role_llm_configs[transport_role.role_name].model,
+                    )
                 except Exception as exc:
                     self._record_checkpoint_failure(transport_role.role_name, exc)
                     raise
@@ -873,10 +1057,29 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         weather_tool_results = weather_payload.get("tool_results") if isinstance(weather_payload.get("tool_results"), dict) else {}
         hotel_tool_results = hotel_payload.get("tool_results") if isinstance(hotel_payload.get("tool_results"), dict) else {}
         transport_tool_results = transport_payload.get("tool_results") if isinstance(transport_payload.get("tool_results"), dict) else {}
-        poi_citations = self._extract_urls_from_search_result(poi_tool_results)
-        weather_citations = [str(item).strip() for item in weather_tool_results.get("citations", []) if str(item).strip()]
-        hotel_citations = self._extract_urls_from_search_result(hotel_tool_results)
-        transport_citations = [str(item).strip() for item in transport_tool_results.get("citations", []) if str(item).strip()]
+        poi_citations = list(dict.fromkeys([
+            *self._extract_urls_from_search_result(poi_tool_results),
+            *self._native_role_citations.get(poi_role.role_name, []),
+        ]))
+        weather_citations = list(dict.fromkeys([
+            *[str(item).strip() for item in weather_tool_results.get("citations", []) if str(item).strip()],
+            *self._native_role_citations.get(weather_role.role_name, []),
+            *[str(item).strip() for item in (weather.source_urls if weather else []) if str(item).strip()],
+            *[
+                str(url).strip()
+                for forecast in (weather.daily_forecasts if weather else [])
+                for url in forecast.source_urls
+                if str(url).strip()
+            ],
+        ]))
+        hotel_citations = list(dict.fromkeys([
+            *self._extract_urls_from_search_result(hotel_tool_results),
+            *self._native_role_citations.get(hotel_role.role_name, []),
+        ]))
+        transport_citations = list(dict.fromkeys([
+            *[str(item).strip() for item in transport_tool_results.get("citations", []) if str(item).strip()],
+            *self._native_role_citations.get(transport_role.role_name, []),
+        ]))
         if not transport_citations:
             transport_citations = self._extract_urls_from_search_result(transport_tool_results)
         grounding_documents = self._merge_grounding_documents(
@@ -923,7 +1126,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             )
         )
         planner_role = role_configs["itinerary_planner"]
-        final_payload = self._load_checkpoint_model(planner_role.role_name, LlmPlanningPayload)
+        final_payload = self._load_checkpoint_model(
+            planner_role.role_name,
+            LlmPlanningPayload,
+            prompt_version=planner_role.prompt_version,
+            model_name=role_llm_configs[planner_role.role_name].model,
+        )
         planner_response = ""
         if final_payload is None:
             self._emit_role_progress(planner_role)
@@ -955,10 +1163,19 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 )
                 self._log_event("helloagents_planner_response_received", message="Planner response received.", response_chars=len(planner_response))
                 final_payload = parse_planning_response(planner_response)
-                self._record_checkpoint_role(planner_role.role_name, final_payload)
+                final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request)
+                self._validate_execution_constraints(final_payload, request, transport)
+                self._record_checkpoint_role(
+                    planner_role.role_name,
+                    final_payload,
+                    prompt_version=planner_role.prompt_version,
+                    model=role_llm_configs[planner_role.role_name].model,
+                )
             except Exception as exc:
                 self._record_checkpoint_failure(planner_role.role_name, exc)
                 raise
+        final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request)
+        self._validate_execution_constraints(final_payload, request, transport)
         self._log_event("helloagents_planner_response_parsed", message="Planner response parsed into structured payload.", day_count=len(final_payload.days))
         repair_needed = planning_payload_needs_language_repair(final_payload, request)
         agent_runs.append(self._build_agent_run(planner_role, role_llm_configs[planner_role.role_name], self._summarize_itinerary(final_payload.summary, final_payload.days, final_payload.risks)))
@@ -1004,7 +1221,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return final_payload, pipeline_notes, agent_runs, poi_grounding, weather, weather_citations, weather_tool_results, grounding_documents, hotel, transport
 
     def _build_trip_payload(self, request: PlanningRequest) -> dict[str, Any]:
-        return {
+        payload = {
             "trip_id": request.trip_id,
             "title": request.title,
             "origin": request.origin,
@@ -1019,6 +1236,19 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "pace": request.pace,
             "transport_mode": request.transport_mode,
         }
+        generated_at = request.planning_generated_at
+        if generated_at is not None:
+            local_generated_at = generated_at.astimezone() if generated_at.tzinfo is not None else generated_at
+            earliest = local_generated_at.replace(second=0, microsecond=0) + timedelta(minutes=30)
+            payload.update(
+                {
+                    "planning_generated_at": local_generated_at.isoformat(timespec="minutes"),
+                    "current_local_date": local_generated_at.date().isoformat(),
+                    "current_local_time": local_generated_at.strftime("%H:%M"),
+                    "same_day_earliest_start_time": earliest.strftime("%H:%M") if request.start_date == local_generated_at.date() else None,
+                }
+            )
+        return payload
 
     def _build_role_llm_configs(self) -> dict[str, LlmEndpointConfig]:
         assert self._llm_config is not None
@@ -1221,18 +1451,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return any(len(role_names) > 1 for role_names in shared_streaming_search_roles.values())
 
     def _has_native_search(self, role_name: str, llm_config: LlmEndpointConfig | None) -> bool:
-        """Single source of truth for whether a role's configured model can search the web natively.
-
-        A model is treated as natively search-capable when it is a Grok model (direct x.ai or by
-        model name) or when a search-eligible role is routed through the rainflow proxy channel.
-        """
+        """Return true only for a model whose endpoint is known to provide built-in web search."""
         if llm_config is None:
             return False
         model = str(getattr(llm_config, "model", "") or "").strip().lower()
-        base_url = str(getattr(llm_config, "base_url", "") or "").strip().lower()
-        if "grok" in model or "x.ai" in base_url:
-            return True
-        return role_name in {"poi_specialist", *_DIRECT_GROK_SEARCH_ROLES} and "rainflow" in base_url
+        return role_name in {"poi_specialist", *_DIRECT_GROK_SEARCH_ROLES} and model == "web/grok-chat-fast"
 
     def _role_config_uses_search_capable_grok(self, role_name: str, llm_config: LlmEndpointConfig) -> bool:
         return self._has_native_search(role_name, llm_config)
@@ -1333,6 +1556,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             ) from exc
 
         content = self._coerce_text(response)
+        native_citations = [
+            str(item).strip()
+            for item in (getattr(llm, "last_citations", []) or [])
+            if str(item).strip()
+        ]
+        self._native_role_citations[role_config.role_name] = list(dict.fromkeys(native_citations))
         if not content.strip():
             endpoint = self._describe_endpoint(llm_config)
             raise RuntimeError(
@@ -1493,7 +1722,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         input_snapshot = self._build_poi_input_snapshot(input_payload)
         poi_names = [
             f"{self._normalize_poi_collection_kind(poi)}:{poi.name}@{poi.area or 'unknown'}({poi.confidence or 'low'})"
-            for poi in grounding.featured_pois[:12]
+            for poi in grounding.featured_pois[:20]
         ]
         search_query = str(tool_results.get("search_query") or "").strip()
         crawl_urls = [str(item).strip() for item in tool_results.get("crawl_urls", []) if str(item).strip()] if isinstance(tool_results.get("crawl_urls"), list) else []
@@ -1882,8 +2111,8 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         attraction_pois = [item for item in typed_pois if not self._is_food_poi_dict(item)]
         food_pois = [item for item in typed_pois if self._is_food_poi_dict(item)]
         return {
-            "pois": attraction_pois[:12],
-            "attraction_pois": attraction_pois[:10],
+            "pois": attraction_pois[:20],
+            "attraction_pois": attraction_pois[:20],
             "food_pois": [],
             "areas": [item for item in areas if isinstance(item, dict)][:6],
             "top_areas": [str(item).strip() for item in poi_collection.get("top_areas", []) if str(item).strip()][:5],
@@ -1907,7 +2136,18 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _build_planner_weather_payload(self, weather: HelloAgentsWeatherGuidance, *, expected_days: int) -> dict[str, Any]:
         return {
             "overall_outlook": self._truncate_planner_text(weather.overall_outlook, 180),
+            "source_urls": [str(url).strip() for url in weather.source_urls if str(url).strip()][:5],
             "daily_outlook": self._compact_planner_text_list(weather.daily_outlook, limit=expected_days, text_limit=120),
+            "daily_forecasts": [
+                {
+                    "date": forecast.date.isoformat(),
+                    "outlook": self._truncate_planner_text(forecast.outlook, 120),
+                    "timing_advice": self._truncate_planner_text(forecast.timing_advice, 80),
+                    "risk": self._truncate_planner_text(forecast.risk, 80),
+                    "source_urls": [str(url).strip() for url in forecast.source_urls if str(url).strip()][:3],
+                }
+                for forecast in weather.daily_forecasts[:expected_days]
+            ],
             "segments": [
                 {
                     "name": self._truncate_planner_text(segment.name, 60),
@@ -2051,6 +2291,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return any(str(url).strip() for url in candidate.source_urls)
 
     def _build_planner_transport_payload(self, transport: HelloAgentsTransportGuidance) -> dict[str, Any]:
+        minimum_departure_buffer = max(
+            transport.minimum_departure_buffer_minutes,
+            transport.departure_transfer_minutes + transport.station_buffer_minutes + transport.luggage_buffer_minutes,
+            120,
+        )
         return {
             "intercity_options": [
                 {
@@ -2070,6 +2315,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "sequencing_constraints": [str(item).strip() for item in transport.sequencing_constraints if str(item).strip()][:4],
             "estimated_intercity_cost": transport.estimated_intercity_cost,
             "estimated_local_transport_cost": transport.estimated_local_transport_cost,
+            "departure_transfer_minutes": transport.departure_transfer_minutes,
+            "station_buffer_minutes": transport.station_buffer_minutes,
+            "luggage_buffer_minutes": transport.luggage_buffer_minutes,
+            "minimum_departure_buffer_minutes": minimum_departure_buffer,
             "summary": self._compress_notes(
                 [
                     *transport.arrival_strategy[:2],
@@ -2176,6 +2425,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 "suggested_time": poi.suggested_time,
                 "confidence": poi.confidence or "low",
                 "source_url": source_urls[0] if source_urls else "",
+                "source_urls": source_urls[:3],
             }
             if self._is_food_poi(poi):
                 entry["highlights"] = [
@@ -2203,7 +2453,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             )
         areas.sort(key=lambda item: (-int(item["score"]), str(item["name"]).casefold()))
         return {
-            "pois": pois[:16],
+            "pois": pois[:20],
             "areas": areas[:8],
             "top_areas": [str(item["name"]) for item in areas[:5]],
             "sequencing_hints": [str(item).strip() for item in poi_grounding.sequencing_hints if str(item).strip()][:6],
@@ -3251,6 +3501,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             weather.overall_outlook,
             *weather.daily_outlook,
             *[
+                " ".join([forecast.outlook, forecast.timing_advice, forecast.risk])
+                for forecast in weather.daily_forecasts
+            ],
+            *[
                 " ".join(
                     [
                         segment.name,
@@ -3276,6 +3530,22 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         if locale == "zh-CN":
             return has_english and not has_cjk
         return has_cjk and not has_english
+
+    def _validate_weather_date_coverage(self, weather: HelloAgentsWeatherGuidance, request: PlanningRequest) -> None:
+        if request.planning_generated_at is None:
+            return
+        expected_dates = {
+            request.start_date + timedelta(days=offset)
+            for offset in range(max(1, (request.end_date - request.start_date).days + 1))
+        }
+        actual_dates = [forecast.date for forecast in weather.daily_forecasts]
+        if actual_dates:
+            if len(actual_dates) != len(set(actual_dates)) or set(actual_dates) != expected_dates:
+                missing = sorted(date_value.isoformat() for date_value in expected_dates - set(actual_dates))
+                extra = sorted(date_value.isoformat() for date_value in set(actual_dates) - expected_dates)
+                raise ValueError(f"天气逐日日期校验失败：缺少 {missing or '无'}；多出 {extra or '无'}")
+            return
+        raise ValueError("天气逐日日期校验失败：daily_forecasts 必须按行程日期逐日返回，不能缺日或合并日期。")
 
     def _repair_weather_guidance_language(
         self,
@@ -3305,6 +3575,9 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                         "rewrite_fields": [
                             "overall_outlook",
                             "daily_outlook[]",
+                            "daily_forecasts[].outlook",
+                            "daily_forecasts[].timing_advice",
+                            "daily_forecasts[].risk",
                             "segments[].name",
                             "segments[].outlook",
                             "segments[].clothing_advice[]",
@@ -3446,13 +3719,205 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         compact = summary.strip() or "Draft ready."
         return f"{compact} {len(days)} days, {len(risks)} risks."
 
+    def _mark_unverified_schedules_as_planning_windows(
+        self,
+        payload: LlmPlanningPayload,
+        request: PlanningRequest,
+    ) -> LlmPlanningPayload:
+        normalized = payload.model_copy(deep=True)
+        zh_output = is_chinese_output(request)
+        window_note = (
+            "该时间段仅为建议出行预留窗口，不是已核验班次；具体车次和发车时间须以购票结果为准。"
+            if zh_output
+            else "This is a recommended travel window, not a verified service time; confirm the service and departure time when booking."
+        )
+        pending_suffix = "（班次待确认）" if zh_output else " (service pending confirmation)"
+        for day in normalized.days:
+            for item in day.items:
+                if not self._is_scheduled_transport_item(item):
+                    continue
+                booking = item.booking_info
+                evidence_complete = bool(
+                    booking
+                    and booking.schedule_verified
+                    and str(booking.service_number or "").strip()
+                    and str(booking.schedule_checked_at or "").strip()
+                    and str(booking.schedule_source_url or "").strip().startswith(("http://", "https://"))
+                )
+                if evidence_complete:
+                    continue
+                if booking is None:
+                    booking = LlmBookingInfo()
+                    item.booking_info = booking
+                booking.schedule_verified = False
+                if window_note not in booking.notes:
+                    booking.notes.insert(0, window_note)
+                if window_note not in item.note:
+                    item.note = f"{item.note.strip()} {window_note}".strip()
+                if pending_suffix.strip() not in item.name:
+                    item.name = f"{item.name}{pending_suffix}"
+        return normalized
+
+    def _validate_execution_constraints(
+        self,
+        payload: LlmPlanningPayload,
+        request: PlanningRequest,
+        transport: HelloAgentsTransportGuidance,
+    ) -> None:
+        errors: list[str] = []
+        generated_at = request.planning_generated_at
+        if generated_at is not None:
+            local_generated_at = generated_at.astimezone() if generated_at.tzinfo is not None else generated_at
+            if request.start_date < local_generated_at.date():
+                errors.append("行程开始日期已经早于当前日期")
+            elif request.start_date == local_generated_at.date() and payload.days:
+                earliest_start = local_generated_at.replace(second=0, microsecond=0) + timedelta(minutes=30)
+                if earliest_start.date() > request.start_date:
+                    errors.append("今天已经没有足够的行程生成与准备时间")
+                first_day_starts = [self._clock_minutes(item.start_time) for item in payload.days[0].items]
+                valid_starts = [value for value in first_day_starts if value is not None]
+                if earliest_start.date() == request.start_date and valid_starts and min(valid_starts) < earliest_start.hour * 60 + earliest_start.minute:
+                    errors.append(f"当天首日存在早于可执行时间 {earliest_start.strftime('%H:%M')} 的项目")
+
+        seen_pois: dict[str, int] = {}
+        for day_index, day in enumerate(payload.days, start=1):
+            for item in day.items:
+                if self._is_transport_item(item):
+                    continue
+                key = self._normalize_poi_dedupe_key(item.name)
+                if not key:
+                    continue
+                previous_day = seen_pois.get(key)
+                if previous_day is not None and previous_day != day_index:
+                    errors.append(f"POI“{item.name}”在第 {previous_day} 天和第 {day_index} 天重复")
+                else:
+                    seen_pois[key] = day_index
+
+        if payload.days:
+            departure_day = payload.days[-1]
+            departure_index = next(
+                (
+                    index
+                    for index in range(len(departure_day.items) - 1, -1, -1)
+                    if self._is_scheduled_transport_item(departure_day.items[index])
+                ),
+                None,
+            )
+            if departure_index is not None and departure_index > 0:
+                previous_item = departure_day.items[departure_index - 1]
+                departure_item = departure_day.items[departure_index]
+                previous_end = self._clock_minutes(previous_item.end_time)
+                departure_start = self._clock_minutes(departure_item.start_time)
+                required_buffer = max(
+                    120,
+                    transport.minimum_departure_buffer_minutes,
+                    transport.departure_transfer_minutes + transport.station_buffer_minutes + transport.luggage_buffer_minutes,
+                )
+                if previous_end is None or departure_start is None:
+                    errors.append("返程缓冲无法校验：返程交通或前一项目缺少有效时间")
+                else:
+                    actual_buffer = departure_start - previous_end
+                    if actual_buffer < required_buffer:
+                        errors.append(
+                            f"返程日前一项目到跨城出发窗口仅 {actual_buffer} 分钟，至少需要 {required_buffer} 分钟"
+                        )
+
+        if errors:
+            raise ValueError("行程可执行性校验失败：" + "；".join(dict.fromkeys(errors)))
+
+    def _is_transport_item(self, item: Any) -> bool:
+        return str(getattr(item, "type", "") or "").strip().lower() in {"transport", "transit", "rail", "flight", "ferry"}
+
+    def _is_scheduled_transport_item(self, item: Any) -> bool:
+        if not self._is_transport_item(item):
+            return False
+        text = f"{getattr(item, 'name', '')} {getattr(item, 'note', '')}".casefold()
+        return any(
+            marker in text
+            for marker in (
+                "高铁",
+                "动车",
+                "火车",
+                "列车",
+                "航班",
+                "飞机",
+                "轮渡",
+                "train",
+                "rail",
+                "flight",
+                "ferry",
+            )
+        )
+
+    def _clock_minutes(self, value: str) -> int | None:
+        match = re.fullmatch(r"(\d{2}):(\d{2})", str(value or "").strip())
+        if match is None:
+            return None
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if hour > 23 or minute > 59:
+            return None
+        return hour * 60 + minute
+
+    def _normalize_poi_dedupe_key(self, value: str) -> str:
+        """Collapse common presentation-only POI suffixes without merging nearby distinct sights."""
+        normalized = self._normalize_match_key(value)
+        if not normalized:
+            return ""
+        for prefix in ("再次游览", "再次前往", "重游", "再访", "二刷"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix) :]
+        for suffix in (
+            "周边漫步",
+            "周边游览",
+            "深度游览",
+            "深度游",
+            "夜间游览",
+            "夜游",
+            "晨间游览",
+            "晨游",
+            "再次游览",
+            "再访",
+            "景区",
+            "风景区",
+            "旅游区",
+        ):
+            if normalized.endswith(suffix) and len(normalized) > len(suffix) + 1:
+                normalized = normalized[: -len(suffix)]
+                break
+        return normalized
+
     def _pick_weather_note(self, notes: list[str], day_index: int) -> str:
         normalized = [str(item).strip() for item in notes if str(item).strip()]
         if not normalized:
             return ""
         if day_index - 1 < len(normalized):
             return normalized[day_index - 1]
-        return normalized[0]
+        return ""
+
+    def _pick_weather_outlook_for_date(
+        self,
+        weather_guidance: HelloAgentsWeatherGuidance,
+        *,
+        target_date: date,
+        trip_start_date: date,
+        expected_days: int,
+    ) -> tuple[str, list[str]]:
+        forecast = next((item for item in weather_guidance.daily_forecasts if item.date == target_date), None)
+        if forecast is not None:
+            notes = [value for value in (forecast.timing_advice, forecast.risk) if str(value or "").strip()]
+            return forecast.outlook.strip(), notes
+
+        legacy = [str(item).strip() for item in weather_guidance.daily_outlook if str(item).strip()]
+        offset = (target_date - trip_start_date).days
+        if len(legacy) == expected_days and 0 <= offset < len(legacy):
+            return legacy[offset], []
+
+        iso_date = target_date.isoformat()
+        chinese_date = f"{target_date.month}月{target_date.day}日"
+        for item in legacy:
+            if iso_date in item or chinese_date in item:
+                return item, []
+        return "", []
 
     def _contains_temperature_signal(self, text: str) -> bool:
         candidate = str(text or "").strip()
@@ -3501,12 +3966,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _resolve_weather_temperature_hint(
         self,
-        day_index: int,
+        selected_outlook: str,
         weather_guidance: HelloAgentsWeatherGuidance,
         weather_tool_results: dict[str, Any] | None,
     ) -> str:
         candidates = [
-            self._pick_weather_note(weather_guidance.daily_outlook, day_index),
+            selected_outlook,
             weather_guidance.overall_outlook,
             *self._flatten_text_values(weather_tool_results or {}),
         ]
@@ -3773,6 +4238,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     ]
                 )
             ),
+            schedule_verified=bool(primary_info.schedule_verified if primary_info is not None else False),
+            service_number=(primary_info.service_number if primary_info and primary_info.service_number else None),
+            schedule_checked_at=(primary_info.schedule_checked_at if primary_info and primary_info.schedule_checked_at else None),
+            schedule_source_url=(primary_info.schedule_source_url if primary_info and primary_info.schedule_source_url else None),
         )
         if merged.official_booking_url and merged.official_booking_url not in merged.source_urls:
             merged.source_urls.append(merged.official_booking_url)
@@ -3925,11 +4394,30 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         weather_guidance: HelloAgentsWeatherGuidance | None,
         citations: list[str] | None,
         weather_tool_results: dict[str, Any] | None = None,
+        *,
+        target_date: date | None = None,
+        trip_start_date: date | None = None,
+        expected_days: int | None = None,
     ) -> PlannedDayWeather | None:
         if weather_guidance is None:
             return None
-        summary = self._pick_weather_note(weather_guidance.daily_outlook, day_index) or weather_guidance.overall_outlook.strip()
-        notes: list[str] = []
+        resolved_start_date = trip_start_date or target_date or date.today()
+        resolved_target_date = target_date or (resolved_start_date + timedelta(days=max(day_index - 1, 0)))
+        resolved_expected_days = expected_days or max(len(weather_guidance.daily_forecasts), len(weather_guidance.daily_outlook), 1)
+        summary, dated_notes = self._pick_weather_outlook_for_date(
+            weather_guidance,
+            target_date=resolved_target_date,
+            trip_start_date=resolved_start_date,
+            expected_days=resolved_expected_days,
+        )
+        if not summary:
+            overall = weather_guidance.overall_outlook.strip()
+            summary = (
+                f"{resolved_target_date.isoformat()}：暂无对应日期的可靠逐日天气；总体参考：{overall}"
+                if re.search(r"[㐀-鿿]", overall)
+                else f"{resolved_target_date.isoformat()}: no reliable date-specific forecast; overall context: {overall}"
+            )
+        notes: list[str] = [self._truncate_planner_text(item, 110) for item in dated_notes if str(item or "").strip()]
         for candidate in (
             self._pick_weather_note(weather_guidance.timing_guidance, day_index),
             self._pick_weather_note(weather_guidance.packing_notes, day_index),
@@ -3943,14 +4431,39 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 segment_note = self._format_weather_segment_note(segment)
                 if segment_note and segment_note not in notes:
                     notes.append(segment_note)
-        temperature_hint = self._resolve_weather_temperature_hint(day_index, weather_guidance, weather_tool_results)
+        temperature_hint = self._resolve_weather_temperature_hint(summary, weather_guidance, weather_tool_results)
         if temperature_hint:
             if not self._contains_temperature_signal(summary) and temperature_hint.casefold() not in summary.casefold():
                 summary = f"{summary} {temperature_hint}".strip() if summary else temperature_hint
             elif all(temperature_hint.casefold() not in note.casefold() for note in notes):
                 notes.insert(0, self._truncate_planner_text(temperature_hint, 80))
         summary = self._truncate_planner_text(summary, 150)
-        citation_list = [str(item).strip() for item in (citations or []) if str(item).strip()]
+        matching_forecast = next(
+            (item for item in weather_guidance.daily_forecasts if item.date == resolved_target_date),
+            None,
+        )
+        all_daily_sources = {
+            str(url).strip()
+            for forecast in weather_guidance.daily_forecasts
+            for url in forecast.source_urls
+            if str(url).strip()
+        }
+        matching_sources = [
+            str(url).strip()
+            for url in (matching_forecast.source_urls if matching_forecast else [])
+            if str(url).strip()
+        ]
+        shared_sources = [
+            str(url).strip()
+            for url in weather_guidance.source_urls
+            if str(url).strip()
+        ]
+        fallback_sources = [
+            str(item).strip()
+            for item in (citations or [])
+            if str(item).strip() and str(item).strip() not in all_daily_sources
+        ]
+        citation_list = list(dict.fromkeys([*matching_sources, *shared_sources, *fallback_sources]))
         if not summary and not notes and not citation_list:
             return None
         return PlannedDayWeather(summary=summary, notes=notes[:2], citations=citation_list[:3])
@@ -3975,14 +4488,19 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
         zh_output = is_chinese_output(request)
         route_mode = self._resolve_route_mode(request.transport_mode)
+        maps_grounded = self._maps_provider.provider_name != "stub-maps"
         planned_days: list[PlannedDay] = []
         filtered_food_item_count = 0
 
         for day_index, day in enumerate(payload.days, start=1):
             day_items = [item for item in day.items if not self._should_exclude_food_itinerary_item(item)]
             filtered_food_item_count += max(0, len(day.items) - len(day_items))
-            poi_details = [self._resolve_item_poi(item, request, preferred_index=day_index + item_index) for item_index, item in enumerate(day_items)]
-            route_stops = [poi_to_route_stop(poi) for poi in poi_details]
+            poi_details = (
+                [self._resolve_item_poi(item, request, preferred_index=day_index + item_index) for item_index, item in enumerate(day_items)]
+                if maps_grounded
+                else [None for _ in day_items]
+            )
+            route_stops = [poi_to_route_stop(poi) for poi in poi_details if poi is not None]
             route_matrix = self._maps_provider.batch_route_matrix(route_stops, mode=route_mode) if route_stops else None
             matrix_lookup = {
                 (cell.origin_stop_id, cell.destination_stop_id): cell
@@ -3993,7 +4511,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             previous_stop = None
             for item_index, item in enumerate(day_items):
                 poi = poi_details[item_index]
-                current_stop = route_stops[item_index]
+                current_stop = route_stops[item_index] if maps_grounded else None
                 matched_food = self._find_matching_featured_food(item.name, poi_grounding)
                 matched_poi = self._find_matching_featured_poi(item.name, poi_grounding)
                 if matched_food is not None and not self._is_food_item_type(item.type) and matched_poi is not None:
@@ -4014,7 +4532,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 )
                 route_ref = None
                 note = item.note.strip() or ("\u6765\u81ea\u5df2\u914d\u7f6e\u7684 HelloAgents \u884c\u7a0b\u8349\u7a3f\u3002" if zh_output else "Generated from the configured HelloAgents itinerary draft.")
-                if previous_stop is not None:
+                if maps_grounded and previous_stop is not None and current_stop is not None:
                     route_estimate = self._maps_provider.estimate_route(previous_stop, current_stop, route_mode)
                     matrix_cell = matrix_lookup[(previous_stop.stop_id, current_stop.stop_id)]
                     route_ref = PlannedRouteReference(
@@ -4030,7 +4548,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     )
                     note = f"{note} \u4ece\u4e0a\u4e00\u7ad9\u8f6c\u79fb\u5230\u8fd9\u91cc\u7ea6 {matrix_cell.duration_minutes} \u5206\u949f\u3002" if zh_output else f"{note} Transfer from previous stop is about {matrix_cell.duration_minutes} min."
 
-                location_text = item.location.strip() or poi.location.address.formatted
+                location_text = item.location.strip() or (poi.location.address.formatted if poi is not None else request.destination)
                 planned_items.append(
                     PlannedItem(
                         id=generate_identifier("item"),
@@ -4051,22 +4569,35 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                             getattr(item, "visit_requirements", None),
                             fallback_visit_requirements,
                         ),
-                        location_ref=PlannedLocationReference(
-                            provider=poi.provider,
-                            poi_id=poi.id,
-                            name=poi.name,
-                            city=poi.city,
-                            category=poi.category,
-                            summary=poi.summary,
-                            address=poi.location.address.formatted,
-                            coordinates=poi.location.coordinates,
+                        location_ref=(
+                            PlannedLocationReference(
+                                provider=poi.provider,
+                                poi_id=poi.id,
+                                name=poi.name,
+                                city=poi.city,
+                                category=poi.category,
+                                summary=poi.summary,
+                                address=poi.location.address.formatted,
+                                coordinates=poi.location.coordinates,
+                            )
+                            if poi is not None
+                            else None
                         ),
                         route_from_previous=route_ref,
                     )
                 )
                 previous_stop = current_stop
 
-            day_weather = self._build_day_weather(day_index, weather_guidance, weather_citations, weather_tool_results)
+            target_date = request.start_date + timedelta(days=day_index - 1)
+            day_weather = self._build_day_weather(
+                day_index,
+                weather_guidance,
+                weather_citations,
+                weather_tool_results,
+                target_date=target_date,
+                trip_start_date=request.start_date,
+                expected_days=expected_days,
+            )
             planned_days.append(
                 PlannedDay(
                     day_index=day_index,
@@ -4101,7 +4632,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 notes=[
                     *pipeline_notes,
                     f"Default HelloAgents endpoint: {host}.",
-                    f"Enriched the HelloAgents planner output with structured POI and route references via {self._maps_provider.provider_name}.",
+                    (
+                        f"Enriched the HelloAgents planner output with structured POI and route references via {self._maps_provider.provider_name}."
+                        if maps_grounded
+                        else "未配置真实地图服务，已关闭占位坐标、距离和路线分钟数。"
+                    ),
                 ],
                 license_notice=_LICENSE_NOTICE,
                 agent_runs=agent_runs,

@@ -17,7 +17,7 @@ const localeStore = useLocaleStore()
 const sessionState = useUnauthorizedSessionState()
 localeStore.bootstrap()
 
-const { locale, t } = useI18n()
+const { t } = useI18n()
 const usePlainShell = computed(() => Boolean(route.meta.plainShell))
 
 function routeCacheKey(viewRoute: RouteLocationNormalizedLoaded) {
@@ -27,17 +27,11 @@ function routeCacheKey(viewRoute: RouteLocationNormalizedLoaded) {
     return `${cacheScope}:trip-detail:${String(viewRoute.params.id ?? "")}`
   }
 
-  if (viewRoute.name === "images") {
-    return `${cacheScope}:images`
-  }
-
   return `${cacheScope}:${String(viewRoute.name ?? viewRoute.path)}`
 }
 
 const sessionExpiredMessage = computed(() =>
-  locale.value === "zh-CN"
-    ? "登录状态已失效，请重新登录后继续操作。"
-    : "Your session has expired. Sign in again to continue."
+  "登录状态已失效，请重新登录后继续操作。"
 )
 
 watchEffect(() => {

@@ -1,10 +1,9 @@
 export type LocaleCode = "en-US" | "zh-CN"
 
-export const DEFAULT_LOCALE: LocaleCode = "en-US"
+export const DEFAULT_LOCALE: LocaleCode = "zh-CN"
 export const LOCALE_STORAGE_KEY = "travelmind_locale"
 export const SUPPORTED_LOCALES = [
-  { code: "zh-CN", shortLabel: "中" },
-  { code: "en-US", shortLabel: "EN" }
+  { code: "zh-CN", shortLabel: "中" }
 ] as const
 
 const messages: Record<LocaleCode, Record<string, unknown>> = {

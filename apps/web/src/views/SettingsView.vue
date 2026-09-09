@@ -87,9 +87,9 @@ const form = reactive<{
 
 const enCopy = {
   kicker: "Settings",
-  title: "Agent, Search, and Image Settings",
+  title: "Agent and Search Settings",
   description:
-    "Agent model settings, search service settings, and image model settings are managed separately. Prompt optimization uses the text model settings, while final image generation uses the saved image model settings.",
+    "Configure the agent model and search service used for itinerary planning.",
   refresh: "Reload",
   save: "Save settings",
   saving: "Saving...",
@@ -152,17 +152,7 @@ const enCopy = {
   xhsToggleLabel: "Enable Xiaohongshu source",
   xhsToggleHint: "Allow Xiaohongshu posts to be merged into search grounding when available.",
   searchStoredKeyLabel: "Stored search key",
-  statusHint:
-    "Agent settings affect text model execution. Search service settings affect grounded search. Image settings affect final image generation jobs.",
-  imageSection: "Image model",
-  imageSectionHint: "Controls the model endpoint used for text-to-image and image-to-image jobs.",
-  imageProviderLabel: "Image provider",
-  imageProviderOpenAICompatible: "OpenAI-compatible",
-  imageProviderHuggingFace: "Hugging Face",
-  imageProviderGiteeAI: "Gitee AI",
-  imageProviderModelScope: "ModelScope",
-  imageProviderA4F: "A4F",
-  imageStoredKeyLabel: "Stored image key"
+  statusHint: "Agent settings affect text model execution. Search service settings affect grounded search."
 }
 
 const zhCopy = {
@@ -179,6 +169,12 @@ const zhCopy = {
   saveErrorTitle: "无法保存设置",
   agentSection: "模型配置",
   agentSectionHint: "控制生成和润色时使用的模型接口。",
+  protocolLabel: "模型协议",
+  protocolOpenAI: "OpenAI",
+  protocolNewApi: "New API",
+  protocolGemini: "Gemini",
+  protocolClaude: "Claude",
+  protocolNeiApi: "NEI API",
   providerLabel: "规划提供方",
   providerStandard: "标准模式",
   providerHelloAgents: "HelloAgents（PoC）",
@@ -186,6 +182,21 @@ const zhCopy = {
   baseUrlPlaceholder: "https://api.example.com/v1",
   modelLabel: "模型",
   modelPlaceholder: "gpt-5.4",
+  fetchModels: "获取模型列表",
+  fetchingModels: "正在获取...",
+  modelFetchSuccess: "模型列表已加载，请从模型字段中选择。",
+  modelFetchEmpty: "服务商没有返回可选择的模型。",
+  modelFetchError: "无法获取模型列表",
+  fetchedModelsLabel: "可用模型",
+  fetchedModelsHint: "可选择已获取的模型，也可以继续输入自定义模型名称。",
+  fetchedModelsPlaceholder: "请选择模型",
+  currentModelOption: "当前值",
+  testConnection: "测试连接",
+  testingConnection: "正在测试...",
+  testConnectionSuccessTitle: "连接测试通过",
+  testConnectionSuccess: "模型已在 {latency} 毫秒内响应。",
+  testConnectionError: "无法测试连接",
+  endpointPreviewLabel: "接口预览",
   wireApiLabel: "接口格式",
   wireApiResponses: "Responses 接口",
   wireApiChat: "Chat Completions 接口",
@@ -211,8 +222,7 @@ const zhCopy = {
   xhsToggleLabel: "启用小红书来源",
   xhsToggleHint: "可用时允许将小红书帖子合并到搜索 grounding 结果中。",
   searchStoredKeyLabel: "已保存的搜索密钥",
-  statusHint:
-    "模型设置会影响模型执行；搜索服务设置会影响后端搜索，包括 MCP 或直接 API 调用。"
+  statusHint: "模型设置会影响模型执行；搜索服务设置会影响后端搜索，包括 MCP 或直接 API 调用。"
 }
 
 const { locale } = useI18n()
@@ -281,7 +291,6 @@ const xhsCopy = computed(() =>
 const agentStoredKeyText = computed(() => settingsStore.settings?.agent.api_key_masked?.trim() || copy.value.noStoredKey)
 const poiStoredKeyText = computed(() => settingsStore.settings?.agent.poi_api_key_masked?.trim() || copy.value.noStoredKey)
 const searchStoredKeyText = computed(() => settingsStore.settings?.search.api_key_masked?.trim() || copy.value.noStoredKey)
-const imageStoredKeyText = computed(() => settingsStore.settings?.image.api_key_masked?.trim() || copy.value.noStoredKey)
 const isGrokSearchProvider = computed(() => form.search_provider === "groksearch")
 const isTavilyProvider = computed(() => form.search_provider === "tavily")
 const agentProtocolDefaultBaseUrls: Record<LlmProviderProtocol, string> = {
@@ -900,8 +909,8 @@ void refreshXhsStatus()
         </div>
 
         <div class="field field--full panel-subsection">
-          <p class="kicker">POI</p>
-          <p class="muted">Optional override for the POI specialist only. Use this when POI discovery should run on a different model such as Grok.</p>
+          <p class="kicker">搜索专用模型</p>
+          <p class="muted">统一用于 POI、天气、酒店和交通专家的联网检索。当前推荐使用 Web/grok-chat-fast。</p>
         </div>
 
         <div class="field">
@@ -956,7 +965,7 @@ void refreshXhsStatus()
 
         <div class="field">
           <label for="poi-model">{{ copy.modelLabel }}</label>
-          <input id="poi-model" v-model="form.poi_model" :placeholder="'grok-4.20-multi-agent-xhigh'" />
+          <input id="poi-model" v-model="form.poi_model" :placeholder="'Web/grok-chat-fast'" />
           <select
             v-if="poiModelOptions.length > 0"
             :value="poiModelValue"
@@ -998,7 +1007,7 @@ void refreshXhsStatus()
             <strong>{{ copy.storedKeyLabel }}:</strong>
             {{ poiStoredKeyText }}
           </p>
-          <p class="muted">Leave every POI field blank if you want POI to follow the main agent model.</p>
+          <p class="muted">如果希望所有搜索角色使用主模型，请将本区域所有字段留空。</p>
         </div>
 
         <div class="field field--full panel-subsection">
@@ -1051,42 +1060,6 @@ void refreshXhsStatus()
 
         <div class="field field--full">
           <p class="muted"><strong>{{ copy.searchStoredKeyLabel }}:</strong> {{ searchStoredKeyText }}</p>
-          <p class="muted">{{ copy.keyHelp }}</p>
-        </div>
-
-        <div class="field field--full panel-subsection">
-          <p class="kicker">{{ copy.imageSection }}</p>
-          <p class="muted">{{ copy.imageSectionHint }}</p>
-        </div>
-
-        <div class="field">
-          <label for="image-provider">{{ copy.imageProviderLabel }}</label>
-          <select id="image-provider" v-model="form.image_provider">
-            <option value="openai_compatible">{{ copy.imageProviderOpenAICompatible }}</option>
-            <option value="huggingface">{{ copy.imageProviderHuggingFace }}</option>
-            <option value="gitee_ai">{{ copy.imageProviderGiteeAI }}</option>
-            <option value="modelscope">{{ copy.imageProviderModelScope }}</option>
-            <option value="a4f">{{ copy.imageProviderA4F }}</option>
-          </select>
-        </div>
-
-        <div class="field">
-          <label for="image-model">{{ copy.modelLabel }}</label>
-          <input id="image-model" v-model="form.image_model" :placeholder="copy.modelPlaceholder" />
-        </div>
-
-        <div class="field field--full">
-          <label for="image-base-url">{{ copy.baseUrlLabel }}</label>
-          <input id="image-base-url" v-model="form.image_base_url" :placeholder="copy.baseUrlPlaceholder" />
-        </div>
-
-        <div class="field field--full">
-          <label for="image-api-key">{{ copy.apiKeyLabel }}</label>
-          <input id="image-api-key" v-model="form.image_api_key" type="password" autocomplete="new-password" :placeholder="copy.apiKeyPlaceholder" />
-        </div>
-
-        <div class="field field--full">
-          <p class="muted"><strong>{{ copy.imageStoredKeyLabel }}:</strong> {{ imageStoredKeyText }}</p>
           <p class="muted">{{ copy.keyHelp }}</p>
         </div>
 

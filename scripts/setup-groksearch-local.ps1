@@ -8,11 +8,14 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $projectRoot
+$uvCacheDir = Join-Path $projectRoot ".uv-cache"
 
 Write-Host "[setup] Syncing bridge environment..."
-uv sync --project apps/groksearch-bridge
+uv --cache-dir $uvCacheDir sync --project apps/groksearch-bridge
 
 $uvArgs = @(
+  "--cache-dir",
+  $uvCacheDir,
   "run",
   "--project",
   "apps/groksearch-bridge",

@@ -6,13 +6,13 @@ from typing import Any
 from travelmind_api.prompts.types import RolePromptSpec
 
 BRIEF_PARSER_PROMPT_VERSION = "helloagents.brief_parser.v2"
-POI_SPECIALIST_PROMPT_VERSION = "helloagents.poi_specialist.v10"
+POI_SPECIALIST_PROMPT_VERSION = "helloagents.poi_specialist.v12"
 ATTRACTION_SPECIALIST_PROMPT_VERSION = "helloagents.attraction_specialist.v3"
 FOOD_SPECIALIST_PROMPT_VERSION = "helloagents.food_specialist.v1"
-WEATHER_SPECIALIST_PROMPT_VERSION = "helloagents.weather_specialist.v6"
+WEATHER_SPECIALIST_PROMPT_VERSION = "helloagents.weather_specialist.v8"
 HOTEL_SPECIALIST_PROMPT_VERSION = "helloagents.hotel_specialist.v7"
-TRANSPORT_SPECIALIST_PROMPT_VERSION = "helloagents.transport_specialist.v2"
-ITINERARY_PLANNER_PROMPT_VERSION = "helloagents.itinerary_planner.v4"
+TRANSPORT_SPECIALIST_PROMPT_VERSION = "helloagents.transport_specialist.v3"
+ITINERARY_PLANNER_PROMPT_VERSION = "helloagents.itinerary_planner.v5"
 IMAGE_CURATOR_PROMPT_VERSION = "helloagents.image_curator.v1"
 IMAGE_QUERY_PLANNER_PROMPT_VERSION = "helloagents.image_query_planner.v1"
 IMAGE_REVIEWER_PROMPT_VERSION = "helloagents.image_reviewer.v1"
@@ -73,7 +73,17 @@ ATTRACTION_OUTPUT_SCHEMA: dict[str, Any] = {
 
 WEATHER_OUTPUT_SCHEMA: dict[str, Any] = {
     "overall_outlook": "Spring conditions around 18°C to 24°C, with cool mornings, mild afternoons, and occasional light rain.",
+    "source_urls": ["https://weather.example.com/kyoto/daily"],
     "daily_outlook": ["Day 1: 18°C to 24°C, cool morning and mild afternoon."],
+    "daily_forecasts": [
+        {
+            "date": "2026-04-14",
+            "outlook": "18°C to 24°C, cool morning with possible light rain later.",
+            "timing_advice": "Place outdoor walks before the higher rain-risk period.",
+            "risk": "Forecast confidence decreases for dates farther away.",
+            "source_urls": ["https://weather.example.com/kyoto/2026-04-14"],
+        }
+    ],
     "segments": [
         {
             "name": "Kyoto",
@@ -186,6 +196,10 @@ TRANSPORT_OUTPUT_SCHEMA: dict[str, Any] = {
     "sequencing_constraints": ["Keep departure-day activities close to the final transfer corridor."],
     "estimated_intercity_cost": 280.0,
     "estimated_local_transport_cost": 45.0,
+    "departure_transfer_minutes": 60,
+    "station_buffer_minutes": 45,
+    "luggage_buffer_minutes": 30,
+    "minimum_departure_buffer_minutes": 135,
     "summary": "Rail is the best fit for this trip's budget and pacing.",
     "recommended_option": "Osaka to Kyoto Station by rail",
     "booking_required": False,
@@ -245,7 +259,7 @@ POI_LIGHTWEIGHT_OUTPUT_SCHEMA: dict[str, Any] = {
             "reason": "一句话说明为什么适合本次行程",
             "suggested_time": "0.5-1天|1-2小时|傍晚到夜间",
             "confidence": "high|medium|low",
-            "source_url": "最多 1 个来源 URL；没有可靠来源时为空字符串",
+            "source_urls": ["1-3 个可直接打开并支持该 POI 的详情页 URL；没有可靠来源时为空数组"],
         }
     ],
 }
@@ -308,6 +322,9 @@ def build_weather_specialist_prompt() -> RolePromptSpec:
         "请根据用户目的地、城区/跨城信息和日期，输出规划用途的城市级或区域级天气建议。"
         "如果输入跨城或跨区，必须在 segments 中分别说明城市/区域、日期范围、天气、温度、穿衣、户外注意事项和风险。"
         "来源中有温度信息时，overall_outlook 和 daily_outlook 必须包含近似温度范围。"
+        "必须在 daily_forecasts 中为 trip_request.start_date 到 trip_request.end_date 的每一个自然日各返回一条记录，date 必须使用 YYYY-MM-DD，不能合并日期范围、不能漏日、不能用第一天内容循环填充缺失日期。"
+        "daily_outlook 仅作为兼容摘要；日期绑定以 daily_forecasts[].date 为准。超出可靠预报范围时，也必须保留对应日期，并在 outlook/risk 中明确写季节性参考或暂无可靠预报。"
+        "必须保留搜索来源：source_urls 返回天气机构或预报页面的可访问 URL，daily_forecasts[].source_urls 优先返回能支持对应日期预报的页面。禁止编造 URL；如果确实没有可核验来源，对应数组留空并降低置信度。"
         "不要假装拥有实时预报确定性；不确定时说明是季节性/搜索快照级别信息。"
         "天气只作为行程编排辅助，不要写成攻略主体：daily_outlook 每天最多 1 句，segments 最多 2 个，packing/timing/risks 各最多 2 条，每条不超过 60 个中文字符或 35 个英文单词。"
         "只输出 JSON，不要 markdown。字段名必须保持英文。"
@@ -350,6 +367,8 @@ def build_transport_specialist_prompt() -> RolePromptSpec:
         "提供数字费用估算时，使用和用户预算一致的隐含币种。"
         "价格信号不确定时保守估算，在 notes 中解释约束，不要编造过精确票价。"
         "优先官方购票 URL；无法确认时 URL 留空，并在 notes/reminders 中说明不确定性。"
+        "必须给出 departure_transfer_minutes、station_buffer_minutes、luggage_buffer_minutes 和 minimum_departure_buffer_minutes。minimum_departure_buffer_minutes 必须至少等于前三项之和，用于约束返程日前最后一个游玩项目结束到计划离开住宿区/前往车站之间的安全间隔。"
+        "没有核验到具体班次号、出发日期、出发时刻和官方来源时，不要建议最终 planner 把某个精确时刻写成已确认班次；只能提供建议出行时段，并要求购票后回填。"
         "输出必须紧凑：intercity_options 最多 2 个，arrival/local/pass/budget/risks/sequencing/reminders/notes 数组最多 2 条，每条不超过 80 个中文字符或 45 个英文单词。"
         "只输出 JSON，不要 markdown。字段名必须保持英文。"
         f"Use this schema shape: {json.dumps(TRANSPORT_OUTPUT_SCHEMA, ensure_ascii=False)}"
@@ -368,8 +387,14 @@ def build_itinerary_planner_prompt(planner_system_prompt: str) -> RolePromptSpec
         "poi_collection 是候选景点、街区、自然风景和体验点的事实来源；你只负责总行程编排，不要重新发明 POI。"
         "最终攻略以景点游玩为主，不要编排餐厅、咖啡馆、夜市、美食街、小吃店、菜市场或饭点打卡；item.type 不要使用 meal、food、restaurant、cafe、dining、snack。"
         "景点、街区、自然风景和体验项都必须优先使用 poi_collection 中的具名 POI。"
+        "同一个具名 POI 在整个行程中默认只能出现一次；只有输入明确要求复访且两次体验实质不同才允许重复，并必须在 note 中解释。不要通过别名、简称或添加‘再访/周边漫步’来规避去重。"
+        "优先使用 poi_collection 中围绕核心 POI 扩展出的周边具名景点，按同一区域组成半日或一日路线；区域容器本身不能与其内部景点重复占用游玩时段。"
         "不要用'古城晨间散步'、'湖边随便逛'、'附近简餐'这类泛化活动替代具名 POI；如确实需要活动块，必须把它写成活动，并关联最近的真实 POI。"
         "票务、预约、开放限制、近期维护、排队和交通约束都要作为强约束，而不是软建议。"
+        "trip_request 中如果包含 planning_generated_at、current_local_date、current_local_time 或 same_day_earliest_start_time，必须把它们作为硬约束；当天行程不得安排已经过去的项目，第一个项目不得早于 same_day_earliest_start_time。"
+        "铁路、航班、轮渡等班次只有在 booking_info 同时给出 schedule_verified=true、service_number、schedule_checked_at 和 schedule_source_url 时，才可把 start_time/end_time 描述为已核验班次时间。否则该 transport item 的时间只能表示建议预留出行窗口，note 必须明确‘班次待购票确认’，不得声称是实际发车时刻。"
+        "返程日最后一个游玩项目结束到跨城返程 transport item 开始之间，必须至少留出 transport.minimum_departure_buffer_minutes 分钟，并包含取行李、前往车站和进站候车时间。"
+        "每天 total_cost 只能作为当天统一预算账本的总额；所有天的 total_cost 之和必须等于 total_budget_estimate。不得凭空拆出精确到分的餐饮、住宿或门票金额。"
         "有 source-backed 信息时，必须把票价、预约、开放限制和官方链接带入 item.booking_info；缺失时写 unknown 或在 notes 中说明低置信度。"
         "优先生成预算内、可执行、少折返、符合天气风险和住宿区域的行程。"
     )
@@ -422,18 +447,22 @@ def build_image_reviewer_prompt() -> RolePromptSpec:
 def build_poi_specialist_prompt() -> RolePromptSpec:
     system_prompt = (
         "你是 TravelMind 统一 POI 发现专家。只返回一个 poi-grounding JSON 对象。"
-        "任务：结合用户的出发地、目的地、日期、预算、人数、兴趣、节奏和住宿/交通偏好，必须先使用模型自带联网检索能力参考全网公开信息，再选择 6 到 10 个以游玩为主的具名景点 POI。"
-        "检索时优先交叉参考可查到的多平台旅行信息，包括小红书、知乎、马蜂窝、携程、官方文旅或景区信息；覆盖地标景点、自然风景、古城/街区、文化场馆、观景点和轻体验。"
+        "任务：结合用户的出发地、目的地、日期、预算、人数、兴趣、节奏和住宿/交通偏好，必须只使用当前模型自带的联网检索能力参考全网公开信息，再选择足以支撑完整天数的具名游玩 POI；不要依赖或调用已移除的小红书/MCP 专用采集链路。2天以内返回8到12个；3到4天返回12到16个；5天及以上返回15到20个。"
+        "先选择6到10个核心锚点 POI，再围绕其中适合深度游玩的锚点检索同一区域、通常30分钟交通范围内的真实周边 POI。周边扩展必须作为独立 top_pois 条目平铺返回，并在 reason 中说明与哪个核心 POI 可以顺路组合；每个核心锚点可扩展1到3个周边点。"
+        "周边扩展必须是真实可搜索的具名景点、建筑、展馆、步道、观景点或非餐饮体验，不能用‘附近逛逛’‘周边街区’‘海边漫步’等泛化活动凑数。核心 POI 与周边 POI 之间、不同锚点之间都必须按规范名称去重。"
+        "检索时必须主动寻找并交叉参考多平台的景点详情或用户攻略证据，包括当前原生搜索确实能访问到的小红书笔记详情页，以及知乎回答、马蜂窝景点/游记详情、携程景点详情、其他旅行社区和官方文旅/景区详情页；覆盖地标景点、自然风景、古城/街区、文化场馆、观景点和轻体验。"
+        "来源要体现平台多样性：列表中至少一半 POI 应带有非官方旅行社区、攻略、点评或 OTA 的详情页；在原生搜索确实返回可打开的小红书笔记详情页时，优先让至少3个 POI保留对应笔记链接。搜索不到可核验的小红书详情页时，可以用知乎、马蜂窝、携程等详情页替代，绝不能伪造链接。"
         "边界：不要调用外部工具，不要编排最终每日行程，不要输出搜索摘要、网页摘录、评分、评论数、实时价格或长证据。"
         "不要推荐餐厅、小吃店、咖啡馆、夜市、美食街、菜市场、酒吧、甜品店等餐饮 POI；即使用户兴趣提到美食，也只作为路线背景，不进入 POI 列表。"
         "餐饮词也不要出现在 name、kind、highlights 或 reason 中；不要把小吃街、菜市场、夜市、咖啡馆包装成 district 或 experience。"
-        "每个 top_poi 只输出 8 个字段：name、kind、area、highlights、reason、suggested_time、confidence、source_url。"
+        "每个 top_poi 只输出 8 个字段：name、kind、area、highlights、reason、suggested_time、confidence、source_urls。"
         "highlights 保留 2-4 个短词组，必须是真实可搜索的子景点、景观、建筑、展陈、步道、观景点或体验要素，用来给 planner 展开体验点；例如大理古城可写南门城楼、五华楼、洋人街、白族民居。"
         "name 必须是真实、可搜索、位于目的地或其合理一日游范围内的景点、街区、自然风景或体验名；不要输出 附近吃饭、随便逛逛、city walk route、旅行攻略、必去清单、古城晨间散步、湖边随便逛、夜市、小吃街 这类活动或标题。"
         "不要输出翻译腔或占位实体，例如 Central Landmark、Market Hall、Riverside Walk、city center zone、local highlights、某某中心地标、某某市场大厅、某某河畔步道；不确定真实名称时直接丢弃。"
         "area 必须写真实行政区、县、岛屿、街区或景区片区，不要写 center zone、附近、老城区周边、景点附近 这类泛化位置。"
-        "kind 只能从 attraction、district、experience 中选择；source_url 最多 1 个，优先使用官方文旅/景区页，其次使用携程/马蜂窝/小红书/知乎等可打开的目的地或景点详情页，不要使用搜索结果页、平台首页或无关城市页。"
-        "除非全网无法核验，每个 top_poi 都应带 source_url；如果 source_url 为空，confidence 必须是 low，且这类无来源 POI 不要超过 2 个，也不要放在列表前 6 个。"
+        "kind 只能从 attraction、district、experience 中选择；source_urls 返回1到3个原生搜索实际找到的 URL，优先组合一个官方/权威详情页和一个旅行社区、攻略、点评或 OTA 详情页。URL 必须指向能识别该 POI 的具体详情、笔记、回答、游记或景区页面，禁止使用网站首页、频道首页、城市总览页、搜索结果页或无关城市页。"
+        "尤其禁止把 shantou.gov.cn 等政府网站根首页、携程城市景点总页、马蜂窝 POI 频道首页或任何平台根首页复用给多个 POI。同一个 URL 最多支持2个确实属于同一景区的 POI；不要根据 POI 名称猜测或拼接 URL。"
+        "除非全网无法核验，每个 top_poi 都应带 source_urls；如果 source_urls 为空，confidence 必须是 low，且这类无来源 POI 不要超过 2 个，也不要放在列表前 6 个。"
         "reason 控制在一句话内，用来说明为什么适合本次行程。"
         "只输出 JSON，不要 markdown，不要解释。字段名保持英文，字段值使用目标语言。"
         f"Use this compact schema shape: {json.dumps(POI_LIGHTWEIGHT_OUTPUT_SCHEMA, ensure_ascii=False)}"

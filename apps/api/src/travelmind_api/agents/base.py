@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -26,6 +26,7 @@ class PlanningRequest(BaseModel):
     xhs_source_enabled: bool = False
     search_service: SearchServiceConfig | None = None
     locale: str | None = None
+    planning_generated_at: datetime | None = None
 
 
 class BudgetBreakdown(BaseModel):
@@ -67,6 +68,10 @@ class BookingInfo(BaseModel):
     reminder: str | None = None
     notes: list[str] = Field(default_factory=list)
     source_urls: list[str] = Field(default_factory=list)
+    schedule_verified: bool = False
+    service_number: str | None = None
+    schedule_checked_at: str | None = None
+    schedule_source_url: str | None = None
 
 
 class VisitRequirements(BaseModel):

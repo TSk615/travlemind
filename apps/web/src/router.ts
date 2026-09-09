@@ -7,7 +7,6 @@ const TripsView = () => import("@/views/TripsView.vue")
 const NewTripView = () => import("@/views/NewTripView.vue")
 const TripDetailView = () => import("@/views/TripDetailView.vue")
 const ExportView = () => import("@/views/ExportView.vue")
-const AIImageStudioView = () => import("@/views/AIImageStudioView.vue")
 const CommunityFeedView = () => import("@/views/CommunityFeedView.vue")
 const CommunityPostDetailView = () => import("@/views/CommunityPostDetailView.vue")
 const SettingsView = () => import("@/views/SettingsView.vue")
@@ -32,6 +31,7 @@ export const router = createRouter({
       meta: { requiresAuth: true, keepAlive: true }
     },
     { path: "/exports/:id", name: "export-detail", component: ExportView, meta: { requiresAuth: true } },
+    { path: "/images", redirect: "/trips" },
     { path: "/community", name: "community", component: CommunityFeedView, meta: { requiresAuth: true } },
     {
       path: "/community/:id",
@@ -42,7 +42,6 @@ export const router = createRouter({
       }),
       meta: { requiresAuth: true }
     },
-    { path: "/images", name: "images", component: AIImageStudioView, meta: { requiresAuth: true, keepAlive: true } },
     { path: "/settings", name: "settings", component: SettingsView, meta: { requiresAuth: true } },
     { path: "/admin", redirect: "/admin/users", meta: { requiresAuth: true, requiresAdmin: true } },
     { path: "/admin/users", name: "admin-users", component: AdminView, meta: { requiresAuth: true, requiresAdmin: true } },

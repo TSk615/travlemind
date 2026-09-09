@@ -52,6 +52,10 @@ interface BrowserLlmBookingInfo {
   reminder?: string | null
   notes?: string[]
   source_urls?: string[]
+  schedule_verified?: boolean
+  service_number?: string | null
+  schedule_checked_at?: string | null
+  schedule_source_url?: string | null
 }
 
 interface BrowserLlmVisitRequirements {
@@ -507,7 +511,11 @@ function normalizeBookingInfo(payload?: BrowserLlmBookingInfo | null, previous?:
     booking_window: normalizeOptionalText(payload?.booking_window ?? previous?.booking_window),
     reminder: normalizeOptionalText(payload?.reminder ?? previous?.reminder),
     notes: normalizeStringArray(payload?.notes, previous?.notes),
-    source_urls: normalizeUrlArray(payload?.source_urls, previous?.source_urls)
+    source_urls: normalizeUrlArray(payload?.source_urls, previous?.source_urls),
+    schedule_verified: normalizeOptionalBoolean(payload?.schedule_verified, previous?.schedule_verified ?? false),
+    service_number: normalizeOptionalText(payload?.service_number ?? previous?.service_number),
+    schedule_checked_at: normalizeOptionalText(payload?.schedule_checked_at ?? previous?.schedule_checked_at),
+    schedule_source_url: normalizeOptionalUrl(payload?.schedule_source_url ?? previous?.schedule_source_url)
   }
   return hasBookingInfoContent(normalized) ? normalized : null
 }
@@ -558,6 +566,10 @@ function hasBookingInfoContent(value: BookingInfo): boolean {
       value.official_booking_url ||
       value.booking_window ||
       value.reminder ||
+      value.schedule_verified ||
+      value.service_number ||
+      value.schedule_checked_at ||
+      value.schedule_source_url ||
       value.notes?.length ||
       value.source_urls?.length
   )

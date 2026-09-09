@@ -58,6 +58,7 @@ class InProcessGrokSearchRunner:
             "GROK_API_URL",
             "GROK_API_KEY",
             "GROK_MODEL",
+            "GROK_WIRE_API",
             "GROK_DEBUG",
             "GROK_LOG_LEVEL",
             "GROK_LOG_DIR",
@@ -71,6 +72,11 @@ class InProcessGrokSearchRunner:
             import grok_search.server as server_module
         except Exception as exc:  # pragma: no cover - import/runtime path
             raise GrokSearchRunnerError(f"Unable to import upstream GrokSearch package: {exc}") from exc
+        wire_api = (get_env("GROK_WIRE_API") or "chat_completions").strip().lower()
+        if wire_api in {"response", "responses"}:
+            from .responses_provider import install_responses_provider
+
+            install_responses_provider(server_module)
         self._server_module = server_module
         self._initialized_result: dict[str, Any] | None = None
 

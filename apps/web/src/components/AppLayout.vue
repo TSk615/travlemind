@@ -6,16 +6,14 @@ import { useI18n } from "@/lib/useI18n"
 import { useAuthStore } from "@/stores/auth"
 import { useJobGuardStore } from "@/stores/jobGuard"
 import TmToast from "@/components/ui/TmToast.vue"
-import type { LocaleCode } from "@/lib/i18n"
 
 const route = useRoute()
 const auth = useAuthStore()
 const jobGuard = useJobGuardStore()
-const { locale, supportedLocales, setLocale, t } = useI18n()
+const { t } = useI18n()
 
-const communityNavLabel = computed(() => (locale.value === "zh-CN" ? "攻略社区" : "Community"))
-const settingsNavLabel = computed(() => (locale.value === "zh-CN" ? "模型设置" : "Settings"))
-const imageNavLabel = computed(() => (locale.value === "zh-CN" ? "AI 生图" : "AI Images"))
+const communityNavLabel = computed(() => "攻略社区")
+const settingsNavLabel = computed(() => "模型设置")
 const adminNavLabel = computed(() => "后台管理")
 const backgroundJob = computed(() => jobGuard.activeJob)
 const hasBackgroundJob = computed(() => jobGuard.hasActiveJob)
@@ -29,11 +27,9 @@ const backgroundJobLabel = computed(() => {
   if (!backgroundJob.value) return ""
   const stageMessage = backgroundJob.value.stageMessage?.trim()
   if (stageMessage) return stageMessage
-  return locale.value === "zh-CN"
-    ? "行程任务正在后台执行..."
-    : "Trip task running in background..."
+  return "行程任务正在后台执行..."
 })
-const backgroundJobTripLabel = computed(() => (locale.value === "zh-CN" ? "查看" : "View"))
+const backgroundJobTripLabel = computed(() => "查看")
 const backgroundJobRoute = computed(() => {
   if (!backgroundJob.value) {
     return { name: "trips" as const }
@@ -51,14 +47,9 @@ const currentSection = computed(() => {
   }
   if (route.name === "settings") return "settings"
   if (String(route.name ?? "").startsWith("admin-")) return "admin"
-  if (route.name === "images") return "images"
   if (route.name === "community" || route.name === "community-post") return "community"
   return route.name
 })
-
-function switchLocale(nextLocale: LocaleCode) {
-  setLocale(nextLocale)
-}
 
 function navigateToJob() {
   // handled by RouterLink in template
@@ -88,9 +79,6 @@ function navigateToJob() {
         <RouterLink v-if="auth.user" :class="['tm-topbar__nav-item', { 'tm-topbar__nav-item--active': currentSection === 'community' }]" to="/community">
           {{ communityNavLabel }}
         </RouterLink>
-        <RouterLink v-if="auth.user" :class="['tm-topbar__nav-item', { 'tm-topbar__nav-item--active': currentSection === 'images' }]" to="/images">
-          {{ imageNavLabel }}
-        </RouterLink>
         <RouterLink v-if="auth.user" :class="['tm-topbar__nav-item', { 'tm-topbar__nav-item--active': currentSection === 'settings' }]" to="/settings">
           {{ settingsNavLabel }}
         </RouterLink>
@@ -101,18 +89,6 @@ function navigateToJob() {
 
       <!-- Tools -->
       <div class="tm-topbar__tools">
-        <div class="tm-topbar__locale" :aria-label="t('language.label')">
-          <button
-            v-for="option in supportedLocales"
-            :key="option.code"
-            type="button"
-            :class="['tm-topbar__locale-btn', { 'tm-topbar__locale-btn--active': locale === option.code }]"
-            @click="switchLocale(option.code)"
-          >
-            {{ option.shortLabel }}
-          </button>
-        </div>
-
         <template v-if="auth.bootstrapping">
           <span class="tm-topbar__status">{{ t('layout.checkingSession') }}</span>
         </template>
@@ -126,7 +102,7 @@ function navigateToJob() {
       </div>
 
       <!-- Mobile menu button (hidden on desktop) -->
-      <button class="tm-topbar__hamburger" type="button" aria-label="Menu">
+      <button class="tm-topbar__hamburger" type="button" aria-label="菜单">
         <span></span><span></span><span></span>
       </button>
     </header>
@@ -254,33 +230,6 @@ function navigateToJob() {
   align-items: center;
   gap: var(--tm-space-3);
   flex-shrink: 0;
-}
-
-.tm-topbar__locale {
-  display: inline-flex;
-  gap: 2px;
-  padding: 4px;
-  border-radius: var(--tm-radius-full);
-  background-color: var(--tm-paper);
-  box-shadow: var(--tm-shadow-inset-sm);
-}
-
-.tm-topbar__locale-btn {
-  padding: var(--tm-space-1) var(--tm-space-2);
-  border: none;
-  border-radius: var(--tm-radius-full);
-  background: transparent;
-  font-size: var(--tm-text-xs);
-  font-weight: 600;
-  color: var(--tm-stone);
-  cursor: pointer;
-  transition: all var(--tm-duration-fast) var(--tm-ease-out);
-}
-
-.tm-topbar__locale-btn--active {
-  background: linear-gradient(135deg, #5a9bff 0%, var(--tm-moss) 100%);
-  color: white;
-  box-shadow: var(--tm-shadow-primary);
 }
 
 .tm-topbar__user {

@@ -49,20 +49,35 @@ _ITEM_TYPE_WEIGHTS = {
 def enrich_plan_with_budget(plan: PlanningResult, request: PlanningRequest) -> PlanningResult:
     enriched = plan.model_copy(deep=True)
     zh_output = is_chinese_output(request)
-    day_total_sum = round(sum(max(day.total_cost, 0.0) for day in enriched.days), 2)
-    estimated_total = day_total_sum if day_total_sum > 0 else round(max(enriched.total_budget_estimate, 0.0), 2)
-    enriched.total_budget_estimate = estimated_total
+    transport_override = _extract_transport_budget_override(enriched)
+    transport_total = round((transport_override[0] + transport_override[1]) if transport_override else 0.0, 2)
+    transport_by_day = _allocate_transport_to_days(enriched.days, transport_total)
 
     totals = {category: 0.0 for category in _CATEGORY_ORDER}
     line_items: list[BudgetLineItem] = []
-
     for day in enriched.days:
-        breakdown = _build_day_breakdown(day, request)
+        explicit = _resolve_grounded_category_amounts(day)
+        if transport_override is not None:
+            explicit["transport"] = transport_by_day.get(day.day_index, 0.0)
+        explicit_total = round(sum(explicit.values()), 2)
+        stated_total = round(max(day.total_cost, 0.0), 2)
+        authoritative_day_total = max(stated_total, explicit_total)
+        unallocated = round(max(authoritative_day_total - explicit_total, 0.0), 2)
+        explicit["other"] = round(explicit["other"] + unallocated, 2)
+        breakdown = BudgetBreakdown(
+            tickets=round(explicit["tickets"], 2),
+            dining=round(explicit["dining"], 2),
+            accommodation=round(explicit["accommodation"], 2),
+            transport=round(explicit["transport"], 2),
+            other=round(explicit["other"], 2),
+            total=round(sum(explicit.values()), 2),
+        )
+        day.total_cost = breakdown.total
         day.budget_breakdown = breakdown
         for category in _CATEGORY_ORDER:
             amount = getattr(breakdown, category)
             totals[category] += amount
-            if amount <= 0:
+            if amount <= 0 or (category == "transport" and transport_override is not None):
                 continue
             line_items.append(
                 BudgetLineItem(
@@ -71,9 +86,25 @@ def enrich_plan_with_budget(plan: PlanningResult, request: PlanningRequest) -> P
                     category=category,
                     amount=amount,
                     day_index=day.day_index,
-                    note=day.title,
+                    note=(
+                        "未被可核验票价、住宿报价或交通专项估算覆盖的行程预算预留。"
+                        if category == "other" and zh_output
+                        else "Trip budget reserve not covered by a grounded ticket, stay, or transport estimate."
+                        if category == "other"
+                        else day.title
+                    ),
                 )
             )
+
+    if transport_override is not None:
+        line_items.extend(
+            _build_transport_line_items(
+                transport_override[0],
+                transport_override[1],
+                transport_override[2],
+                zh_output=zh_output,
+            )
+        )
 
     total_breakdown = BudgetBreakdown(
         tickets=round(totals["tickets"], 2),
@@ -83,15 +114,7 @@ def enrich_plan_with_budget(plan: PlanningResult, request: PlanningRequest) -> P
         other=round(totals["other"], 2),
         total=round(sum(totals.values()), 2),
     )
-    total_breakdown, line_items, estimated_total = _apply_transport_budget_override(
-        total_breakdown,
-        line_items,
-        estimated_total=estimated_total,
-        plan=enriched,
-        zh_output=zh_output,
-    )
-    if estimated_total <= 0:
-        estimated_total = total_breakdown.total
+    estimated_total = total_breakdown.total
     enriched.total_budget_estimate = estimated_total
 
     requested_budget = round(max(request.budget, 0.0), 2)
@@ -116,6 +139,23 @@ def enrich_plan_with_budget(plan: PlanningResult, request: PlanningRequest) -> P
         enriched.risks.append(budget_risk)
 
     return enriched
+
+
+def _allocate_transport_to_days(days: list[PlannedDay], transport_total: float) -> dict[int, float]:
+    if transport_total <= 0 or not days:
+        return {}
+    transport_days = [
+        day.day_index
+        for day in days
+        if any(_normalize_item_type(item.type) in {"transit", "transport", "rail", "flight", "ferry"} for item in day.items)
+    ]
+    target_days = list(dict.fromkeys(transport_days or [days[0].day_index, days[-1].day_index]))
+    per_day = round(transport_total / len(target_days), 2)
+    allocations = {day_index: per_day for day_index in target_days}
+    diff = round(transport_total - sum(allocations.values()), 2)
+    if diff:
+        allocations[target_days[-1]] = round(allocations[target_days[-1]] + diff, 2)
+    return allocations
 
 
 def _build_day_breakdown(day: PlannedDay, request: PlanningRequest) -> BudgetBreakdown:

@@ -93,6 +93,10 @@ export interface BookingInfo {
   reminder?: string | null
   notes?: string[]
   source_urls?: string[]
+  schedule_verified?: boolean
+  service_number?: string | null
+  schedule_checked_at?: string | null
+  schedule_source_url?: string | null
 }
 
 export interface VisitRequirements {

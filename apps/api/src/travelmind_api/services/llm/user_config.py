@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-WEATHER_SPECIALIST_MODEL = "grok-4.20-multi-agent-medium"
 _POI_MODEL_ROLES = ("poi_specialist", "hotel_specialist", "transport_specialist")
 
 
@@ -47,7 +46,5 @@ def build_user_poi_role_overrides(user: object | None) -> dict[str, dict[str, An
     if _has_text(provider_protocol):
         override["provider_protocol"] = provider_protocol
     overrides = {role_name: dict(override) for role_name in _POI_MODEL_ROLES}
-    weather_override = dict(override)
-    weather_override["model"] = WEATHER_SPECIALIST_MODEL
-    overrides["weather_specialist"] = weather_override
+    overrides["weather_specialist"] = dict(override)
     return overrides

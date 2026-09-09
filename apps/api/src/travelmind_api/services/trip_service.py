@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -68,6 +68,24 @@ def _validate_trip_dates(start_date: date, end_date: date) -> None:
         raise _validation_error("invalid_trip_start_date", "start_date must be today or later")
     if end_date < start_date:
         raise _validation_error("invalid_trip_dates", "end_date must be on or after start_date")
+
+
+def validate_trip_dates_for_generation(start_date: date, end_date: date, *, now: datetime | None = None) -> None:
+    """Re-check dates when a job starts because a previously valid saved trip may have expired."""
+    current = now or datetime.now().astimezone()
+    today = current.date()
+    if start_date < today:
+        raise _validation_error(
+            "expired_trip_start_date",
+            f"行程开始日期 {start_date.isoformat()} 已经过期，请将开始日期调整为 {today.isoformat()} 或之后再生成。",
+        )
+    if start_date == today and (current + timedelta(minutes=30)).date() > today:
+        raise _validation_error(
+            "same_day_planning_window_closed",
+            "今天已经没有足够的行程生成与准备时间，请将开始日期调整到明天或之后。",
+        )
+    if end_date < start_date:
+        raise _validation_error("invalid_trip_dates", "结束日期不能早于开始日期。")
 
 
 

@@ -26,6 +26,7 @@ from travelmind_api.services.llm import LlmConfig
 from travelmind_api.services.llm.user_config import build_user_poi_role_overrides, user_poi_role_override_missing_fields
 from travelmind_api.services.search_connector import resolve_search_service_config
 from travelmind_api.services.trip_image_enrichment import enrich_plan_images, prepare_plan_images_for_async_enrichment
+from travelmind_api.services.trip_service import validate_trip_dates_for_generation
 
 
 settings = get_settings()
@@ -283,6 +284,7 @@ def _claim_job(job_id: str) -> JobExecution | None:
 
 
 def _build_request(trip: Trip, user: User | None = None) -> PlanningRequest:
+    planning_generated_at = datetime.now().astimezone()
     return PlanningRequest(
         trip_id=trip.id,
         user_id=getattr(user, "id", None),
@@ -300,6 +302,7 @@ def _build_request(trip: Trip, user: User | None = None) -> PlanningRequest:
         xhs_source_enabled=bool(getattr(user, "xhs_source_enabled", False)),
         search_service=resolve_search_service_config(user),
         locale=getattr(user, "locale", None),
+        planning_generated_at=planning_generated_at,
     )
 
 
@@ -461,6 +464,11 @@ def _process_trip_generation(job: JobExecution) -> dict:
                     },
                 )
         request = _build_request(trip, user)
+        validate_trip_dates_for_generation(
+            request.start_date,
+            request.end_date,
+            now=request.planning_generated_at,
+        )
         orchestrator = build_orchestrator(
             settings,
             llm_config=_resolve_llm_config(user, job.payload),
@@ -539,6 +547,11 @@ def _process_trip_refine(job: JobExecution) -> dict:
             raise HTTPException(status_code=404, detail="Trip not found for job")
         user = session.query(User).filter(User.id == trip.user_id).one_or_none()
         request = _build_request(trip, user)
+        validate_trip_dates_for_generation(
+            request.start_date,
+            request.end_date,
+            now=request.planning_generated_at,
+        )
         orchestrator = build_orchestrator(
             settings,
             llm_config=_resolve_llm_config(user, job.payload),

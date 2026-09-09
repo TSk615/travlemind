@@ -1,5 +1,5 @@
 import { defineStore } from "pinia"
-import { applyLocale, DEFAULT_LOCALE, normalizeLocale, readPreferredLocale, type LocaleCode } from "@/lib/i18n"
+import { applyLocale, DEFAULT_LOCALE, type LocaleCode } from "@/lib/i18n"
 
 interface LocaleState {
   locale: LocaleCode
@@ -17,10 +17,10 @@ export const useLocaleStore = defineStore("locale", {
         return
       }
 
-      this.setLocale(readPreferredLocale())
+      this.setLocale("zh-CN")
     },
-    setLocale(nextLocale: string) {
-      const normalized = normalizeLocale(nextLocale)
+    setLocale(_nextLocale: string) {
+      const normalized: LocaleCode = "zh-CN"
       this.locale = normalized
       this.initialized = true
       applyLocale(normalized)

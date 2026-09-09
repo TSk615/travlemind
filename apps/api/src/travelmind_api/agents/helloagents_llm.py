@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -16,6 +16,7 @@ class HelloAgentsInvokeResult:
     content: str
     usage: dict[str, Any]
     latency_ms: int
+    citations: list[str] = field(default_factory=list)
 
 
 class HelloAgentsCompatibleLLM:
@@ -39,6 +40,7 @@ class HelloAgentsCompatibleLLM:
         self.retry_attempts = max(1, int(retry_attempts))
         self.rate_limit_retry_attempts = max(self.retry_attempts, int(rate_limit_retry_attempts))
         self.stream = bool(stream)
+        self.last_citations: list[str] = []
         self.kwargs = {
             "model": self._config.model,
             "api_key": self._config.api_key,
@@ -73,7 +75,18 @@ class HelloAgentsCompatibleLLM:
                     request_kwargs["stream"] = True
                 content = self._client.create_chat_completion(**request_kwargs)
                 latency_ms = int((time.perf_counter() - started) * 1000)
-                return HelloAgentsInvokeResult(content=content, usage={}, latency_ms=latency_ms)
+                citations = [
+                    str(item).strip()
+                    for item in (getattr(self._client, "last_citations", []) or [])
+                    if str(item).strip()
+                ]
+                self.last_citations = list(dict.fromkeys(citations))
+                return HelloAgentsInvokeResult(
+                    content=content,
+                    usage={},
+                    latency_ms=latency_ms,
+                    citations=self.last_citations,
+                )
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 attempt_limit = self.rate_limit_retry_attempts if self._is_rate_limit_http_status(exc) else self.retry_attempts

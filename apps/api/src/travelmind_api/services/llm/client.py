@@ -28,6 +28,10 @@ class OpenAICompatibleClient:
     def __init__(self, config: LlmEndpointConfig, *, http_client: httpx.Client | None = None) -> None:
         self._config = config
         self._http_client = http_client
+        # Search-capable gateways may return citations alongside assistant text.
+        # Keep the metadata available to callers without changing the long-standing
+        # create_chat_completion() string return type.
+        self.last_citations: list[str] = []
         # Injection point so tests can avoid real waiting during retry backoff.
         self._sleep: Callable[[float], None] = time.sleep
 
@@ -39,6 +43,7 @@ class OpenAICompatibleClient:
         max_tokens: int | None = None,
         stream: bool = False,
     ) -> str:
+        self.last_citations = []
         protocol = normalize_provider_protocol(self._config.provider_protocol)
         stream = bool(stream or self._requires_streaming())
         if protocol == "gemini":
@@ -86,6 +91,7 @@ class OpenAICompatibleClient:
                 )
                 body = self._post_streaming_with_eof_retry(self._config, streaming_payload)
             try:
+                self.last_citations = self._extract_citation_urls(body)
                 return self._extract_responses_content(body)
             except ValueError as exc:
                 if "did not contain text output" not in str(exc):
@@ -102,6 +108,7 @@ class OpenAICompatibleClient:
                     fallback_config,
                     fallback_payload,
                 ) if not stream else self._post_streaming_with_eof_retry(fallback_config, fallback_payload)
+                self.last_citations = self._extract_citation_urls(fallback_body)
                 return self._extract_chat_completions_content(fallback_body)
 
         chat_payload = self._build_text_payload(
@@ -115,6 +122,7 @@ class OpenAICompatibleClient:
             self._config,
             chat_payload,
         ) if not stream else self._post_streaming_with_eof_retry(self._config, chat_payload)
+        self.last_citations = self._extract_citation_urls(body)
         return self._extract_chat_completions_content(body)
 
     def create_tool_completion(
@@ -522,9 +530,67 @@ class OpenAICompatibleClient:
 
     def _parse_sse_body(self, config: LlmEndpointConfig, stream_text: str) -> dict[str, Any]:
         self._log_usage(self._find_usage_in_sse(stream_text))
+        citations: list[str] = []
+        for line in self._iter_sse_data_lines(stream_text):
+            if not line or line == "[DONE]":
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            citations.extend(self._extract_citation_urls(parsed))
+        citations = list(dict.fromkeys(citations))
+        citation_metadata = {"_citations": citations} if citations else {}
         if config.wire_api == "responses":
-            return {"output_text": self._extract_responses_text_from_sse(stream_text)}
-        return {"choices": [{"message": {"content": self._extract_chat_completions_text_from_sse(stream_text)}}]}
+            return {"output_text": self._extract_responses_text_from_sse(stream_text), **citation_metadata}
+        return {"choices": [{"message": {"content": self._extract_chat_completions_text_from_sse(stream_text)}}], **citation_metadata}
+
+    def _extract_citation_urls(self, value: Any) -> list[str]:
+        """Extract URLs from citation/search metadata without scraping assistant prose."""
+        citation_keys = {
+            "citation",
+            "citations",
+            "annotation",
+            "annotations",
+            "source",
+            "sources",
+            "source_url",
+            "source_urls",
+            "references",
+            "reference",
+            "web_results",
+            "search_results",
+            "_citations",
+        }
+        url_keys = {"url", "uri", "href", "link", "source_url", "source_urls"}
+        found: list[str] = []
+
+        def add(candidate: Any) -> None:
+            if isinstance(candidate, str):
+                normalized = candidate.strip()
+                if normalized.startswith(("https://", "http://")):
+                    found.append(normalized)
+
+        def visit(node: Any, citation_context: bool = False) -> None:
+            if isinstance(node, dict):
+                for raw_key, child in node.items():
+                    key = str(raw_key).strip().casefold().replace("-", "_")
+                    child_context = citation_context or key in citation_keys or "citation" in key
+                    if child_context and key in url_keys:
+                        if isinstance(child, list):
+                            for item in child:
+                                add(item)
+                        else:
+                            add(child)
+                    visit(child, child_context)
+            elif isinstance(node, list):
+                for child in node:
+                    visit(child, citation_context)
+            elif citation_context:
+                add(node)
+
+        visit(value)
+        return list(dict.fromkeys(found))
 
     def _post_json_to_url(self, url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
         return self._request_with_retry(lambda: self._post_json_to_url_once(url, headers, payload))

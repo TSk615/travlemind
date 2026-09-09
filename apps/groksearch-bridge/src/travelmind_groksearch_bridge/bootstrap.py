@@ -162,6 +162,7 @@ def build_env_template() -> str:
             "GROK_API_KEY=",
             "GROK_API_URL=",
             "GROK_MODEL=grok-4.20-beta",
+            "GROK_WIRE_API=chat_completions",
             "",
             "# Optional enrichers",
             "TAVILY_ENABLED=true",

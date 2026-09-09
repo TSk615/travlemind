@@ -2893,7 +2893,12 @@ onBeforeUnmount(() => {
 
                   <ol class="tm-detail__items">
                     <li v-for="item in day.items" :key="item.id" class="tm-detail__item">
-                      <div class="tm-detail__item-time">{{ item.start_time }} - {{ item.end_time }}</div>
+                      <div class="tm-detail__item-time">
+                        {{ item.start_time }} - {{ item.end_time }}
+                        <span
+                          v-if="['transport', 'transit', 'rail', 'flight', 'ferry'].includes(item.type.toLowerCase()) && item.booking_info && !item.booking_info.schedule_verified"
+                        >（建议时段，班次待确认）</span>
+                      </div>
                       <div class="tm-detail__item-body">
                         <div class="tm-detail__item-topline">
                           <strong>{{ item.name }}</strong>
@@ -3031,8 +3036,8 @@ onBeforeUnmount(() => {
                   <p v-if="agent.output_summary" class="tm-detail__muted"><strong>{{ copy.agentOutputLabel }}:</strong> {{ agent.output_summary }}</p>
                   <p v-if="agent.model" class="tm-detail__muted"><strong>{{ copy.agentModelLabel }}:</strong> {{ agent.model }}</p>
                   <p v-if="agent.prompt_version" class="tm-detail__muted"><strong>{{ copy.agentPromptVersionLabel }}:</strong> {{ agent.prompt_version }}</p>
-                  <p v-if="agentEndpoint(agent)" class="tm-detail__muted"><strong>Endpoint:</strong> {{ agentEndpoint(agent) }}</p>
-                  <p v-if="agentWireApi(agent)" class="tm-detail__muted"><strong>Wire API:</strong> {{ agentWireApi(agent) }}</p>
+                  <p v-if="agentEndpoint(agent)" class="tm-detail__muted"><strong>接口地址：</strong> {{ agentEndpoint(agent) }}</p>
+                  <p v-if="agentWireApi(agent)" class="tm-detail__muted"><strong>接口格式：</strong> {{ agentWireApi(agent) }}</p>
                   <div v-if="agentDisplayCitations(agent).length" class="tm-detail__subsection">
                     <p class="tm-detail__kicker">{{ copy.agentCitationsLabel }}</p>
                     <ul class="tm-detail__list--nested">

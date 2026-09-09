@@ -83,6 +83,10 @@ class BookingInfo(BaseModel):
     reminder: str | None = None
     notes: list[str] = Field(default_factory=list)
     source_urls: list[str] = Field(default_factory=list)
+    schedule_verified: bool = False
+    service_number: str | None = None
+    schedule_checked_at: str | None = None
+    schedule_source_url: str | None = None
 
     @field_validator("estimated_price", mode="before")
     @classmethod
@@ -91,7 +95,7 @@ class BookingInfo(BaseModel):
             return None
         return _coerce_float(value, default=0.0)
 
-    @field_validator("booking_required", "reservation_required", mode="before")
+    @field_validator("booking_required", "reservation_required", "schedule_verified", mode="before")
     @classmethod
     def _normalize_bool(cls, value: Any) -> bool:
         return _coerce_bool(value, default=False)

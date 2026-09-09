@@ -23,6 +23,24 @@ The product brief targets a broader hybrid-stack monorepo. This repo currently r
 
 The fastest local closed loop uses the API in `inline` mode and the `stub` orchestrator. That path does not require Redis, Postgres, or `helloagents`.
 
+### One-click start and stop (Windows)
+
+From the repository root, start the web app, API, and GrokSearch bridge in the background:
+
+```powershell
+.\start.cmd
+```
+
+Run this command from a regular PowerShell or Windows Terminal window. The launcher intentionally refuses to start inside a network-disabled Codex sandbox because child services would be unable to reach external model providers.
+
+Logs and process state are written under `.tmp\local-dev`. Stop every process started by the script with:
+
+```powershell
+.\stop.cmd
+```
+
+The default mode uses inline jobs and the stub agent, so Redis and the worker are not started. For ARQ mode, start Redis first and then run `start.cmd -ArqMode`. Other supported switches include `-SkipBridge`, `-SkipApi`, `-SkipWorker`, `-SkipWeb`, `-HelloAgents`, and custom `-BridgePort`, `-ApiPort`, or `-WebPort` values.
+
 ### 1. Install frontend dependencies
 
 ```powershell

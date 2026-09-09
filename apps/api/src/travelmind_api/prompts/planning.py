@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from travelmind_api.prompts.types import PromptMessages
@@ -10,7 +11,7 @@ if TYPE_CHECKING:
     from travelmind_api.agents.base import PlanningRequest, PlanningResult
 
 
-PLANNING_PROMPT_VERSION = "planning.main.v2"
+PLANNING_PROMPT_VERSION = "planning.main.v3"
 REFINEMENT_PROMPT_VERSION = "planning.refine.v1"
 
 PLANNING_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -41,6 +42,10 @@ PLANNING_OUTPUT_SCHEMA: dict[str, Any] = {
                         "reminder": "",
                         "notes": ["Leave the official booking URL blank if you cannot verify one."],
                         "source_urls": [],
+                        "schedule_verified": False,
+                        "service_number": "",
+                        "schedule_checked_at": "",
+                        "schedule_source_url": "",
                     },
                     "visit_requirements": {
                         "reservation_policy": "not_needed",
@@ -79,6 +84,10 @@ def build_planning_prompt_bundle(request: PlanningRequest) -> PromptMessages:
         "Keep the number of days exactly equal to the requested trip length. "
         "Each day must contain 2 to 4 items. "
         "Use 24-hour HH:MM times, realistic sequencing, and scores between 0 and 1. "
+        "Treat planning_generated_at and same_day_earliest_start_time in the trip request as hard constraints; never schedule a same-day item in the past. "
+        "Do not present a rail, flight, or ferry time as a verified schedule unless booking_info includes schedule_verified=true plus a service_number, schedule_checked_at, and schedule_source_url. Otherwise use the item times only as a recommended travel window and explicitly say the service time must be confirmed after booking. "
+        "On the departure day, leave enough time after the last activity for luggage collection, travel to the terminal, security, and boarding. "
+        "Do not repeat a named POI across days unless the request explicitly requires a materially different repeat visit. "
         "Keep the total budget estimate aligned with the requested budget whenever feasible, and use risks to explain unavoidable budget pressure. "
         "When grounded information is available, include per-item booking_info and visit_requirements plus a trip-level transport_booking_summary. "
         "Prefer official booking URLs. Leave any booking URL blank instead of inventing one. "
@@ -165,7 +174,7 @@ def build_planning_messages(request: PlanningRequest) -> list[dict[str, str]]:
 
 
 def _build_trip_payload(request: PlanningRequest, output_locale: str) -> dict[str, Any]:
-    return {
+    payload = {
         "trip_id": request.trip_id,
         "title": request.title,
         "origin": request.origin,
@@ -180,3 +189,19 @@ def _build_trip_payload(request: PlanningRequest, output_locale: str) -> dict[st
         "transport_mode": request.transport_mode,
         "output_locale": output_locale,
     }
+    generated_at = getattr(request, "planning_generated_at", None)
+    if generated_at is not None:
+        local_generated_at = generated_at.astimezone() if generated_at.tzinfo is not None else generated_at
+        payload.update(
+            {
+                "planning_generated_at": local_generated_at.isoformat(timespec="minutes"),
+                "current_local_date": local_generated_at.date().isoformat(),
+                "current_local_time": local_generated_at.strftime("%H:%M"),
+                "same_day_earliest_start_time": (
+                    (local_generated_at.replace(second=0, microsecond=0) + timedelta(minutes=30)).strftime("%H:%M")
+                    if request.start_date == local_generated_at.date()
+                    else None
+                ),
+            }
+        )
+    return payload

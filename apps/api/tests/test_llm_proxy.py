@@ -399,6 +399,32 @@ def test_openai_compatible_client_streaming_request_retries_retryable_status():
     assert sleeps == [1.0]
 
 
+def test_openai_compatible_client_preserves_stream_citations():
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"choices":[{"delta":{"content":"weather"}}],'
+                '"citations":[{"url":"https://weather.example.test/daily"}]}\n\n'
+                'data: [DONE]\n\n'
+            ),
+        )
+
+    llm_client, http_client = _build_direct_client(handler)
+    try:
+        reply = llm_client.create_chat_completion(
+            messages=[{"role": "user", "content": "weather"}],
+            stream=True,
+        )
+    finally:
+        http_client.close()
+
+    assert reply == "weather"
+    assert llm_client.last_citations == ["https://weather.example.test/daily"]
+
+
 def test_openai_compatible_client_honors_timeout_with_injected_http_client():
     captured: dict[str, object] = {}
 

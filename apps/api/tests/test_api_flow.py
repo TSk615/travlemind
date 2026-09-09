@@ -106,10 +106,22 @@ def _fake_helloagents_module(*, failing_role: str | None = None):
                     }
                 )
             if self.name == "weather_specialist":
+                trip_request = json.loads(prompt)["trip_request"]
+                first_day = date.fromisoformat(trip_request["start_date"])
+                trip_days = int(trip_request["trip_days"])
                 return json.dumps(
                     {
                         "overall_outlook": "Cool mornings and mild afternoons with occasional light rain.",
                         "daily_outlook": ["Day 1: cool start, mild afternoon.", "Day 2: light rain risk after lunch.", "Day 3: mild and comfortable."],
+                        "daily_forecasts": [
+                            {
+                                "date": (first_day + timedelta(days=offset)).isoformat(),
+                                "outlook": "Cool to mild with possible light rain.",
+                                "timing_advice": "Keep outdoor walks before late afternoon.",
+                                "risk": "Forecast confidence may change.",
+                            }
+                            for offset in range(trip_days)
+                        ],
                         "packing_notes": ["Carry a light layer.", "Bring a compact umbrella."],
                         "timing_guidance": ["Outdoor walks fit best before late afternoon."],
                         "weather_risks": ["Light rain may affect exposed temple walks."],
@@ -484,7 +496,20 @@ def test_failed_trip_generation_can_retry_from_failed_helloagents_node(client: T
         if role_name == "weather_specialist" and not weather_failed_once["done"]:
             weather_failed_once["done"] = True
             raise RuntimeError("forced upstream failure for weather_specialist")
-        return json.dumps(role_payloads[role_name])
+        response_payload = dict(role_payloads[role_name])
+        if role_name == "weather_specialist":
+            trip_request = input_payload["trip_request"]
+            first_day = date.fromisoformat(trip_request["start_date"])
+            response_payload["daily_forecasts"] = [
+                {
+                    "date": (first_day + timedelta(days=offset)).isoformat(),
+                    "outlook": "Cool to mild with possible light rain.",
+                    "timing_advice": "Keep outdoor walks before late afternoon.",
+                    "risk": "Forecast confidence may change.",
+                }
+                for offset in range(int(trip_request["trip_days"]))
+            ]
+        return json.dumps(response_payload)
 
     monkeypatch.setattr(current_helloagents_module, "import_module", lambda _: object())
     monkeypatch.setattr(HelloAgentsOrchestrator, "_run_role", fake_run_role)

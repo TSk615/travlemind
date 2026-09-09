@@ -22,7 +22,7 @@ TRAVELMIND_SEARCH_MCP_SERVER_NAME=groksearch
 GUDA_API_KEY=你的 GUDA API key (如果有)
 GROK_API_KEY=你的 Grok API key (如果有)
 GROK_API_URL=https://api.x.ai/v1
-GROK_MODEL=grok-4.20-beta
+GROK_MODEL=Web/grok-chat-fast
 
 # === Tavily 搜索(可选) ===
 TAVILY_ENABLED=true

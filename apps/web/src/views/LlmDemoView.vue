@@ -1777,8 +1777,8 @@ function formatPrettyJson(value: unknown): string {
           <label>
             {{ copy.tavilyDepthLabel }}
             <select v-model="tavilyForm.search_depth">
-              <option value="basic">basic</option>
-              <option value="advanced">advanced</option>
+              <option value="basic">基础</option>
+              <option value="advanced">高级</option>
             </select>
           </label>
           <label>
