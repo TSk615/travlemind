@@ -1,4 +1,5 @@
 from __future__ import annotations
+from travelmind_api.services.planning_details import BookingDetails, TransportLeg, TransportServiceCandidate, HotelEvidence, BudgetCompleteness
 
 from datetime import date, datetime
 from typing import Any
@@ -57,7 +58,7 @@ class BudgetLineItem(BaseModel):
         return _coerce_float(value, default=0.0)
 
 
-class BudgetSummary(BaseModel):
+class BudgetSummary(BudgetCompleteness):
     requested_budget: float
     estimated_total: float
     remaining_budget: float
@@ -73,7 +74,7 @@ class BudgetSummary(BaseModel):
         return _coerce_float(value, default=0.0)
 
 
-class BookingInfo(BaseModel):
+class BookingInfo(BookingDetails):
     price_label: str | None = None
     estimated_price: float | None = None
     booking_required: bool = False
@@ -115,6 +116,8 @@ class VisitRequirements(BaseModel):
 
 
 class TransportBookingSummary(BaseModel):
+    legs: list[TransportLeg] = Field(default_factory=list)
+    service_candidates: list[TransportServiceCandidate] = Field(default_factory=list)
     summary: str | None = None
     recommended_option: str | None = None
     estimated_intercity_cost: float = 0.0
@@ -138,7 +141,7 @@ class TransportBookingSummary(BaseModel):
         return _coerce_bool(value, default=False)
 
 
-class StayHotelCandidate(BaseModel):
+class StayHotelCandidate(HotelEvidence):
     name: str
     area: str | None = None
     hotel_type: str | None = None
@@ -173,6 +176,7 @@ class ItineraryItem(BaseModel):
     type: str
     name: str
     start_time: str
+    end_day_offset: int = Field(default=0, ge=0, le=7)
     end_time: str
     location: str
     score: float
@@ -180,6 +184,7 @@ class ItineraryItem(BaseModel):
     booking_info: BookingInfo | None = None
     visit_requirements: VisitRequirements | None = None
     image_urls: list[str] = Field(default_factory=list)
+    image_backup_urls: list[str] = Field(default_factory=list)
     image_source_urls: list[str] = Field(default_factory=list)
     image_status: str | None = None
     image_priority_tier: str | None = None
@@ -196,6 +201,14 @@ class ItineraryDayWeather(BaseModel):
     summary: str
     notes: list[str] = Field(default_factory=list)
     citations: list[str] = Field(default_factory=list)
+    forecast_type: str | None = None
+    condition: str | None = None
+    temperature_min_c: str | None = None
+    temperature_max_c: str | None = None
+    precipitation_probability: str | None = None
+    wind: str | None = None
+    forecast_updated_at: str | None = None
+    checked_at: str | None = None
 
 
 class ItineraryDay(BaseModel):

@@ -174,7 +174,7 @@ function groundedBudgetCategoryForItem(itemType: string): BudgetCategory {
   if (["transit", "transport"].includes(itemType)) {
     return "transport"
   }
-  if (["hotel", "stay"].includes(itemType)) {
+  if (["hotel", "stay", "accommodation", "lodging"].includes(itemType)) {
     return "accommodation"
   }
   if (["meal", "food"].includes(itemType)) {
@@ -228,6 +228,8 @@ function resolveBudgetStatus(requestedBudget: number, estimatedTotal: number): B
 }
 
 export function enrichGeneratedItineraryWithBudget(trip: Trip, itinerary: GeneratedItinerary): GeneratedItinerary {
+  // Preserve the dated, reconciled server ledger and its missing-cost warnings.
+  if (itinerary.budget_summary) return itinerary
   const enrichedDays = itinerary.days.map((day) => ({
     ...day,
     budget_breakdown: buildDayBreakdown(day, trip)

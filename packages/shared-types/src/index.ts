@@ -73,6 +73,9 @@ export interface BudgetLineItem {
 }
 
 export interface BudgetSummary {
+  incomplete?: boolean
+  unpriced_items?: string[]
+  transport_budget_ratio?: number | null
   requested_budget: number
   estimated_total: number
   remaining_budget: number
@@ -84,6 +87,16 @@ export interface BudgetSummary {
 }
 
 export interface BookingInfo {
+  price_status?: "unknown" | "estimated" | "verified" | "free"
+  transport_scope?: "outbound" | "return" | "intercity" | "local" | null
+  duration_minutes_min?: number | null
+  passenger_count?: number | null
+  unit_price?: number | null
+  check_in_date?: string | null
+  check_out_date?: string | null
+  room_count?: number | null
+  nights?: number | null
+  early_check_in_confirmed?: boolean
   price_label?: string | null
   estimated_price?: number | null
   booking_required?: boolean
@@ -94,10 +107,16 @@ export interface BookingInfo {
   notes?: string[]
   source_urls?: string[]
   schedule_verified?: boolean
+  schedule_status?: "unknown" | "reference" | "date_specific"
   service_number?: string | null
   schedule_checked_at?: string | null
   schedule_source_url?: string | null
+  evidence_status?: EvidenceStatus
+  evidence_checked_at?: string | null
+  evidence_reason?: string | null
 }
+
+export type EvidenceStatus = "verified" | "referenced" | "conflicted" | "unknown"
 
 export interface VisitRequirements {
   reservation_policy?: string | null
@@ -107,7 +126,50 @@ export interface VisitRequirements {
   notes?: string[]
 }
 
+export interface TransportLeg {
+  scope: "outbound" | "return" | "intercity" | "local"
+  origin: string
+  destination: string
+  departure_date: string
+  arrival_date?: string | null
+  mode: string
+  passenger_count: number
+  estimated_total?: number | null
+  unit_price?: number | null
+  duration_minutes_min?: number | null
+  duration_minutes_max?: number | null
+  price_status: string
+  pricing_note?: string
+  source_urls: string[]
+}
+
+export interface TransportServiceCandidate {
+  scope: "outbound" | "return" | "intercity"
+  mode: string
+  service_number: string
+  origin: string
+  destination: string
+  departure_date: string
+  departure_time: string
+  arrival_date?: string | null
+  arrival_time: string
+  duration_minutes?: number | null
+  fare_class?: string | null
+  fare_amount?: number | null
+  price_status: "unknown" | "estimated" | "verified"
+  availability_status: string
+  schedule_status: "unknown" | "reference" | "date_specific"
+  schedule_checked_at: string
+  source_url: string
+  evidence_status?: EvidenceStatus
+  evidence_checked_at?: string | null
+  evidence_reason?: string | null
+  notes: string[]
+}
+
 export interface TransportBookingSummary {
+  legs?: TransportLeg[]
+  service_candidates?: TransportServiceCandidate[]
   summary?: string | null
   recommended_option?: string | null
   estimated_intercity_cost: number
@@ -122,6 +184,10 @@ export interface TransportBookingSummary {
 }
 
 export interface StayHotelCandidate {
+  identity_status?: string
+  identity_checked_at?: string | null
+  verified_source_urls?: string[]
+  evidence_notes?: string[]
   name: string
   area?: string | null
   hotel_type?: string | null
@@ -156,13 +222,26 @@ export interface ItineraryItem {
   type: string
   name: string
   start_time: string
+  end_day_offset?: number
   end_time: string
   location: string
   score: number
   note: string
   booking_info?: BookingInfo | null
   visit_requirements?: VisitRequirements | null
+  nearby_suggestions?: Array<{
+    name: string
+    area: string
+    reason: string
+    suggested_time: string
+    highlights: string[]
+    source_urls: string[]
+    confidence: string
+    relation_type: "suggested_pair" | "same_area" | string
+    relation_note: string
+  }>
   image_urls?: string[]
+  image_backup_urls?: string[]
   image_source_urls?: string[]
   image_status?: "pending" | "completed" | "failed" | "skipped" | null
   image_priority_tier?: "high" | "medium" | "low" | "skipped" | null
@@ -174,6 +253,18 @@ export interface ItineraryDayWeather {
   summary: string
   notes: string[]
   citations: string[]
+  forecast_type?: string | null
+  condition?: string | null
+  temperature_min_c?: string | null
+  temperature_max_c?: string | null
+  precipitation_probability?: string | null
+  wind?: string | null
+  forecast_updated_at?: string | null
+  checked_at?: string | null
+  evidence_status?: EvidenceStatus
+  evidence_checked_at?: string | null
+  evidence_reason?: string | null
+  field_evidence?: Record<string, EvidenceStatus>
 }
 
 export interface ItineraryDay {
@@ -351,6 +442,9 @@ export interface AgentSettings {
   poi_provider_protocol: LlmProviderProtocol
   poi_base_url: string | null
   poi_model: string | null
+  weather_model: string | null
+  hotel_model: string | null
+  transport_model: string | null
   poi_api_key_masked: string | null
   poi_has_api_key: boolean
   poi_wire_api: LlmWireApi | null
@@ -367,6 +461,9 @@ export interface AgentSettingsInput {
   poi_provider_protocol?: LlmProviderProtocol
   poi_base_url?: string
   poi_model?: string
+  weather_model?: string
+  hotel_model?: string
+  transport_model?: string
   poi_wire_api?: LlmWireApi
   poi_api_key?: string
 }

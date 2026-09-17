@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue"
 import type { CommunityPostDetail, ItineraryItem, SearchDocument } from "@travelmind/shared-types"
 import StatePanel from "@/components/StatePanel.vue"
+import PoiImage from "@/components/PoiImage.vue"
 import { api, getErrorMessage } from "@/lib/api"
 import { formatCurrency, formatDateRange, formatDateTime } from "@/lib/format"
 import { useI18n } from "@/lib/useI18n"
@@ -220,7 +221,7 @@ watch(
                 </div>
                 <p class="item-note">{{ item.note }}</p>
                 <div v-if="item.image_urls?.length" class="visual-doc-images">
-                  <img v-for="url in item.image_urls.slice(0, 3)" :key="url" :src="url" :alt="item.name" />
+                  <PoiImage :urls="item.image_urls" :backups="item.image_backup_urls" :alt="item.name" />
                 </div>
               </div>
             </li>

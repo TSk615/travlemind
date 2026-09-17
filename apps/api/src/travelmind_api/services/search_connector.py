@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import ipaddress
 from collections.abc import Mapping
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -18,6 +19,22 @@ SearchServiceProvider = Literal["groksearch", "tavily"]
 SearchServiceTransport = Literal["mcp", "api"]
 DEFAULT_IMAGE_INCLUDE_DOMAINS = ("hk.trip.com", "pixabay.com", "pexels.com")
 DEFAULT_IMAGE_PER_DOMAIN_LIMIT = 4
+
+
+def is_public_source_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if parsed.scheme not in {"https", "http"} or parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
+            return False
+        if "." not in host or host.endswith((".test", ".local", ".localhost", ".internal")) or host == "localhost":
+            return False
+        try:
+            return ipaddress.ip_address(host).is_global
+        except ValueError:
+            return True
+    except ValueError:
+        return False
 _DOMAIN_TOKEN_SPLIT_PATTERN = re.compile(r"[\s,;\uFF0C\uFF1B]+")
 _DOMAIN_PATTERN = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$", re.IGNORECASE)
 
@@ -259,7 +276,7 @@ class ConfiguredSearchGateway:
         if self._available_tools is not None:
             return self._available_tools
         if self._config.transport == "api" and self._config.provider == "tavily":
-            self._available_tools = {"search"}
+            self._available_tools = {"search", "extract"}
             return self._available_tools
         if self._mcp_client is None:
             self._available_tools = set()
@@ -300,6 +317,19 @@ class ConfiguredSearchGateway:
 
     def _call_api_operation(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._config.provider == "tavily":
+            if name == "extract":
+                urls = [str(url) for url in arguments.get("urls", []) if is_public_source_url(str(url))][:8]
+                if not urls:
+                    return {"results": [], "failed_results": []}
+                root = self._config.base_url.rstrip("/")
+                if root.endswith("/search"):
+                    root = root[:-7]
+                with httpx.Client(timeout=self._config.timeout_seconds, follow_redirects=False) as client:
+                    response = client.post(f"{root}/extract", headers={"Authorization": f"Bearer {self._config.api_key}"},
+                                           json={"urls": urls, "include_images": bool(arguments.get("include_images", False)),
+                                                 "extract_depth": "basic", "timeout": 10})
+                    response.raise_for_status()
+                    return response.json()
             if name not in {"search", "answer"}:
                 raise SearchServiceGatewayError(f"Tavily API transport does not support operation {name}")
             query = str(arguments.get("query") or arguments.get("objective") or "").strip()
@@ -316,6 +346,7 @@ class ConfiguredSearchGateway:
                 include_images=include_images,
                 include_image_descriptions=include_image_descriptions,
                 include_domains=include_domains,
+                split_domains=bool(arguments.get("split_domains", True)),
             )
         raise SearchServiceGatewayError("GrokSearch currently only supports MCP transport")
 
@@ -327,6 +358,7 @@ class ConfiguredSearchGateway:
         include_images: bool,
         include_image_descriptions: bool,
         include_domains: list[str],
+        split_domains: bool = True,
     ) -> dict[str, Any]:
         endpoint = self._config.base_url if self._config.base_url.endswith("/search") else f"{self._config.base_url}/search"
         headers = {
@@ -343,7 +375,7 @@ class ConfiguredSearchGateway:
         }
         try:
             with httpx.Client(timeout=self._config.timeout_seconds, follow_redirects=True) as client:
-                if include_images and len(include_domains) > 1:
+                if split_domains and include_images and len(include_domains) > 1:
                     domain_payloads: list[tuple[str, dict[str, Any]]] = []
                     for domain in include_domains:
                         domain_payload = {**payload, "include_domains": [domain]}

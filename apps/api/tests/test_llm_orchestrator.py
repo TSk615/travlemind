@@ -6,14 +6,24 @@ import httpx
 import pytest
 import travelmind_api.agents.helloagents as helloagents_module
 
-from travelmind_api.agents.base import PlanningRequest, PlanningResult
+from travelmind_api.agents.base import (
+    AgentTrace,
+    BookingInfo,
+    PlannedDay,
+    PlannedItem,
+    PlanningRequest,
+    PlanningResult,
+    TransportBookingSummary,
+)
 from travelmind_api.agents.factory import build_orchestrator
 from travelmind_api.agents.helloagents import (
+    HelloAgentsBrief,
     HelloAgentsHotelCandidate,
     HelloAgentsHotelRecommendation,
     HelloAgentsOrchestrator,
     HelloAgentsPoiGrounding,
     HelloAgentsRoleConfig,
+    HelloAgentsTransportGuidance,
 )
 from travelmind_api.agents.openai_compatible import OpenAICompatibleOrchestrator
 from travelmind_api.agents.stub import StubOrchestrator
@@ -28,6 +38,7 @@ from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
 from travelmind_api.services.llm.parser import parse_planning_response
 from travelmind_api.services.maps import StubMapsPoiProvider
 from travelmind_api.services.search_connector import SearchServiceConfig
+from travelmind_api.services.budgeting import enrich_plan_with_budget
 
 
 
@@ -1432,7 +1443,10 @@ def test_user_poi_role_override_requires_complete_saved_settings():
 
     assert build_user_poi_role_overrides(user) == {}
 
-    user.poi_llm_model = "grok-poi"
+    user.poi_llm_model = "Console/grok-4.20-multi-agent-0309"
+    user.weather_llm_model = "Console/grok-4.20-0309-non-reasoning"
+    user.hotel_llm_model = "Console/grok-4.20-0309-reasoning"
+    user.transport_llm_model = "Console/grok-4.20-0309-reasoning"
     overrides = build_user_poi_role_overrides(user)
     config = LlmConfig.from_mapping(
         {
@@ -1447,11 +1461,17 @@ def test_user_poi_role_override_requires_complete_saved_settings():
 
     assert config is not None
     assert set(overrides) == {"poi_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
+    expected_models = {
+        "poi_specialist": "Console/grok-4.20-multi-agent-0309",
+        "weather_specialist": "Console/grok-4.20-0309-non-reasoning",
+        "hotel_specialist": "Console/grok-4.20-0309-reasoning",
+        "transport_specialist": "Console/grok-4.20-0309-reasoning",
+    }
     for role_name in ("poi_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"):
         role_config = config.config_for_role(role_name)
         assert role_config.base_url == "https://old-poi.example.test/v1"
         assert role_config.api_key == "poi-key"
-        assert role_config.model == "grok-poi"
+        assert role_config.model == expected_models[role_name]
         assert role_config.wire_api == "responses"
         assert role_config.provider_protocol == "openai"
 
@@ -1689,10 +1709,13 @@ def _fake_helloagents_module(
                         "hotel_candidates": [
                             {
                                 "name": "Downtown Kyoto Hotel",
+                                "city": "Kyoto",
                                 "area": "Downtown Kyoto",
+                                "address": "Downtown Kyoto",
                                 "reason": "Balanced access to food and transit.",
                                 "price_hint": "moderate",
                                 "source_urls": ["https://hotel.example.test/downtown-kyoto"],
+                                "source_page_titles": ["Downtown Kyoto Hotel | Hotel listing"],
                             }
                         ],
                         "stay_strategy": ["Prefer one transit-friendly base for the whole trip."],
@@ -1871,8 +1894,8 @@ def test_helloagents_orchestrator_returns_business_specialist_result(monkeypatch
     assert set(calls[3:5]) == {"hotel_specialist", "transport_specialist"}
     assert llm_by_role["poi_specialist"]["base_url"] == "https://poi.example.test/v1"
     assert llm_by_role["poi_specialist"]["model"] == "gpt-poi"
-    assert llm_by_role["poi_specialist"]["timeout"] == 120
-    assert llm_by_role["poi_specialist"]["max_tokens"] == 3200
+    assert llm_by_role["poi_specialist"]["timeout"] == 300
+    assert llm_by_role["poi_specialist"]["max_tokens"] == 4800
     assert llm_by_role["poi_specialist"]["retry_attempts"] == 1
     assert llm_by_role["poi_specialist"]["stream"] is True
     assert llm_by_role["weather_specialist"]["base_url"] == "https://default.example.test/v1"
@@ -1900,8 +1923,8 @@ def test_helloagents_orchestrator_returns_business_specialist_result(monkeypatch
     assert result.transport_booking_summary.official_booking_url == "https://rail.example.test/kyoto"
     assert result.transport_booking_summary.booking_required is True
     assert result.stay_recommendation is not None
-    assert result.stay_recommendation.final_recommended_hotel is not None
-    assert result.stay_recommendation.final_recommended_hotel.name == "Downtown Kyoto Hotel"
+    # The fake specialist's URLs are not independently fetched hotel evidence.
+    assert result.stay_recommendation.final_recommended_hotel is None
     assert result.stay_recommendation.recommended_areas == ["Downtown Kyoto", "Higashiyama"]
     assert result.budget_summary is not None
     assert result.budget_summary.breakdown.tickets >= 25
@@ -1918,15 +1941,15 @@ def test_helloagents_orchestrator_serializes_shared_streaming_grok_endpoint_role
                 "poi_specialist": {
                     "base_url": "https://newapi.rainflow.foo/v1",
                     "api_key": "shared-key",
-                    "model": "grok-4.20-multi-agent-xhigh",
-                    "wire_api": "chat_completions",
+                    "model": "Console/grok-4.20-multi-agent-0309",
+                    "wire_api": "responses",
                     "provider_protocol": "newapi",
                 },
                 "weather_specialist": {
                     "base_url": "https://newapi.rainflow.foo/v1",
                     "api_key": "shared-key",
-                    "model": "grok-4.20-multi-agent-medium",
-                    "wire_api": "chat_completions",
+                    "model": "Console/grok-4.20-0309-non-reasoning",
+                    "wire_api": "responses",
                     "provider_protocol": "newapi",
                 },
             },
@@ -1963,8 +1986,9 @@ def test_helloagents_orchestrator_uses_transport_guidance_to_override_budget_bre
     assert result.budget_summary is not None
     assert result.budget_summary.breakdown.transport == 380
     assert result.budget_summary.estimated_total >= result.budget_summary.breakdown.transport
-    assert any(item.key == "trip_transport_intercity" for item in result.budget_summary.line_items)
-    assert any(item.key == "trip_transport_local" for item in result.budget_summary.line_items)
+    assert sum(item.amount for item in result.budget_summary.line_items if item.key.startswith("transport_intercity_")) == 320
+    assert sum(item.amount for item in result.budget_summary.line_items if item.key.startswith("transport_local_")) == 60
+    assert all(item.day_index is not None for item in result.budget_summary.line_items)
 
 
 def test_budgeting_classifies_grounded_prices_by_item_type(monkeypatch):
@@ -1984,6 +2008,172 @@ def test_budgeting_classifies_grounded_prices_by_item_type(monkeypatch):
     assert result.budget_summary.breakdown.transport == 380
     assert result.budget_summary.breakdown.total == sum(day.total_cost for day in result.days)
     assert sum(item.amount for item in result.budget_summary.line_items) == result.budget_summary.estimated_total
+
+
+def test_departure_buffer_starts_after_last_non_transport_activity():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    payload = parse_planning_response(
+        json.dumps(
+            {
+                "summary": "Return day with a complete departure chain.",
+                "total_budget_estimate": 1000,
+                "risks": [],
+                "days": [
+                    {
+                        "title": "Arrival",
+                        "summary": "Arrival day.",
+                        "total_cost": 0,
+                        "items": [
+                            {
+                                "type": "sight",
+                                "name": "Old town",
+                                "start_time": "18:00",
+                                "end_time": "19:00",
+                                "location": "Shantou",
+                                "score": 0.8,
+                                "note": "Short walk.",
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Return",
+                        "summary": "Museum, station transfer, then rail.",
+                        "total_cost": 0,
+                        "items": [
+                            {
+                                "type": "sight",
+                                "name": "Museum",
+                                "start_time": "09:45",
+                                "end_time": "10:45",
+                                "location": "Shantou",
+                                "score": 0.9,
+                                "note": "Last visit.",
+                            },
+                            {
+                                "type": "accommodation",
+                                "name": "Hotel checkout and luggage collection",
+                                "start_time": "12:15",
+                                "end_time": "12:45",
+                                "location": "Shantou",
+                                "score": 0.9,
+                                "note": "Collect luggage before leaving.",
+                            },
+                            {
+                                "type": "transport",
+                                "name": "Collect luggage and transfer to station",
+                                "start_time": "12:45",
+                                "end_time": "13:45",
+                                "location": "Shantou Station",
+                                "score": 0.9,
+                                "note": "Station transfer.",
+                            },
+                            {
+                                "type": "transport",
+                                "name": "汕头至广州高铁",
+                                "start_time": "13:45",
+                                "end_time": "16:45",
+                                "location": "Shantou to Guangzhou",
+                                "score": 0.9,
+                                "note": "Rail window pending booking.",
+                            },
+                        ],
+                    },
+                ],
+            }
+        )
+    )
+
+    orchestrator._validate_execution_constraints(
+        payload,
+        _planning_request(),
+        HelloAgentsTransportGuidance(
+            departure_transfer_minutes=50,
+            station_buffer_minutes=40,
+            luggage_buffer_minutes=30,
+            minimum_departure_buffer_minutes=120,
+        ),
+    )
+
+
+def test_budgeting_uses_itemized_costs_without_filling_unused_budget_capacity():
+    request = _planning_request().model_copy(update={"budget": 6800})
+    plan = PlanningResult(
+        summary="Grounded budget test.",
+        total_budget_estimate=6800,
+        risks=[],
+        days=[
+            PlannedDay(
+                day_index=1,
+                title="Arrival",
+                summary="Rail and hotel.",
+                total_cost=4000,
+                items=[
+                    PlannedItem(
+                        id="rail_out",
+                        type="transport",
+                        name="Outbound rail",
+                        start_time="15:00",
+                        end_time="18:00",
+                        location="Shantou",
+                        score=0.9,
+                        note="Estimate superseded by transport specialist total.",
+                        booking_info=BookingInfo(estimated_price=1000),
+                    ),
+                    PlannedItem(
+                        id="hotel",
+                        type="accommodation",
+                        name="Two-night hotel",
+                        start_time="18:30",
+                        end_time="19:00",
+                        location="Shantou",
+                        score=0.9,
+                        note="One grounded stay total.",
+                        booking_info=BookingInfo(estimated_price=1100),
+                    ),
+                ],
+            ),
+            PlannedDay(
+                day_index=2,
+                title="Return",
+                summary="Return rail.",
+                total_cost=2800,
+                items=[
+                    PlannedItem(
+                        id="rail_back",
+                        type="transport",
+                        name="Return rail",
+                        start_time="14:00",
+                        end_time="17:00",
+                        location="Guangzhou",
+                        score=0.9,
+                        note="Estimate superseded by transport specialist total.",
+                        booking_info=BookingInfo(estimated_price=500),
+                    )
+                ],
+            ),
+        ],
+        transport_booking_summary=TransportBookingSummary(
+            estimated_intercity_cost=1000,
+            estimated_local_transport_cost=350,
+        ),
+        trace=AgentTrace(provider="test", workflow_id="workflow_test", notes=[]),
+    )
+
+    result = enrich_plan_with_budget(plan, request)
+
+    assert result.total_budget_estimate == 2450
+    assert result.budget_summary is not None
+    assert result.budget_summary.estimated_total == 2450
+    assert result.budget_summary.remaining_budget == 4350
+    assert result.budget_summary.breakdown.accommodation == 1100
+    assert result.budget_summary.breakdown.transport == 1350
+    assert result.budget_summary.breakdown.other == 0
+    assert sum(day.total_cost for day in result.days) == 2450
+    assert sum(item.amount for item in result.budget_summary.line_items) == 2450
+    assert any("planner-stated day totals" in risk for risk in result.risks)
 
 
 def test_helloagents_orchestrator_fails_when_specialist_role_fails(monkeypatch):
@@ -2314,7 +2504,7 @@ def test_helloagents_planner_hotels_payload_filters_unverified_concrete_hotels()
 
     assert payload["final_recommended_hotel"] is None
     assert payload["hotel_candidates"] == []
-    assert "source URLs" in " ".join(payload["hotel_risks"])
+    assert "核验" in " ".join(payload["stay_strategy"])
     assert "大理中央地标酒店" not in json.dumps(payload, ensure_ascii=False)
 
 
@@ -2325,10 +2515,13 @@ def test_helloagents_planner_hotels_payload_keeps_source_backed_hotels():
     )
     verified = HelloAgentsHotelCandidate(
         name="Verified Dali Hotel",
+        city="Dali",
         area="Dali Old Town",
+        address="Dali Old Town, Dali",
         reason="Source-backed listing near the planned POI cluster.",
         booking_confidence="medium",
         source_urls=["https://hotel.example.test/dali-verified"],
+        source_page_titles=["Verified Dali Hotel | official listing"],
     )
     hotel = HelloAgentsHotelRecommendation(
         recommended_areas=["Dali Old Town"],
@@ -2339,7 +2532,74 @@ def test_helloagents_planner_hotels_payload_keeps_source_backed_hotels():
     payload = orchestrator._build_planner_hotels_payload(hotel)
 
     assert payload["final_recommended_hotel"]["name"] == "Verified Dali Hotel"
-    assert payload["hotel_candidates"][0]["source_urls"] == ["https://hotel.example.test/dali-verified"]
+    assert payload["final_recommended_hotel"]["source_urls"] == ["https://hotel.example.test/dali-verified"]
+    assert payload["hotel_candidates"] == []
+
+
+def test_helloagents_parser_uses_last_valid_object_when_response_contains_conflicting_objects():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+
+    parsed = orchestrator._parse_structured_response(
+        '{"destination":"Kyoto","trip_days":2}{"destination":"Osaka","trip_days":3}',
+        HelloAgentsBrief,
+    )
+
+    assert parsed.destination == "Osaka"
+    assert parsed.trip_days == 3
+
+
+def test_helloagents_hotel_verification_requires_city_and_page_entity_match():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    valid = HelloAgentsHotelCandidate(
+        name="汕头小公园宜必思酒店",
+        city="汕头",
+        area="金平区",
+        address="汕头市金平区",
+        source_urls=["https://hotel.example.test/ibis-shantou-xiaogongyuan"],
+        source_page_titles=["汕头小公园宜必思酒店 | 酒店详情"],
+    )
+    wrong_city = valid.model_copy(update={"city": "广州"})
+    wrong_entity = valid.model_copy(update={"source_page_titles": ["汕头新华酒店 | 酒店详情"]})
+
+    assert orchestrator._is_verified_hotel_candidate(valid, destination="汕头")
+    assert not orchestrator._is_verified_hotel_candidate(wrong_city, destination="汕头")
+    assert not orchestrator._is_verified_hotel_candidate(wrong_entity, destination="汕头")
+
+
+def test_helloagents_hotel_verification_removes_conflicting_source_url_candidates():
+    orchestrator = HelloAgentsOrchestrator(
+        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
+        maps_provider=StubMapsPoiProvider(),
+    )
+    first = HelloAgentsHotelCandidate(
+        name="汕头宜必思酒店",
+        city="汕头",
+        source_urls=["https://hotel.example.test/hotel-123"],
+        source_page_titles=["汕头宜必思酒店 | 酒店详情"],
+    )
+    second = HelloAgentsHotelCandidate(
+        name="汕头新华酒店",
+        city="汕头",
+        source_urls=["https://hotel.example.test/hotel-123"],
+        source_page_titles=["汕头新华酒店 | 酒店详情"],
+    )
+    hotel = HelloAgentsHotelRecommendation(
+        recommended_areas=["金平区"],
+        final_recommended_hotel=first,
+        hotel_candidates=[first, second],
+    )
+
+    payload = orchestrator._build_planner_hotels_payload(hotel, destination="汕头")
+
+    assert payload["final_recommended_hotel"] is None
+    assert payload["hotel_candidates"] == []
+    assert any("无法消歧" in item for item in payload["hotel_risks"])
 
 
 def test_helloagents_planner_poi_payload_excludes_food_pois():
@@ -2529,11 +2789,7 @@ def test_helloagents_build_day_weather_uses_matching_date_sources():
     )
 
     assert day_weather is not None
-    assert day_weather.citations == [
-        "https://weather.example.test/2026-04-15",
-        "https://weather.example.test/city",
-        "https://weather.example.test/search-metadata",
-    ]
+    assert day_weather.citations == ["https://weather.example.test/2026-04-15"]
 
 
 
@@ -2779,6 +3035,8 @@ def test_helloagents_has_native_search_requires_known_web_model():
 
     assert orchestrator._has_native_search("poi_specialist", endpoint("https://proxy.example.test/v1", "Web/grok-chat-fast")) is True
     assert orchestrator._has_native_search("weather_specialist", endpoint("https://proxy.example.test/v1", "Web/grok-chat-fast")) is True
+    assert orchestrator._has_native_search("poi_specialist", endpoint("https://proxy.example.test/v1", "Console/grok-4.20-multi-agent-0309")) is True
+    assert orchestrator._has_native_search("weather_specialist", endpoint("https://proxy.example.test/v1", "Console/grok-4.20-0309-non-reasoning")) is True
     assert orchestrator._has_native_search("poi_specialist", endpoint("https://api.x.ai/v1", "grok-4")) is False
     assert orchestrator._has_native_search("poi_specialist", endpoint("https://rainflow.example.test/v1", "gpt-test")) is False
     assert orchestrator._has_native_search("poi_specialist", endpoint("https://llm.example.test/v1", "gpt-test")) is False
@@ -2927,6 +3185,9 @@ def test_hotel_specialist_prompt_rejects_unsourced_concrete_hotel_names():
 
     assert "每个具体酒店必须带 source_urls" in text
     assert "source-backed 的最低标准不是 URL 不为空" in text
+    assert "每个具体酒店必须同时填写 city 和 address" in text
+    assert "source_page_titles 必须与 source_urls 按顺序对应" in text
+    assert "后端会校验酒店名称、目的地城市、页面标题和来源 URL 的实体一致性" in text
     assert "酒店精确名称、所在城市/区域、地址或地标位置、近期评价/评分/设施信号" in text
     assert "中国大陆目的地优先输出来源中的中文本地展示名" in text
     assert "不要只输出英文名" in text
@@ -3529,6 +3790,35 @@ def test_helloagents_poi_grounding_rejects_generic_homepage_evidence_and_keeps_d
     assert grounding.featured_pois[0].confidence == "high"
     assert grounding.featured_pois[1].source_urls == []
     assert grounding.featured_pois[1].confidence == "low"
+
+    ranking_grounding = HelloAgentsPoiGrounding.model_validate(
+        {
+            "top_pois": [
+                {
+                    "name": "老妈宫戏台",
+                    "kind": "attraction",
+                    "confidence": "medium",
+                    "source_urls": ["https://www.amap.com/ranking/shantou/scenic"],
+                }
+            ]
+        }
+    )
+    assert ranking_grounding.featured_pois[0].source_urls == ["https://www.amap.com/ranking/shantou/scenic"]
+
+
+def test_helloagents_poi_grounding_keeps_shared_regional_guide_for_multiple_pois():
+    shared_url = "https://travel.example.test/shantou-old-town-guide"
+    grounding = HelloAgentsPoiGrounding.model_validate(
+        {
+            "top_pois": [
+                {"name": "小公园开埠区", "kind": "district", "source_urls": [shared_url]},
+                {"name": "侨批文物馆", "kind": "attraction", "source_urls": [shared_url]},
+                {"name": "老妈宫戏台", "kind": "attraction", "source_urls": [shared_url]},
+            ]
+        }
+    )
+
+    assert [poi.source_urls for poi in grounding.featured_pois] == [[shared_url], [shared_url], [shared_url]]
 
 def test_helloagents_orchestrator_warns_when_chinese_final_payload_is_not_localized(monkeypatch):
     calls: list[str] = []

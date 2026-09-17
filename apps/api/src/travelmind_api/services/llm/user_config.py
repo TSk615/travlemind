@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-_POI_MODEL_ROLES = ("poi_specialist", "hotel_specialist", "transport_specialist")
+_SEARCH_ROLE_MODEL_ATTRIBUTES = {
+    "poi_specialist": "poi_llm_model",
+    "weather_specialist": "weather_llm_model",
+    "hotel_specialist": "hotel_llm_model",
+    "transport_specialist": "transport_llm_model",
+}
 
 
 def _has_text(value: object | None) -> bool:
@@ -24,7 +29,7 @@ def user_poi_role_override_missing_fields(user: object | None) -> list[str]:
 
 
 def build_user_poi_role_overrides(user: object | None) -> dict[str, dict[str, Any]]:
-    """Return saved POI model overrides for roles that share the user's Grok endpoint."""
+    """Return per-role search models that share one saved endpoint and credential."""
     if user is None:
         return {}
 
@@ -34,17 +39,24 @@ def build_user_poi_role_overrides(user: object | None) -> dict[str, dict[str, An
     if not (_has_text(base_url) and _has_text(api_key) and _has_text(model)):
         return {}
 
-    override: dict[str, Any] = {
-        "base_url": base_url,
-        "api_key": api_key,
-        "model": model,
-    }
-    wire_api = getattr(user, "poi_llm_wire_api", None)
+    saved_wire_api = getattr(user, "poi_llm_wire_api", None)
     provider_protocol = getattr(user, "poi_llm_provider_protocol", None)
-    if _has_text(wire_api):
-        override["wire_api"] = wire_api
-    if _has_text(provider_protocol):
-        override["provider_protocol"] = provider_protocol
-    overrides = {role_name: dict(override) for role_name in _POI_MODEL_ROLES}
-    overrides["weather_specialist"] = dict(override)
+    overrides: dict[str, dict[str, Any]] = {}
+    for role_name, model_attribute in _SEARCH_ROLE_MODEL_ATTRIBUTES.items():
+        role_model = getattr(user, model_attribute, None) or model
+        override: dict[str, Any] = {
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": role_model,
+        }
+        normalized_model = str(role_model or "").strip().casefold()
+        if normalized_model.startswith("console/"):
+            override["wire_api"] = "responses"
+        elif normalized_model.startswith("web/"):
+            override["wire_api"] = "chat_completions"
+        elif _has_text(saved_wire_api):
+            override["wire_api"] = saved_wire_api
+        if _has_text(provider_protocol):
+            override["provider_protocol"] = provider_protocol
+        overrides[role_name] = override
     return overrides

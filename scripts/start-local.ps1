@@ -26,6 +26,14 @@ if ($env:CODEX_SANDBOX_NETWORK_DISABLED -eq "1") {
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
+# Keep npm's transient cache on the project drive. The user profile may live
+# on a small system disk, and a full profile cache should not prevent the web
+# service from starting.
+if (-not $env:NPM_CONFIG_CACHE) {
+    $env:NPM_CONFIG_CACHE = Join-Path $runDir "npm-cache"
+}
+New-Item -ItemType Directory -Force -Path $env:NPM_CONFIG_CACHE | Out-Null
+
 if ($InlineMode -and $ArqMode) {
     throw "-InlineMode and -ArqMode cannot be used together."
 }
@@ -247,10 +255,13 @@ try {
     }
 
     if (-not $SkipWeb) {
+        # Keep browser API requests on the same origin as the page. Vite
+        # proxies /api to FastAPI, so auth cookies also work when the page
+        # is opened through either localhost or 127.0.0.1.
         $started += Start-ManagedProcess `
             -Name "web" `
             -Command "npm run dev -- --configLoader runner --host 0.0.0.0 --port $WebPort --strictPort" `
-            -Environment @{ "VITE_API_BASE_URL" = "http://localhost:$ApiPort" } `
+            -Environment @{ "VITE_API_BASE_URL" = "" } `
             -WorkingDirectory (Join-Path $repoRoot "apps/web") `
             -Port $WebPort
     }

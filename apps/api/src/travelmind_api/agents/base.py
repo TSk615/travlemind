@@ -1,4 +1,5 @@
 from __future__ import annotations
+from travelmind_api.services.planning_details import BookingDetails, TransportLeg, TransportServiceCandidate, HotelEvidence, BudgetCompleteness
 
 from datetime import date, datetime
 from typing import Any, Protocol
@@ -47,7 +48,7 @@ class BudgetLineItem(BaseModel):
     note: str | None = None
 
 
-class BudgetSummary(BaseModel):
+class BudgetSummary(BudgetCompleteness):
     requested_budget: float
     estimated_total: float
     remaining_budget: float
@@ -58,7 +59,7 @@ class BudgetSummary(BaseModel):
     line_items: list[BudgetLineItem] = Field(default_factory=list)
 
 
-class BookingInfo(BaseModel):
+class BookingInfo(BookingDetails):
     price_label: str | None = None
     estimated_price: float | None = None
     booking_required: bool = False
@@ -83,6 +84,8 @@ class VisitRequirements(BaseModel):
 
 
 class TransportBookingSummary(BaseModel):
+    legs: list[TransportLeg] = Field(default_factory=list)
+    service_candidates: list[TransportServiceCandidate] = Field(default_factory=list)
     summary: str | None = None
     recommended_option: str | None = None
     estimated_intercity_cost: float = 0.0
@@ -96,7 +99,7 @@ class TransportBookingSummary(BaseModel):
     source_urls: list[str] = Field(default_factory=list)
 
 
-class StayHotelCandidate(BaseModel):
+class StayHotelCandidate(HotelEvidence):
     name: str
     area: str | None = None
     hotel_type: str | None = None
@@ -149,11 +152,24 @@ class PlannedRouteReference(BaseModel):
     summary: str
 
 
+class NearbyPoiSuggestion(BaseModel):
+    name: str
+    area: str = ""
+    reason: str = ""
+    suggested_time: str = ""
+    highlights: list[str] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
+    confidence: str = "low"
+    relation_type: str = "same_area"
+    relation_note: str = "同片区备选，实际交通时间待地图确认。"
+
+
 class PlannedItem(BaseModel):
     id: str
     type: str
     name: str
     start_time: str
+    end_day_offset: int = Field(default=0, ge=0, le=7)
     end_time: str
     location: str
     score: float
@@ -162,7 +178,9 @@ class PlannedItem(BaseModel):
     visit_requirements: VisitRequirements | None = None
     location_ref: PlannedLocationReference | None = None
     route_from_previous: PlannedRouteReference | None = None
+    nearby_suggestions: list[NearbyPoiSuggestion] = Field(default_factory=list)
     image_urls: list[str] = Field(default_factory=list)
+    image_backup_urls: list[str] = Field(default_factory=list)
     image_source_urls: list[str] = Field(default_factory=list)
     image_status: str | None = None
     image_priority_tier: str | None = None
@@ -174,6 +192,18 @@ class PlannedDayWeather(BaseModel):
     summary: str
     notes: list[str] = Field(default_factory=list)
     citations: list[str] = Field(default_factory=list)
+    forecast_type: str | None = None
+    condition: str | None = None
+    temperature_min_c: str | None = None
+    temperature_max_c: str | None = None
+    precipitation_probability: str | None = None
+    wind: str | None = None
+    forecast_updated_at: str | None = None
+    checked_at: str | None = None
+    evidence_status: str | None = None
+    evidence_checked_at: str | None = None
+    evidence_reason: str | None = None
+    field_evidence: dict[str, str] = Field(default_factory=dict)
 
 
 class PlannedDay(BaseModel):

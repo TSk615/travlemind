@@ -1,10 +1,11 @@
 from __future__ import annotations
+from travelmind_api.services.planning_details import BookingDetails, TransportLeg, TransportServiceCandidate, HotelEvidence, BudgetCompleteness
 
 import json
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 _TIME_VALUE_RE = re.compile(r"^\s*(\d{1,2})\s*[:\uff1a]\s*(\d{1,2})\s*$")
 _DURATION_RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:-|~|\u2013|\u2014|\u81f3|\u5230)\s*(\d+(?:\.\d+)?)")
@@ -61,12 +62,40 @@ class LlmPlanItem(BaseModel):
     type: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=255)
     start_time: str = Field(pattern=r"^\d{2}:\d{2}$")
+    end_day_offset: int = Field(default=0, ge=0, le=7)
     end_time: str = Field(pattern=r"^\d{2}:\d{2}$")
     location: str = Field(default="")
     score: float = 0.8
     note: str = Field(default="")
     booking_info: "LlmBookingInfo | None" = None
     visit_requirements: "LlmVisitRequirements | None" = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_overnight_transport_offset(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if int(value.get("end_day_offset") or 0) > 0:
+            return value
+        item_type = str(value.get("type") or "").strip().casefold()
+        if item_type not in {"transport", "transit", "rail", "flight", "ferry"}:
+            return value
+        try:
+            start = int(str(value.get("start_time")).split(":")[0]) * 60 + int(str(value.get("start_time")).split(":")[1])
+            end = int(str(value.get("end_time")).split(":")[0]) * 60 + int(str(value.get("end_time")).split(":")[1])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return value
+        booking = value.get("booking_info") if isinstance(value.get("booking_info"), dict) else {}
+        duration = booking.get("duration_minutes_min")
+        try:
+            duration = int(float(duration)) if duration is not None else 0
+        except (TypeError, ValueError):
+            duration = 0
+        name = str(value.get("name") or "").casefold()
+        if end <= start and (duration >= 300 or any(token in name for token in ("跨夜", "次日", "overnight", "高铁", "航班"))):
+            value["end_day_offset"] = 1
+        return value
 
     @field_validator("score", mode="before")
     @classmethod
@@ -78,7 +107,7 @@ class LlmPlanItem(BaseModel):
         return max(0.0, min(1.0, numeric))
 
 
-class LlmBookingInfo(BaseModel):
+class LlmBookingInfo(BookingDetails):
     price_label: str | None = None
     estimated_price: float | None = None
     booking_required: bool = False
@@ -123,6 +152,8 @@ class LlmVisitRequirements(BaseModel):
 
 
 class LlmTransportBookingSummary(BaseModel):
+    legs: list[TransportLeg] = Field(default_factory=list)
+    service_candidates: list[TransportServiceCandidate] = Field(default_factory=list)
     summary: str | None = None
     recommended_option: str | None = None
     estimated_intercity_cost: float = 0.0
@@ -211,6 +242,13 @@ def _normalize_day_item_times(items: Any) -> None:
         end = _parse_time_minutes(raw_end)
         start_is_explicit = _parse_explicit_time_minutes(raw_start) is not None
         end_is_explicit = _parse_explicit_time_minutes(raw_end) is not None
+
+        # Explicit clocks must survive parsing, including cross-day intervals.
+        if start_is_explicit and end_is_explicit:
+            item["start_time"] = _format_time_minutes(start)
+            item["end_time"] = _format_time_minutes(end)
+            cursor = min(end + _ITEM_GAP_MINUTES, _LATEST_FALLBACK_START_MINUTES)
+            continue
 
         if start is None:
             start = cursor

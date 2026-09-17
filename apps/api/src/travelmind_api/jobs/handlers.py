@@ -621,6 +621,8 @@ def _process_trip_image_enrichment(job: JobExecution) -> dict:
             plan,
             request,
             search_service=request.search_service,
+            force=bool(job.payload.get("force", False)),
+            review_config=_resolve_llm_config(user, job.payload),
         )
         _raise_if_cancelled(job.id)
         _transition_job(job.id, stage="export_ready", stage_message="Persisting enriched itinerary images.", progress_percent=96)

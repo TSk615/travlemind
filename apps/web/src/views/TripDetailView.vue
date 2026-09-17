@@ -15,6 +15,7 @@ import type {
   TripRefineSession
 } from "@travelmind/shared-types"
 import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
+import PoiImage from "@/components/PoiImage.vue"
 import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
 import TmButton from "@/components/ui/TmButton.vue"
@@ -657,11 +658,11 @@ const hasPendingItemImages = computed(() =>
     )
   )
 )
-const shouldDisplayItinerary = computed(() => Boolean(trip.value?.itinerary && !hasPendingItemImages.value))
+const shouldDisplayItinerary = computed(() => Boolean(trip.value?.itinerary))
 const pendingImageDisplayTitle = computed(() => (locale.value === "zh-CN" ? "正在补充景点图片" : "Adding attraction images"))
 const pendingImageDisplayMessage = computed(() =>
   locale.value === "zh-CN"
-    ? "攻略已生成，正在按 Trip.com、Pixabay、Pexels 补图，完成后会自动展示完整攻略。"
+    ? "攻略已生成，正在补充可追溯的景点实景图。"
     : "The itinerary is generated. We are adding images from Trip.com, Pixabay, and Pexels, then the full guide will appear automatically."
 )
 const imageEnrichmentCounts = computed(() => {
@@ -972,6 +973,7 @@ const stayHotelFields = computed(() => {
   }
   return [
     { label: locale.value === "zh-CN" ? "推荐酒店" : "Recommended hotel", value: fieldValue(hotel.name) },
+    { label: "来源核验", value: hotel.identity_status === "page_verified" ? "名称与来源页面已核对；房价和可订状态待确认" : "待核验" },
     { label: locale.value === "zh-CN" ? "区域" : "Area", value: fieldValue(hotel.area) },
     { label: locale.value === "zh-CN" ? "类型" : "Type", value: fieldValue(hotel.hotel_type) },
     { label: locale.value === "zh-CN" ? "价格" : "Price", value: fieldValue(hotel.price_hint) },
@@ -991,7 +993,8 @@ const stayHighlights = computed(() => {
     ...(stay.review_notes ?? []),
     ...(stay.preference_match_notes ?? []),
     ...(stay.price_timeliness_notes ?? []),
-    ...(stay.hotel_risks ?? [])
+    ...(stay.hotel_risks ?? []),
+    ...(stay.final_recommended_hotel?.evidence_notes ?? [])
   ]).slice(0, 6)
 })
 const stayCandidateRows = computed(() => (stayRecommendation.value?.hotel_candidates ?? []).slice(0, 3))
@@ -1042,6 +1045,7 @@ const transportBookingHighlights = computed(() => {
     return true
   })
 })
+const transportServiceCandidates = computed(() => (transportBookingSummary.value?.service_candidates ?? []).slice(0, 6))
 const reservationEntries = computed(() => {
   if (!trip.value?.itinerary) {
     return []
@@ -1464,6 +1468,9 @@ function coerceTransportBookingSummary(raw: Record<string, unknown> | null | und
   const summary: TransportBookingSummary = {
     summary: typeof raw.summary === "string" ? raw.summary : null,
     recommended_option: typeof raw.recommended_option === "string" ? raw.recommended_option : null,
+    service_candidates: Array.isArray(raw.service_candidates)
+      ? raw.service_candidates.filter((item): item is NonNullable<TransportBookingSummary["service_candidates"]>[number] => Boolean(item && typeof item === "object"))
+      : [],
     estimated_intercity_cost: Number.isFinite(estimatedIntercityCost) ? estimatedIntercityCost : 0,
     estimated_local_transport_cost: Number.isFinite(estimatedLocalTransportCost) ? estimatedLocalTransportCost : 0,
     booking_required: Boolean(raw.booking_required),
@@ -1485,6 +1492,7 @@ function coerceTransportBookingSummary(raw: Record<string, unknown> | null | und
     (summary.pass_or_ticket_notes?.length ?? 0) > 0 ||
     (summary.reminders?.length ?? 0) > 0 ||
     (summary.notes?.length ?? 0) > 0 ||
+    (summary.service_candidates?.length ?? 0) > 0 ||
     (summary.source_urls?.length ?? 0) > 0
   return hasAnyTransportBookingSignal ? summary : null
 }
@@ -2192,7 +2200,7 @@ async function retryImageEnrichment() {
   imageEnrichPending.value = true
   imageEnrichError.value = null
   try {
-    const job = await api.enrichTripImages(tripId.value)
+    const job = await api.enrichTripImages(tripId.value, true)
     activeJob.value = job
     await pollJob(job.job_id, "image_enrich")
   } catch (value) {
@@ -2608,6 +2616,9 @@ onBeforeUnmount(() => {
 
           <!-- Budget -->
           <section v-if="budgetSummary" id="budget" class="tm-detail__section">
+            <p v-if="budgetSummary.incomplete" class="tm-detail__section-desc">
+              尚有未计价费用，当前余额仅供参考：{{ budgetSummary.unpriced_items?.join("、") }}
+            </p>
             <div class="tm-detail__section-header">
               <p class="tm-detail__section-kicker">{{ budgetPanelTitle }}</p>
               <h2 class="tm-detail__section-title">{{ budgetPanelTitle }}</h2>
@@ -2670,6 +2681,21 @@ onBeforeUnmount(() => {
               <div v-if="transportBookingHighlights.length" class="tm-detail__chips">
                 <span v-for="note in transportBookingHighlights" :key="note" class="tm-detail__chip">{{ note }}</span>
               </div>
+              <ul v-if="transportServiceCandidates.length" class="tm-detail__list">
+                <li v-for="candidate in transportServiceCandidates" :key="`${candidate.scope}-${candidate.service_number}-${candidate.departure_date}`">
+                  <strong>{{ candidate.scope === "return" ? "返程" : "去程" }} · {{ candidate.service_number }}</strong>
+                  <span> · {{ candidate.origin }} {{ candidate.departure_time }} → {{ candidate.destination }} {{ candidate.arrival_time }}</span>
+                  <span v-if="candidate.fare_class || candidate.fare_amount"> · {{ candidate.fare_class || "参考票价" }} {{ typeof candidate.fare_amount === "number" ? formatCurrency(candidate.fare_amount) : "待确认" }}</span>
+                  <p class="tm-detail__muted">
+                    {{ candidate.schedule_status === "date_specific" ? "指定日期计划时刻" : "静态参考时刻" }}
+                    · {{ candidate.evidence_status === "verified" ? "来源正文已复核" : candidate.evidence_status === "referenced" ? "有来源，正文待复核" : candidate.evidence_status === "conflicted" ? "来源存在冲突" : "未记录复核状态" }}
+                    · 余票/实时状态{{ candidate.availability_status === "unknown" ? "未核验" : candidate.availability_status }}
+                    · 查询于 {{ candidate.schedule_checked_at }}
+                  </p>
+                  <p v-if="candidate.evidence_reason" class="tm-detail__muted">{{ candidate.evidence_reason }}</p>
+                  <a class="tm-detail__link" :href="candidate.source_url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
+                </li>
+              </ul>
               <a v-if="transportBookingSummary.official_booking_url" class="tm-detail__link" :href="transportBookingSummary.official_booking_url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
             </div>
             <div v-if="reservationEntries.length" class="tm-detail__subsection">
@@ -2886,17 +2912,44 @@ onBeforeUnmount(() => {
                   <section v-if="day.weather" class="tm-detail__weather">
                     <span class="tm-detail__badge">{{ locale === "zh-CN" ? "天气" : "Weather" }}</span>
                     <p>{{ day.weather.summary }}</p>
+                    <p v-if="day.weather.condition || day.weather.temperature_min_c || day.weather.temperature_max_c || day.weather.precipitation_probability || day.weather.wind" class="tm-detail__muted">
+                      {{ [
+                        day.weather.condition,
+                        day.weather.temperature_min_c || day.weather.temperature_max_c ? `${day.weather.temperature_min_c || "?"}–${day.weather.temperature_max_c || "?"}°C` : null,
+                        day.weather.precipitation_probability ? `降水概率 ${day.weather.precipitation_probability}` : null,
+                        day.weather.wind
+                      ].filter(Boolean).join(" · ") }}
+                    </p>
+                    <p v-if="day.weather.checked_at" class="tm-detail__muted">
+                      {{ day.weather.forecast_type === "seasonal_reference" ? "季节性参考" : "逐日预报快照" }}
+                      · {{ day.weather.evidence_status === "verified" ? "来源正文已复核" : day.weather.evidence_status === "referenced" ? "有来源，正文待复核" : day.weather.evidence_status === "conflicted" ? "部分字段与来源冲突" : "未记录复核状态" }}
+                      · 查询于 {{ day.weather.checked_at }}<span v-if="day.weather.forecast_updated_at && day.weather.forecast_updated_at !== 'unknown'"> · 来源更新于 {{ day.weather.forecast_updated_at }}</span>
+                    </p>
+                    <p v-if="day.weather.evidence_reason" class="tm-detail__muted">{{ day.weather.evidence_reason }}</p>
                     <ul v-if="day.weather.notes.length" class="tm-detail__list--nested">
                       <li v-for="note in day.weather.notes" :key="note">{{ note }}</li>
                     </ul>
+                    <div v-if="day.weather.citations?.length" class="tm-detail__chips tm-detail__weather-sources">
+                      <a
+                        v-for="(sourceUrl, sourceIndex) in day.weather.citations.slice(0, 3)"
+                        :key="`${day.day_index}-weather-${sourceUrl}`"
+                        class="tm-detail__link"
+                        :href="sourceUrl"
+                        target="_blank"
+                        rel="noreferrer"
+                      >{{ locale === "zh-CN" ? `天气来源 ${sourceIndex + 1}` : `Weather source ${sourceIndex + 1}` }}</a>
+                    </div>
                   </section>
 
                   <ol class="tm-detail__items">
                     <li v-for="item in day.items" :key="item.id" class="tm-detail__item">
                       <div class="tm-detail__item-time">
-                        {{ item.start_time }} - {{ item.end_time }}
+                        {{ item.start_time }} - {{ item.end_day_offset ? '+' + item.end_day_offset + '天 ' : '' }}{{ item.end_time }}
                         <span
-                          v-if="['transport', 'transit', 'rail', 'flight', 'ferry'].includes(item.type.toLowerCase()) && item.booking_info && !item.booking_info.schedule_verified"
+                          v-if="['transport', 'transit', 'rail', 'flight', 'ferry'].includes(item.type.toLowerCase()) && item.booking_info && !item.booking_info.schedule_verified && ['reference', 'date_specific'].includes(item.booking_info.schedule_status || '')"
+                        >（{{ item.booking_info.evidence_status === 'verified' ? '来源正文已复核' : '正文待复核' }}，运行/余票待确认）</span>
+                        <span
+                          v-else-if="['transport', 'transit', 'rail', 'flight', 'ferry'].includes(item.type.toLowerCase()) && item.booking_info && !item.booking_info.schedule_verified"
                         >（建议时段，班次待确认）</span>
                       </div>
                       <div class="tm-detail__item-body">
@@ -2913,11 +2966,38 @@ onBeforeUnmount(() => {
                         <ul v-if="itemBookingLines(item).length" class="tm-detail__list--nested">
                           <li v-for="line in itemBookingLines(item)" :key="`${item.id}-${line}`">{{ line }}</li>
                         </ul>
+                        <section v-if="item.nearby_suggestions?.length" class="tm-detail__nearby">
+                          <p class="tm-detail__nearby-title">附近与同片区备选</p>
+                          <ul class="tm-detail__nearby-list">
+                            <li v-for="suggestion in item.nearby_suggestions" :key="`${item.id}-nearby-${suggestion.name}`" class="tm-detail__nearby-item">
+                              <div>
+                                <strong>{{ suggestion.name }}</strong>
+                                <span v-if="suggestion.area || suggestion.suggested_time" class="tm-detail__muted">
+                                  · {{ [suggestion.area, suggestion.suggested_time].filter(Boolean).join(' · ') }}
+                                </span>
+                                <span class="tm-detail__badge">{{ suggestion.relation_type === 'suggested_pair' ? '推荐搭配' : '同片区备选' }}</span>
+                              </div>
+                              <p v-if="suggestion.reason">{{ suggestion.reason }}</p>
+                              <p v-if="suggestion.relation_note" class="tm-detail__muted">{{ suggestion.relation_note }}</p>
+                              <p v-if="suggestion.highlights?.length" class="tm-detail__muted">看点：{{ suggestion.highlights.join('、') }}</p>
+                              <div v-if="suggestion.source_urls?.length" class="tm-detail__chips">
+                                <a
+                                  v-for="(sourceUrl, sourceIndex) in suggestion.source_urls"
+                                  :key="`${item.id}-${suggestion.name}-${sourceUrl}`"
+                                  class="tm-detail__link"
+                                  :href="sourceUrl"
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >参考来源 {{ sourceIndex + 1 }}</a>
+                              </div>
+                            </li>
+                          </ul>
+                        </section>
                         <a v-if="item.booking_info?.official_booking_url" class="tm-detail__link" :href="item.booking_info.official_booking_url" target="_blank" rel="noreferrer">{{ copy.sourceOpen }}</a>
                         <p v-if="formatImageStatus(item.image_status)" class="tm-detail__muted">{{ formatImageStatus(item.image_status) }}</p>
                         <p v-if="item.image_status === 'failed' && item.image_failure_reason" class="tm-detail__muted">{{ item.image_failure_reason }}</p>
                         <div v-if="item.image_urls?.length" class="tm-detail__visual-images">
-                          <img v-for="imageUrl in item.image_urls.slice(0, 3)" :key="imageUrl" :src="imageUrl" :alt="item.name" loading="lazy" />
+                          <PoiImage :urls="item.image_urls" :backups="item.image_backup_urls" :alt="item.name" />
                         </div>
                         <div v-if="item.image_source_urls?.length" class="tm-detail__chips">
                           <a v-for="sourceUrl in item.image_source_urls.slice(0, 3)" :key="`${item.id}-${sourceUrl}`" class="tm-detail__link" :href="sourceUrl" target="_blank" rel="noreferrer">{{ copy.imageSourcesLabel ?? "Source" }}</a>
@@ -3378,6 +3458,11 @@ onBeforeUnmount(() => {
 .tm-detail__item-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--tm-space-2); }
 .tm-detail__item-badges { display: flex; gap: var(--tm-space-1); flex-wrap: wrap; }
 .tm-detail__item-note { font-size: var(--tm-text-sm); color: var(--tm-tea); margin: 0; }
+.tm-detail__nearby { margin-top: var(--tm-space-2); padding: var(--tm-space-3); border-radius: var(--tm-radius-md); background: rgba(93, 122, 99, 0.06); }
+.tm-detail__nearby-title { margin: 0 0 var(--tm-space-2); font-size: var(--tm-text-sm); font-weight: 700; color: var(--tm-moss); }
+.tm-detail__nearby-list { display: flex; flex-direction: column; gap: var(--tm-space-3); margin: 0; padding: 0; list-style: none; }
+.tm-detail__nearby-item { font-size: var(--tm-text-sm); color: var(--tm-tea); }
+.tm-detail__nearby-item p { margin: var(--tm-space-1) 0 0; }
 
 .tm-detail__visual-images { display: flex; gap: var(--tm-space-3); overflow-x: auto; }
 .tm-detail__visual-images img { width: 120px; height: 80px; object-fit: cover; border-radius: var(--tm-radius-md); }

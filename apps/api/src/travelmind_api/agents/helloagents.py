@@ -14,13 +14,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from travelmind_api.agents.base import (
     AgentRunStep,
     AgentTrace,
     BookingInfo,
     ExportDraft,
+    NearbyPoiSuggestion,
     PlannedDay,
     PlannedDayWeather,
     PlannedItem,
@@ -42,6 +43,12 @@ from travelmind_api.agents.helloagents_llm import (
 from travelmind_api.core.logging_utils import log_job_event
 from travelmind_api.core.security import generate_identifier, generate_workflow_id
 from travelmind_api.services.budgeting import enrich_plan_with_budget
+from travelmind_api.services.execution_validation import has_closed_weekday_constraint, validate_timeline
+from travelmind_api.services.entity_identity import normalize_identity, entity_matches
+from travelmind_api.services.hotel_evidence import verify_hotel_pages
+from travelmind_api.services.transport_evidence import verify_transport_candidate_pages
+from travelmind_api.services.weather_evidence import has_unsupported_weather_condition, verify_daily_forecast_pages
+from travelmind_api.services.planning_details import BookingDetails, HotelEvidence, TransportLeg, TransportServiceCandidate
 from travelmind_api.services.llm import LlmConfig, LlmEndpointConfig, LlmPlanningPayload, OpenAICompatibleClient, build_planning_messages, parse_planning_response
 from travelmind_api.services.llm.localization import build_output_language_instruction, infer_output_locale, is_chinese_output, planning_payload_needs_language_repair
 from travelmind_api.prompts.roles.helloagents import (
@@ -308,6 +315,8 @@ class HelloAgentsPoiGrounding(BaseModel):
             return True
         if any(token in path for token in ("/search", "/searchresult", "/query")):
             return True
+        if any(token in path for token in ("/hotels/", "/hotel/", "/restaurants/", "/restaurant/")):
+            return True
         return False
 
     @classmethod
@@ -345,7 +354,6 @@ class HelloAgentsPoiGrounding(BaseModel):
     def _map_top_pois_to_featured_pois(cls, top_pois: list[HelloAgentsTopPoiItem]) -> dict[str, Any]:
         featured: list[HelloAgentsResearchPoi] = []
         candidate_areas: list[str] = []
-        source_usage: dict[str, int] = {}
         for item in top_pois:
             name = str(item.name or item.name_cn or item.name_en or "").strip()
             if not name:
@@ -359,12 +367,10 @@ class HelloAgentsPoiGrounding(BaseModel):
                     *[str(value).strip() for value in item.source_urls if str(value).strip()],
                 ]
             )
-            source_urls: list[str] = []
-            for source_url in source_candidates:
-                if source_usage.get(source_url, 0) >= 2:
-                    continue
-                source_usage[source_url] = source_usage.get(source_url, 0) + 1
-                source_urls.append(source_url)
+            # A single regional guide may legitimately name several nearby
+            # POIs. Keep every valid citation here; concentration is a review
+            # signal, not a reason to erase otherwise useful evidence.
+            source_urls = source_candidates
             evidence_notes = [str(value).strip() for value in item.evidence_notes if str(value).strip()][:2]
             if not evidence_notes:
                 evidence_notes = [text for text in [str(item.description or "").strip(), str(item.tips or "").strip()] if text][:2]
@@ -444,10 +450,71 @@ class HelloAgentsPoiGrounding(BaseModel):
 
 class HelloAgentsDailyForecast(BaseModel):
     date: date
+    forecast_type: str = Field(default="unknown")
+    condition: str = Field(default="")
+    temperature_min_c: str = Field(default="")
+    temperature_max_c: str = Field(default="")
+    precipitation_probability: str = Field(default="")
+    wind: str = Field(default="")
     outlook: str = Field(default="")
     timing_advice: str = Field(default="")
     risk: str = Field(default="")
+    forecast_updated_at: str = Field(default="unknown")
+    checked_at: str = Field(default="")
     source_urls: list[str] = Field(default_factory=list)
+    evidence_status: str = Field(default="unknown")
+    evidence_checked_at: str = Field(default="")
+    evidence_reason: str = Field(default="")
+    field_evidence: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator(
+        "forecast_type",
+        "condition",
+        "temperature_min_c",
+        "temperature_max_c",
+        "precipitation_probability",
+        "wind",
+        "forecast_updated_at",
+        "checked_at",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_display_value(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @field_validator("precipitation_probability", mode="before")
+    @classmethod
+    def _coerce_unknown_probability(cls, value: Any) -> str:
+        normalized = str(value or "").strip()
+        if normalized.casefold() in {"unknown", "n/a", "na", "not available", "未提供", "暂无"}:
+            return ""
+        return normalized
+
+    @model_validator(mode="after")
+    def _prevent_monthly_sources_from_claiming_short_range(self):
+        monthly_markers = (
+            "monthly", "month-weather", "january-weather", "february-weather", "march-weather",
+            "april-weather", "may-weather", "june-weather", "july-weather", "august-weather",
+            "september-weather", "october-weather", "november-weather", "december-weather",
+        )
+        uses_monthly_source = any(
+            any(marker in str(url).casefold() for marker in monthly_markers)
+            or bool(re.search(r"/20\d{4}(?:\.html|/|$)", str(url).casefold()))
+            for url in self.source_urls
+        )
+        required_values = (
+            self.condition,
+            self.temperature_min_c,
+            self.temperature_max_c,
+            self.checked_at,
+        )
+        if self.forecast_type == "short_range" and (uses_monthly_source or not all(required_values) or not self.source_urls):
+            self.forecast_type = "seasonal_reference" if uses_monthly_source else "unknown"
+            warning = "该来源未形成字段完整的最新逐日预报，仅按参考信息使用。"
+            self.risk = f"{self.risk.rstrip('。')}；{warning}" if self.risk.strip() else warning
+        return self
 
 
 class HelloAgentsWeatherGuidance(BaseModel):
@@ -503,9 +570,11 @@ class HelloAgentsFoodRecommendation(BaseModel):
 HelloAgentsWeatherGuidance.model_rebuild()
 
 
-class HelloAgentsHotelCandidate(BaseModel):
+class HelloAgentsHotelCandidate(HotelEvidence):
     name: str = Field(min_length=1)
+    city: str = Field(default="")
     area: str = Field(default="")
+    address: str = Field(default="")
     hotel_type: str = Field(default="")
     reason: str = Field(default="")
     price_hint: str = Field(default="")
@@ -518,6 +587,7 @@ class HelloAgentsHotelCandidate(BaseModel):
     booking_confidence: str = Field(default="")
     caveats: list[str] = Field(default_factory=list)
     source_urls: list[str] = Field(default_factory=list)
+    source_page_titles: list[str] = Field(default_factory=list)
 
 
 class HelloAgentsHotelRecommendation(BaseModel):
@@ -558,6 +628,8 @@ class HelloAgentsTransportOption(BaseModel):
 
 
 class HelloAgentsTransportGuidance(BaseModel):
+    legs: list[TransportLeg] = Field(default_factory=list)
+    service_candidates: list[TransportServiceCandidate] = Field(default_factory=list)
     intercity_options: list[HelloAgentsTransportOption] = Field(default_factory=list)
     arrival_strategy: list[str] = Field(default_factory=list)
     local_mobility_strategy: list[str] = Field(default_factory=list)
@@ -579,6 +651,38 @@ class HelloAgentsTransportGuidance(BaseModel):
     reminders: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     source_urls: list[str] = Field(default_factory=list)
+
+    @field_validator("legs", mode="before")
+    @classmethod
+    def _infer_missing_leg_scopes(cls, value: Any):
+        if not isinstance(value, list):
+            return value
+        legs = [dict(item) if isinstance(item, dict) else item for item in value]
+        unresolved: list[tuple[int, dict[str, Any]]] = []
+        local_modes = ("metro", "subway", "bus", "taxi", "walk", "local", "市内", "地铁", "公交", "步行")
+        for index, leg in enumerate(legs):
+            if not isinstance(leg, dict):
+                continue
+            if not leg.get("scope") and leg.get("type"):
+                leg["scope"] = leg["type"]
+            if leg.get("scope"):
+                continue
+            mode = str(leg.get("mode") or "").casefold()
+            origin = normalize_identity(str(leg.get("origin") or ""))
+            destination = normalize_identity(str(leg.get("destination") or ""))
+            if any(token in mode for token in local_modes) or (origin and origin == destination):
+                leg["scope"] = "local"
+            else:
+                unresolved.append((index, leg))
+        unresolved.sort(key=lambda row: (str(row[1].get("departure_date") or ""), row[0]))
+        if len(unresolved) == 1:
+            unresolved[0][1]["scope"] = "intercity"
+        elif unresolved:
+            unresolved[0][1]["scope"] = "outbound"
+            unresolved[-1][1]["scope"] = "return"
+            for _, leg in unresolved[1:-1]:
+                leg["scope"] = "intercity"
+        return legs
 
     @field_validator("estimated_intercity_cost", "estimated_local_transport_cost", mode="before")
     @classmethod
@@ -740,10 +844,40 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         }
         self._last_checkpoint["completed_roles"] = [role for role in _ROLE_SEQUENCE if isinstance(roles.get(role), dict) and roles[role].get("status") == "completed"]
 
+    def _record_checkpoint_raw_role(self, role_name: str, raw_response: str, **metadata: Any) -> None:
+        if self._last_checkpoint is None or not raw_response:
+            return
+        roles = self._last_checkpoint.setdefault("roles", {})
+        roles[role_name] = {
+            "status": "raw_completed",
+            "raw_response": raw_response,
+            **{key: value for key, value in metadata.items() if value not in (None, "", [], {})},
+        }
+
+    def _load_checkpoint_raw_role(self, role_name: str, *, prompt_version: str, model_name: str) -> str:
+        roles = self._last_checkpoint.get("roles", {}) if isinstance(self._last_checkpoint, dict) else {}
+        entry = roles.get(role_name) if isinstance(roles, dict) else None
+        if not isinstance(entry, dict) or entry.get("status") != "raw_completed":
+            return ""
+        if entry.get("prompt_version") != prompt_version or entry.get("model") != model_name:
+            return ""
+        return str(entry.get("raw_response") or "")
+
     def _record_checkpoint_failure(self, role_name: str, exc: Exception) -> None:
         if self._last_checkpoint is None:
             return
         message = str(exc).strip() or exc.__class__.__name__
+        role_entry = self._last_checkpoint.get("roles", {}).get(role_name)
+        if (
+            isinstance(role_entry, dict)
+            and role_entry.get("status") == "raw_completed"
+            and message.startswith("行程可执行性校验失败：")
+        ):
+            # Preserve the raw response for audit, but do not replay a model
+            # draft that already failed deterministic execution/quality
+            # checks. A resumed job should rerun only the planner role.
+            role_entry["status"] = "validation_failed"
+            role_entry["validation_error"] = message
         self._last_checkpoint["failed_role"] = role_name
         self._last_checkpoint["failure_message"] = message
         self._last_checkpoint["completed_roles"] = [
@@ -1052,6 +1186,17 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     self._record_checkpoint_failure(transport_role.role_name, exc)
                     raise
         self._log_event("helloagents_secondary_specialists_parallel_completed", message="Secondary specialist roles completed.")
+        transport = self._sanitize_transport_service_candidates(transport, request)
+        from travelmind_api.services.trip_image_enrichment import _resolve_tavily_image_search_config
+        evidence_search_config = _resolve_tavily_image_search_config(request.search_service)
+        weather = verify_daily_forecast_pages(weather, evidence_search_config)
+        transport = verify_transport_candidate_pages(transport, evidence_search_config)
+        hotel = verify_hotel_pages(hotel, evidence_search_config)
+        hotel = self._sanitize_hotel_recommendation(
+            hotel,
+            destination=request.destination,
+            accommodation_preference=request.accommodation_preference,
+        )
 
         poi_tool_results = poi_payload.get("tool_results") if isinstance(poi_payload.get("tool_results"), dict) else {}
         weather_tool_results = weather_payload.get("tool_results") if isinstance(weather_payload.get("tool_results"), dict) else {}
@@ -1113,7 +1258,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             self._build_agent_run(
                 hotel_role,
                 role_llm_configs[hotel_role.role_name],
-                self._summarize_hotels(hotel),
+                self._summarize_hotels(hotel, destination=request.destination),
                 extra_citations=hotel_citations,
             )
         )
@@ -1137,7 +1282,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             self._emit_role_progress(planner_role)
             planner_poi_collection = self._build_planner_poi_collection_payload(poi_collection)
             planner_weather = self._build_planner_weather_payload(weather, expected_days=max(1, (request.end_date - request.start_date).days + 1))
-            planner_hotels = self._build_planner_hotels_payload(hotel)
+            planner_hotels = self._build_planner_hotels_payload(
+                hotel,
+                destination=request.destination,
+                accommodation_preference=request.accommodation_preference,
+            )
             planner_transport = self._build_planner_transport_payload(transport)
             planner_payload = {
                 "trip_request": trip_payload,
@@ -1155,16 +1304,35 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 planner_payload_bytes=len(json.dumps(planner_payload, ensure_ascii=False)),
             )
             try:
-                planner_response = self._run_role(
-                    module=module,
-                    role_config=planner_role,
-                    llm_config=role_llm_configs[planner_role.role_name],
-                    input_payload=planner_payload,
+                planner_response = self._load_checkpoint_raw_role(
+                    planner_role.role_name,
+                    prompt_version=planner_role.prompt_version,
+                    model_name=role_llm_configs[planner_role.role_name].model,
                 )
+                if not planner_response:
+                    planner_response = self._run_role(
+                        module=module,
+                        role_config=planner_role,
+                        llm_config=role_llm_configs[planner_role.role_name],
+                        input_payload=planner_payload,
+                    )
+                    self._record_checkpoint_raw_role(
+                        planner_role.role_name,
+                        planner_response,
+                        prompt_version=planner_role.prompt_version,
+                        model=role_llm_configs[planner_role.role_name].model,
+                    )
                 self._log_event("helloagents_planner_response_received", message="Planner response received.", response_chars=len(planner_response))
                 final_payload = parse_planning_response(planner_response)
-                final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request)
-                self._validate_execution_constraints(final_payload, request, transport)
+                final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request, transport)
+                final_payload = self._normalize_departure_waiting_blocks(final_payload, transport)
+                self._validate_execution_constraints(
+                    final_payload,
+                    request,
+                    transport,
+                    available_poi_count=len(poi_collection.get("pois", [])),
+                    poi_grounding=poi_grounding,
+                )
                 self._record_checkpoint_role(
                     planner_role.role_name,
                     final_payload,
@@ -1174,8 +1342,15 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             except Exception as exc:
                 self._record_checkpoint_failure(planner_role.role_name, exc)
                 raise
-        final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request)
-        self._validate_execution_constraints(final_payload, request, transport)
+        final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request, transport)
+        final_payload = self._normalize_departure_waiting_blocks(final_payload, transport)
+        self._validate_execution_constraints(
+            final_payload,
+            request,
+            transport,
+            available_poi_count=len(poi_collection.get("pois", [])),
+            poi_grounding=poi_grounding,
+        )
         self._log_event("helloagents_planner_response_parsed", message="Planner response parsed into structured payload.", day_count=len(final_payload.days))
         repair_needed = planning_payload_needs_language_repair(final_payload, request)
         agent_runs.append(self._build_agent_run(planner_role, role_llm_configs[planner_role.role_name], self._summarize_itinerary(final_payload.summary, final_payload.days, final_payload.risks)))
@@ -1195,6 +1370,28 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "Transport guidance uses POI cluster distribution and the configured search provider to ground transfer, fare, and sequencing assumptions before final planning.",
             "Executed through the HelloAgents PoC adapter boundary with third-party-only role execution.",
         ]
+        expected_weather_dates = {
+            request.start_date + timedelta(days=offset)
+            for offset in range(max(1, (request.end_date - request.start_date).days + 1))
+        }
+        dated_weather = {
+            forecast.date: tuple(dict.fromkeys(str(url).strip() for url in forecast.source_urls if str(url).strip()))
+            for forecast in weather.daily_forecasts
+        }
+        if any(not dated_weather.get(day) for day in expected_weather_dates):
+            pipeline_notes.append("天气已按日期生成，但至少一天没有独立逐日来源；该日仅保留城市/月份参考并标注风险。")
+        elif (
+            len(set(dated_weather.values())) == 1
+            and len(expected_weather_dates) > 1
+            and any(forecast.forecast_type != "short_range" for forecast in weather.daily_forecasts)
+        ):
+            pipeline_notes.append("天气各日共用同一组非短期来源，不能视为最新逐日预报；出发前应刷新。")
+        if any(forecast.evidence_status == "referenced" for forecast in weather.daily_forecasts):
+            pipeline_notes.append("至少一天逐日天气保留了日期与来源，但正文抓取或解析未完成；已作为参考展示并提示出发前刷新。")
+        if any(forecast.evidence_status == "conflicted" for forecast in weather.daily_forecasts):
+            pipeline_notes.append("至少一天逐日天气与来源正文存在字段冲突；仅清空冲突字段，其余字段继续按证据等级展示。")
+        if any(not str(forecast.precipitation_probability or "").strip() for forecast in weather.daily_forecasts):
+            pipeline_notes.append("至少一天来源未提供可核验的降水概率；已留空该字段，不根据天气现象推算百分比。")
         if poi_fallback_reason:
             pipeline_notes.append(
                 "POI specialist role failed or timed out; continued with deterministic POI grounding from trip context."
@@ -1290,10 +1487,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 system_prompt=f"{poi_prompt.system_prompt} {language_instruction}{locale_clause}",
                 prompt_version=poi_prompt.version,
                 progress_percent=44,
-                max_tokens=3200,
+                max_tokens=4800,
                 retry_attempts=1,
-                min_timeout_seconds=120.0,
-                timeout_cap_seconds=180.0,
+                min_timeout_seconds=300.0,
+                timeout_cap_seconds=420.0,
                 stream=True,
             ),
             # weather_specialist:
@@ -1455,7 +1652,8 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         if llm_config is None:
             return False
         model = str(getattr(llm_config, "model", "") or "").strip().lower()
-        return role_name in {"poi_specialist", *_DIRECT_GROK_SEARCH_ROLES} and model == "web/grok-chat-fast"
+        search_model = model == "web/grok-chat-fast" or model.startswith("console/grok-4.20")
+        return role_name in {"poi_specialist", *_DIRECT_GROK_SEARCH_ROLES} and search_model
 
     def _role_config_uses_search_capable_grok(self, role_name: str, llm_config: LlmEndpointConfig) -> bool:
         return self._has_native_search(role_name, llm_config)
@@ -2033,6 +2231,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _build_weather_research_payload(self, request: PlanningRequest, brief: HelloAgentsBrief) -> dict[str, Any]:
         trip_days = max(1, (request.end_date - request.start_date).days + 1)
+        expected_dates = [
+            (request.start_date + timedelta(days=offset)).isoformat()
+            for offset in range(trip_days)
+        ]
         return {
             "trip_request": self._build_trip_payload(request),
             "planning_brief": brief.model_dump(mode="json"),
@@ -2043,6 +2245,21 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 "days": trip_days,
                 "destination": request.destination,
                 "weather_focus": self._weather_focus_for_month(request.start_date.month),
+            },
+            "search_requirements": {
+                "expected_dates": expected_dates,
+                "prefer_short_range_daily_forecast": True,
+                "required_fields": [
+                    "condition",
+                    "temperature_min_c",
+                    "temperature_max_c",
+                    "precipitation_probability",
+                    "wind",
+                    "forecast_updated_at",
+                    "checked_at",
+                    "source_urls",
+                ],
+                "monthly_sources_allowed_only_outside_forecast_range": True,
             },
         }
 
@@ -2077,6 +2294,24 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 "transport_mode": request.transport_mode,
                 "travelers": request.travelers,
                 "pace": request.pace,
+            },
+            "search_requirements": {
+                "candidate_count_per_direction": 3,
+                "static_timetable_allowed": True,
+                "live_availability_required": False,
+                "required_fields": [
+                    "service_number",
+                    "origin",
+                    "destination",
+                    "departure_date",
+                    "departure_time",
+                    "arrival_time",
+                    "duration_minutes",
+                    "fare_amount",
+                    "schedule_checked_at",
+                    "source_url",
+                ],
+                "flight_fields_use_same_candidate_contract": True,
             },
         }
 
@@ -2141,10 +2376,22 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "daily_forecasts": [
                 {
                     "date": forecast.date.isoformat(),
+                    "forecast_type": forecast.forecast_type,
+                    "condition": self._truncate_planner_text(forecast.condition, 40),
+                    "temperature_min_c": forecast.temperature_min_c,
+                    "temperature_max_c": forecast.temperature_max_c,
+                    "precipitation_probability": forecast.precipitation_probability or None,
+                    "wind": self._truncate_planner_text(forecast.wind, 50),
                     "outlook": self._truncate_planner_text(forecast.outlook, 120),
                     "timing_advice": self._truncate_planner_text(forecast.timing_advice, 80),
                     "risk": self._truncate_planner_text(forecast.risk, 80),
+                    "forecast_updated_at": forecast.forecast_updated_at,
+                    "checked_at": forecast.checked_at,
                     "source_urls": [str(url).strip() for url in forecast.source_urls if str(url).strip()][:3],
+                    "evidence_status": forecast.evidence_status,
+                    "evidence_checked_at": forecast.evidence_checked_at,
+                    "evidence_reason": self._truncate_planner_text(forecast.evidence_reason, 100),
+                    "field_evidence": dict(forecast.field_evidence),
                 }
                 for forecast in weather.daily_forecasts[:expected_days]
             ],
@@ -2166,14 +2413,37 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "weather_risks": self._compact_planner_text_list(weather.weather_risks, limit=2, text_limit=80),
         }
 
-    def _build_planner_hotels_payload(self, hotel: HelloAgentsHotelRecommendation) -> dict[str, Any]:
-        verified_candidates = [candidate for candidate in hotel.hotel_candidates if self._is_verified_hotel_candidate(candidate)]
-        final_hotel = hotel.final_recommended_hotel if self._is_verified_hotel_candidate(hotel.final_recommended_hotel) else None
+    def _build_planner_hotels_payload(
+        self,
+        hotel: HelloAgentsHotelRecommendation,
+        *,
+        destination: str = "",
+        accommodation_preference: str = "",
+    ) -> dict[str, Any]:
+        hotel = self._sanitize_hotel_recommendation(
+            hotel,
+            destination=destination,
+            accommodation_preference=accommodation_preference,
+        )
+        all_candidates = [*hotel.hotel_candidates, *([hotel.final_recommended_hotel] if hotel.final_recommended_hotel else [])]
+        conflicting_urls = self._hotel_conflicting_source_urls(all_candidates)
+        verified_candidates = [
+            candidate
+            for candidate in hotel.hotel_candidates
+            if self._is_verified_hotel_candidate(candidate, destination=destination, blocked_urls=conflicting_urls)
+        ]
+        final_hotel = (
+            hotel.final_recommended_hotel
+            if self._is_verified_hotel_candidate(hotel.final_recommended_hotel, destination=destination, blocked_urls=conflicting_urls)
+            else None
+        )
         if final_hotel is None and verified_candidates:
             final_hotel = verified_candidates[0]
         hotel_risks = [str(item).strip() for item in hotel.hotel_risks if str(item).strip()]
         if (hotel.final_recommended_hotel or hotel.hotel_candidates) and final_hotel is None:
-            hotel_risks.append("Hotel specialist returned concrete hotel names without source URLs; planner received area-level stay guidance only.")
+            hotel_risks.append("Hotel specialist returned concrete hotel names without sufficient identity evidence; planner received area-level stay guidance only.")
+        if conflicting_urls:
+            hotel_risks.append("Hotel source URL mapped to conflicting hotel names; conflicting candidates were removed.")
         return {
             "recommended_areas": [str(area).strip() for area in hotel.recommended_areas if str(area).strip()][:3],
             "final_recommended_hotel": self._hotel_candidate_to_planner_dict(final_hotel) if final_hotel is not None else None,
@@ -2199,10 +2469,121 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             ),
         }
 
+    def _sanitize_hotel_recommendation(
+        self,
+        hotel: HelloAgentsHotelRecommendation | None,
+        *,
+        destination: str,
+        accommodation_preference: str = "",
+    ) -> HelloAgentsHotelRecommendation | None:
+        if hotel is None:
+            return None
+        hotel = hotel.model_copy(deep=True)
+        all_candidates = [c for c in [hotel.final_recommended_hotel, *hotel.hotel_candidates] if c]
+        blocked = self._hotel_conflicting_source_urls(all_candidates)
+        for candidate in all_candidates:
+            self._soften_hotel_candidate_claims(candidate)
+            pairs = [(url, candidate.source_page_titles[index] if index < len(candidate.source_page_titles) else "")
+                     for index, url in enumerate(candidate.source_urls)]
+            pairs = [(url, title) for url, title in pairs
+                     if not self._is_generic_hotel_source_url(url) and url.casefold() not in blocked
+                     and (url in candidate.verified_source_urls or self._hotel_entity_matches_source(candidate.name, title or url))]
+            candidate.source_urls = [url for url, _ in pairs]
+            candidate.source_page_titles = [title for _, title in pairs]
+        verified = [
+            candidate for candidate in hotel.hotel_candidates
+            if self._is_verified_hotel_candidate(candidate, destination=destination)
+            and self._hotel_matches_accommodation_preference(candidate, accommodation_preference)
+        ]
+        final = hotel.final_recommended_hotel
+        original_name = final.name if final else ""
+        final_is_compatible = bool(
+            final is not None
+            and self._is_verified_hotel_candidate(final, destination=destination)
+            and self._hotel_matches_accommodation_preference(final, accommodation_preference)
+        )
+        type_mismatches = [
+            candidate.name
+            for candidate in all_candidates
+            if self._is_verified_hotel_candidate(candidate, destination=destination)
+            and not self._hotel_matches_accommodation_preference(candidate, accommodation_preference)
+        ]
+        if not final_is_compatible:
+            final = verified[0] if verified else None
+        if final is not None:
+            final_identity = self._normalize_hotel_identity(final.name)
+            verified = [
+                candidate
+                for candidate in verified
+                if self._normalize_hotel_identity(candidate.name) != final_identity
+            ]
+        if final is None or final.name != original_name:
+            hotel.stay_strategy = [f"住宿以{final.area}为基地，具体路线按已选酒店地址核对。"] if final else ["尚无独立核验通过的酒店；请按住宿区域确认具体酒店。"]
+            hotel.hotel_risks = [
+                *[str(item).strip() for item in hotel.hotel_risks if str(item).strip()],
+                "酒店房价、可订房型及提前入住均需按旅行日期确认。",
+            ]
+            hotel.preference_match_notes = [
+                f"{final.name}：{final.reason}"
+            ] if final else []
+        verified_count = (1 if final is not None else 0) + len(verified)
+        if verified_count < 2:
+            hotel.hotel_risks = [
+                risk for risk in hotel.hotel_risks
+                if not re.search(r"多家.*(?:酒店|住宿).*(?:核验|通过)", str(risk))
+            ]
+            hotel.hotel_risks.append(
+                f"当前仅有{verified_count}家住宿同时通过实体与偏好类型核验，暂不提供缺少同口径证据的横向比较。"
+            )
+        if type_mismatches:
+            hotel.hotel_risks.append(
+                f"已核验但住宿类型与用户偏好不一致，未作为最终推荐：{'、'.join(dict.fromkeys(type_mismatches))}。"
+            )
+        if blocked:
+            hotel.hotel_risks.append("不同酒店共用且无法消歧的来源已剔除；保留其他有效来源。")
+        hotel.hotel_risks = list(dict.fromkeys(str(item).strip() for item in hotel.hotel_risks if str(item).strip()))
+        for field in ("stay_strategy", "budget_notes", "review_notes", "preference_match_notes"):
+            setattr(hotel, field, [self._soften_hotel_text(item) for item in getattr(hotel, field)])
+        return hotel.model_copy(update={"final_recommended_hotel": final, "hotel_candidates": verified})
+
+    @staticmethod
+    def _soften_hotel_text(value: str) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"(?:完全|完美|高度)匹配", "整体符合", text)
+        text = re.sub(r"步行\s*\d+\s*米内(?:即)?(?:可)?(?:到达|直达|达)", "靠近", text)
+        return re.sub(r"(?i)poi", "景点", text)
+
+    @classmethod
+    def _soften_hotel_candidate_claims(cls, candidate: HelloAgentsHotelCandidate) -> None:
+        for field in ("reason", "review_summary", "preference_match"):
+            setattr(candidate, field, cls._soften_hotel_text(getattr(candidate, field)))
+
+    @classmethod
+    def _hotel_matches_accommodation_preference(
+        cls,
+        candidate: HelloAgentsHotelCandidate,
+        accommodation_preference: str,
+    ) -> bool:
+        preference = str(accommodation_preference or "").casefold()
+        candidate_text = f"{candidate.name} {candidate.hotel_type}".casefold()
+        explicitly_requests_hotel = any(marker in preference for marker in ("酒店", "hotel", "连锁", "星级"))
+        allows_alternative_lodging = any(
+            marker in preference
+            for marker in ("民宿", "公寓", "客栈", "青旅", "homestay", "apartment", "hostel", "b&b", "bnb")
+        )
+        is_alternative_lodging = any(
+            marker in candidate_text
+            for marker in ("民宿", "公寓", "客栈", "青旅", "homestay", "apartment", "hostel", "b&b", "bnb")
+        )
+        return not (explicitly_requests_hotel and not allows_alternative_lodging and is_alternative_lodging)
+
     def _hotel_candidate_to_planner_dict(self, candidate: HelloAgentsHotelCandidate) -> dict[str, Any]:
         return {
+            **{key: getattr(candidate, key) for key in HotelEvidence.model_fields},
             "name": candidate.name,
+            "city": candidate.city,
             "area": candidate.area,
+            "address": candidate.address,
             "hotel_type": candidate.hotel_type,
             "reason": candidate.reason,
             "price_hint": candidate.price_hint,
@@ -2215,18 +2596,42 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "booking_confidence": candidate.booking_confidence,
             "caveats": [str(item).strip() for item in candidate.caveats if str(item).strip()][:4],
             "source_urls": [str(item).strip() for item in candidate.source_urls if str(item).strip()][:4],
+            "source_page_titles": [str(item).strip() for item in candidate.source_page_titles if str(item).strip()][:4],
         }
 
-    def _build_stay_recommendation(self, hotel: HelloAgentsHotelRecommendation | None) -> StayRecommendation | None:
+    def _build_stay_recommendation(
+        self,
+        hotel: HelloAgentsHotelRecommendation | None,
+        *,
+        destination: str = "",
+        accommodation_preference: str = "",
+    ) -> StayRecommendation | None:
         if hotel is None:
             return None
-        verified_candidates = [candidate for candidate in hotel.hotel_candidates if self._is_verified_hotel_candidate(candidate)]
-        final_hotel = hotel.final_recommended_hotel if self._is_verified_hotel_candidate(hotel.final_recommended_hotel) else None
+        hotel = self._sanitize_hotel_recommendation(
+            hotel,
+            destination=destination,
+            accommodation_preference=accommodation_preference,
+        )
+        all_candidates = [*hotel.hotel_candidates, *([hotel.final_recommended_hotel] if hotel.final_recommended_hotel else [])]
+        conflicting_urls = self._hotel_conflicting_source_urls(all_candidates)
+        verified_candidates = [
+            candidate
+            for candidate in hotel.hotel_candidates
+            if self._is_verified_hotel_candidate(candidate, destination=destination, blocked_urls=conflicting_urls)
+        ]
+        final_hotel = (
+            hotel.final_recommended_hotel
+            if self._is_verified_hotel_candidate(hotel.final_recommended_hotel, destination=destination, blocked_urls=conflicting_urls)
+            else None
+        )
         if final_hotel is None and verified_candidates:
             final_hotel = verified_candidates[0]
         hotel_risks = [str(item).strip() for item in hotel.hotel_risks if str(item).strip()]
         if (hotel.final_recommended_hotel or hotel.hotel_candidates) and final_hotel is None:
-            hotel_risks.append("Hotel specialist returned concrete hotel names without source URLs; final itinerary keeps area-level stay guidance only.")
+            hotel_risks.append("酒店专家给出了具体酒店名称，但实体证据不足；最终行程仅保留住宿区域建议。")
+        if conflicting_urls:
+            hotel_risks.append("同一酒店来源链接对应了冲突的酒店名称，相关候选已移除。")
         candidates = [self._hotel_candidate_to_stay_candidate(candidate) for candidate in verified_candidates[:4]]
         source_urls = list(
             dict.fromkeys(
@@ -2248,6 +2653,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             hotel_risks=self._compress_notes(hotel_risks, limit=4),
             source_urls=source_urls,
         )
+        if stay.final_recommended_hotel is None:
+            stay.budget_notes = self._compress_notes([
+                *stay.budget_notes,
+                "尚未核验到具体酒店及对应房价，住宿费用作为待核实项，不计入确定性预算。",
+            ], limit=4)
         if not any(
             [
                 stay.recommended_areas,
@@ -2266,35 +2676,114 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return stay
 
     def _hotel_candidate_to_stay_candidate(self, candidate: HelloAgentsHotelCandidate) -> StayHotelCandidate:
+        display_aliases = {
+            "moderate": "中等价位",
+            "budget": "经济型",
+            "premium": "较高价位",
+            "current search snapshot": "本次搜索快照",
+            "current-search snapshot": "本次搜索快照",
+            "medium": "中等",
+            "high": "较高",
+            "low": "较低",
+            "dynamic": "动态价格",
+            "unknown": "待核实",
+        }
+
+        def display(value: str) -> str | None:
+            normalized = str(value or "").strip()
+            return display_aliases.get(normalized.casefold(), normalized) or None
+
         return StayHotelCandidate(
+            **{key: getattr(candidate, key) for key in HotelEvidence.model_fields},
             name=candidate.name,
             area=candidate.area or None,
             hotel_type=candidate.hotel_type or None,
             reason=candidate.reason or None,
-            price_hint=candidate.price_hint or None,
-            price_checked_at=candidate.price_checked_at or None,
+            price_hint=display(candidate.price_hint),
+            price_checked_at=display(candidate.price_checked_at),
             price_valid_for=candidate.price_valid_for or None,
             review_score=candidate.review_score or None,
             review_count=candidate.review_count or None,
             review_summary=candidate.review_summary or None,
             preference_match=candidate.preference_match or None,
-            booking_confidence=candidate.booking_confidence or None,
+            booking_confidence=display(candidate.booking_confidence),
             caveats=[str(item).strip() for item in candidate.caveats if str(item).strip()][:4],
             source_urls=[str(item).strip() for item in candidate.source_urls if str(item).strip()][:4],
         )
 
-    def _is_verified_hotel_candidate(self, candidate: HelloAgentsHotelCandidate | None) -> bool:
-        if candidate is None:
+    @staticmethod
+    def _normalize_hotel_identity(value: Any) -> str:
+        return normalize_identity(str(value or ""))
+
+    @classmethod
+    def _hotel_entity_matches_source(cls, name: str, source: str) -> bool:
+        normalized_name = cls._normalize_hotel_identity(name)
+        normalized_source = cls._normalize_hotel_identity(source)
+        if not normalized_name or not normalized_source:
             return False
-        if not candidate.name.strip():
+        if normalized_name in normalized_source:
+            return True
+        return False
+
+    @staticmethod
+    def _is_generic_hotel_source_url(value: str) -> bool:
+        try:
+            parsed = urlparse(str(value or "").strip())
+        except ValueError:
+            return True
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return True
+        path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/").casefold()
+        if not path or path in {"/hotel", "/hotels", "/search", "/list", "/city"}:
+            return True
+        return any(token in path for token in ("/search", "/searchresult", "/list/", "/city/"))
+
+    @classmethod
+    def _hotel_conflicting_source_urls(cls, candidates: list[HelloAgentsHotelCandidate | None]) -> set[str]:
+        url_names: dict[str, set[str]] = {}
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            name_key = cls._normalize_hotel_identity(candidate.name)
+            if not name_key:
+                continue
+            for raw_url in candidate.source_urls:
+                url = str(raw_url or "").strip().casefold()
+                if url:
+                    url_names.setdefault(url, set()).add(name_key)
+        return {url for url, names in url_names.items() if len(names) > 1}
+
+    @classmethod
+    def _is_verified_hotel_candidate(
+        cls,
+        candidate: HelloAgentsHotelCandidate | None,
+        *,
+        destination: str = "",
+        blocked_urls: set[str] | None = None,
+    ) -> bool:
+        if candidate is None or not candidate.name.strip() or not candidate.city.strip():
             return False
-        return any(str(url).strip() for url in candidate.source_urls)
+        if candidate.identity_status not in {"page_verified", "model_reported"}:
+            return False
+        source_urls = [str(url).strip() for url in candidate.source_urls if str(url).strip()]
+        blocked = blocked_urls or set()
+        usable = [(url, candidate.source_page_titles[index] if index < len(candidate.source_page_titles) else "")
+                  for index, url in enumerate(source_urls)
+                  if not cls._is_generic_hotel_source_url(url) and url.casefold() not in blocked]
+        if not usable:
+            return False
+        if destination:
+            destination_key = cls._normalize_hotel_identity(destination)
+            city_key = cls._normalize_hotel_identity(candidate.city)
+            if not destination_key or (destination_key not in city_key and city_key not in destination_key):
+                return False
+        return any(url in candidate.verified_source_urls or cls._hotel_entity_matches_source(candidate.name, title or url)
+                   for url, title in usable)
 
     def _build_planner_transport_payload(self, transport: HelloAgentsTransportGuidance) -> dict[str, Any]:
         minimum_departure_buffer = max(
             transport.minimum_departure_buffer_minutes,
             transport.departure_transfer_minutes + transport.station_buffer_minutes + transport.luggage_buffer_minutes,
-            120,
         )
         return {
             "intercity_options": [
@@ -2308,6 +2797,8 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 }
                 for option in transport.intercity_options[:3]
             ],
+            "service_candidates": [candidate.model_dump(mode="json") for candidate in transport.service_candidates[:6]],
+            "legs": [leg.model_dump(mode="json") for leg in transport.legs[:6]],
             "arrival_strategy": [str(item).strip() for item in transport.arrival_strategy if str(item).strip()][:4],
             "local_mobility_strategy": [str(item).strip() for item in transport.local_mobility_strategy if str(item).strip()][:4],
             "pass_or_ticket_notes": [str(item).strip() for item in transport.pass_or_ticket_notes if str(item).strip()][:4],
@@ -2426,6 +2917,8 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 "confidence": poi.confidence or "low",
                 "source_url": source_urls[0] if source_urls else "",
                 "source_urls": source_urls[:3],
+                "booking_info": poi.booking_info.model_dump(mode="json") if poi.booking_info is not None else None,
+                "visit_requirements": poi.visit_requirements.model_dump(mode="json") if poi.visit_requirements is not None else None,
             }
             if self._is_food_poi(poi):
                 entry["highlights"] = [
@@ -3082,18 +3575,24 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         route = f"from {origin} to {destination}" if origin and destination else f"around {destination or origin}"
         mode_focus = self._transport_focus_for_mode(transport_mode)
         return (
-            f"Travel transport planning {route} for {start_date} to {end_date}, "
-            f"focusing on {mode_focus}, realistic ticket prices, transfer steps, and local mobility for {travelers} traveler(s)"
+            f"Travel transport planning {route} for outbound date {start_date} and return date {end_date}, "
+            f"focusing on {mode_focus}. Find 2 to 3 named service candidates in each direction with the exact station or airport, "
+            f"service number, scheduled departure and arrival times, duration, reference fare, route or date-specific source URL, "
+            f"and search timestamp for {travelers} traveler(s). Static timetables are acceptable; live availability may be unknown"
         ).strip()
 
     def _transport_focus_for_mode(self, transport_mode: str) -> str:
         normalized = (transport_mode or "").strip().lower()
         if normalized in {"rail", "train", "transit", "subway", "bus"}:
-            return "rail connections, station transfers, and local transit passes"
+            return "high-speed rail schedules, exact train numbers, station identity, station transfers, and local transit"
+        if normalized in {"flight", "air", "plane", "aviation"}:
+            return "scheduled flights, exact flight numbers, airport identity, planned takeoff and landing times, and airport transfers"
         if normalized in {"car", "drive", "driving"}:
             return "car rental, toll, parking, and airport or station transfer costs"
         if normalized in {"walking", "walk"}:
             return "walkable area clustering with realistic transit backup options"
+        if normalized in {"mixed", "any", "flexible", ""}:
+            return "a practical comparison of high-speed rail and scheduled flights, including exact stations or airports and local transfers"
         return "intercity arrival transfers and practical local transit options"
 
     def _call_research_like_tool(
@@ -3597,13 +4096,40 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return self._parse_structured_response(content, HelloAgentsWeatherGuidance)
 
     def _parse_structured_response(self, content: str, model_cls: type[BaseModel]) -> BaseModel:
-        payload = self._extract_json_payload(content)
-        try:
-            return model_cls.model_validate(payload)
-        except ValidationError as exc:
-            raise ValueError(str(exc)) from exc
+        payloads = self._extract_json_payloads(content)
+        valid_payloads: list[BaseModel] = []
+        validation_errors: list[str] = []
+        for payload in payloads:
+            try:
+                valid_payloads.append(model_cls.model_validate(payload))
+            except ValidationError as exc:
+                validation_errors.append(str(exc))
+        if not valid_payloads:
+            detail = validation_errors[-1] if validation_errors else "no valid JSON object"
+            raise ValueError(detail)
+        if len(valid_payloads) > 1:
+            signatures = {
+                json.dumps(item.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+                for item in valid_payloads
+            }
+            if len(signatures) > 1:
+                _LOGGER.warning(
+                    "HelloAgents response contained %d conflicting valid JSON objects for %s; using the last complete object as the model's final revision.",
+                    len(valid_payloads),
+                    model_cls.__name__,
+                )
+            else:
+                _LOGGER.warning(
+                    "HelloAgents response contained %d duplicate JSON objects for %s; using the last object.",
+                    len(valid_payloads),
+                    model_cls.__name__,
+                )
+        return valid_payloads[-1]
 
     def _extract_json_payload(self, content: str) -> dict[str, Any]:
+        return self._extract_json_payloads(content)[-1]
+
+    def _extract_json_payloads(self, content: str) -> list[dict[str, Any]]:
         candidate = str(content).strip()
         if not candidate:
             raise ValueError("HelloAgents response was empty")
@@ -3611,18 +4137,25 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         if candidate.startswith("```"):
             candidate = self._strip_code_fences(candidate)
 
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            start = candidate.find("{")
-            end = candidate.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise ValueError("HelloAgents response did not contain a valid JSON object")
-            payload = json.loads(candidate[start : end + 1])
+        decoder = json.JSONDecoder()
+        payloads: list[dict[str, Any]] = []
+        cursor = 0
+        while cursor < len(candidate):
+            start = candidate.find("{", cursor)
+            if start == -1:
+                break
+            try:
+                payload, end = decoder.raw_decode(candidate[start:])
+            except json.JSONDecodeError:
+                cursor = start + 1
+                continue
+            if isinstance(payload, dict):
+                payloads.append(payload)
+            cursor = start + end
 
-        if not isinstance(payload, dict):
-            raise ValueError("HelloAgents response root must be a JSON object")
-        return payload
+        if not payloads:
+            raise ValueError("HelloAgents response did not contain a valid JSON object")
+        return payloads
 
     def _strip_code_fences(self, content: str) -> str:
         lines = content.splitlines()
@@ -3691,29 +4224,91 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             f"{reliable_reviews} with review signals."
         )
 
-    def _summarize_hotels(self, hotels: HelloAgentsHotelRecommendation) -> str:
-        verified_candidates = [candidate for candidate in hotels.hotel_candidates if self._is_verified_hotel_candidate(candidate)]
+    def _summarize_hotels(self, hotels: HelloAgentsHotelRecommendation, *, destination: str = "") -> str:
+        all_candidates = [*hotels.hotel_candidates, *([hotels.final_recommended_hotel] if hotels.final_recommended_hotel else [])]
+        conflicting_urls = self._hotel_conflicting_source_urls(all_candidates)
+        verified_candidates = [
+            candidate for candidate in all_candidates
+            if self._is_verified_hotel_candidate(candidate, destination=destination, blocked_urls=conflicting_urls)
+        ]
         selected = (
             hotels.final_recommended_hotel.name
-            if self._is_verified_hotel_candidate(hotels.final_recommended_hotel)
+            if self._is_verified_hotel_candidate(
+                hotels.final_recommended_hotel,
+                destination=destination,
+                blocked_urls=conflicting_urls,
+            )
             else "none"
         )
         return (
             f"selected hotel {selected}, "
             f"{len(hotels.recommended_areas)} stay areas, "
-            f"{len(verified_candidates)}/{len(hotels.hotel_candidates)} source-backed hotel candidates, "
+            f"{len(verified_candidates)}/{len(all_candidates)} source-backed hotel candidates, "
             f"{len(hotels.stay_strategy)} stay strategy notes, "
             f"{len(hotels.price_timeliness_notes)} price freshness notes, "
             f"{len(hotels.review_notes)} review notes."
         )
 
     def _summarize_transport(self, transport: HelloAgentsTransportGuidance) -> str:
+        verified = sum(row.evidence_status == "verified" for row in transport.service_candidates)
+        referenced = sum(row.evidence_status == "referenced" for row in transport.service_candidates)
         return (
-            f"{len(transport.intercity_options)} intercity options, "
+            f"{len(transport.intercity_options)} intercity options, {len(transport.service_candidates)} static service candidates, "
+            f"{verified} page-verified and {referenced} source-referenced, "
             f"estimated intercity cost {round(float(transport.estimated_intercity_cost or 0.0), 2)}, "
             f"estimated local transport cost {round(float(transport.estimated_local_transport_cost or 0.0), 2)}, "
             f"booking URL {'yes' if transport.official_booking_url else 'no'}."
         )
+
+    def _sanitize_transport_service_candidates(
+        self,
+        transport: HelloAgentsTransportGuidance,
+        request: PlanningRequest,
+    ) -> HelloAgentsTransportGuidance:
+        expected = {
+            "outbound": (request.origin, request.destination, request.start_date),
+            "return": (request.destination, request.origin, request.end_date),
+        }
+        kept: list[TransportServiceCandidate] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        per_scope: dict[str, int] = {"outbound": 0, "return": 0, "intercity": 0}
+        removed = 0
+        for candidate in transport.service_candidates:
+            expected_route = expected.get(candidate.scope)
+            if expected_route is not None:
+                origin, destination, travel_date = expected_route
+                candidate_origin = normalize_identity(candidate.origin)
+                candidate_destination = normalize_identity(candidate.destination)
+                if (
+                    normalize_identity(origin) not in candidate_origin
+                    or normalize_identity(destination) not in candidate_destination
+                    or candidate.departure_date != travel_date
+                ):
+                    removed += 1
+                    continue
+            key = (candidate.scope, candidate.service_number.casefold(), candidate.departure_date.isoformat(), candidate.departure_time)
+            if key in seen or per_scope[candidate.scope] >= 3:
+                removed += 1
+                continue
+            seen.add(key)
+            per_scope[candidate.scope] += 1
+            kept.append(candidate)
+        normalized = transport.model_copy(update={"service_candidates": kept})
+        if removed:
+            note = f"已剔除 {removed} 条站点、机场、日期不一致或重复的候选班次。"
+            normalized.notes = list(dict.fromkeys([*normalized.notes, note]))
+        # Keep a missing time-window signal explicit.  A planner cannot safely
+        # select an afternoon return when the specialist only found early
+        # services, so surface this as a data-quality note instead of letting
+        # the model imply that the candidate set is complete.
+        return_candidates = [item for item in kept if item.scope == "return"]
+        if return_candidates and not any(
+            (self._clock_minutes(item.departure_time) or -1) >= 14 * 60
+            for item in return_candidates
+        ):
+            note = "返程候选目前仅覆盖14:00前时段；如行程需要下午返程，必须重新检索覆盖该时间窗的班次。"
+            normalized.notes = list(dict.fromkeys([*normalized.notes, note]))
+        return normalized
 
     def _summarize_itinerary(self, summary: str, days: list[Any], risks: list[str]) -> str:
         compact = summary.strip() or "Draft ready."
@@ -3723,20 +4318,81 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         self,
         payload: LlmPlanningPayload,
         request: PlanningRequest,
+        transport: HelloAgentsTransportGuidance | None = None,
     ) -> LlmPlanningPayload:
         normalized = payload.model_copy(deep=True)
+        candidates = [
+            candidate
+            for candidate in (transport.service_candidates if transport else [])
+            if candidate.evidence_status in {"verified", "referenced"}
+        ]
         zh_output = is_chinese_output(request)
         window_note = (
             "该时间段仅为建议出行预留窗口，不是已核验班次；具体车次和发车时间须以购票结果为准。"
             if zh_output
             else "This is a recommended travel window, not a verified service time; confirm the service and departure time when booking."
         )
+        reference_note = (
+            "该车次或航班采用有来源的静态参考时刻；实际运行、延误和余票须在出发前确认。"
+            if zh_output
+            else "This service uses a sourced reference timetable; confirm actual operation, delays, and availability before departure."
+        )
         pending_suffix = "（班次待确认）" if zh_output else " (service pending confirmation)"
-        for day in normalized.days:
+        for day_offset, day in enumerate(normalized.days):
+            item_date = request.start_date + timedelta(days=day_offset)
             for item in day.items:
                 if not self._is_scheduled_transport_item(item):
                     continue
                 booking = item.booking_info
+                # Models occasionally label the hotel-to-station leg as
+                # ``return`` because it precedes the return train. It is a
+                # local transfer, not a second intercity service; normalize
+                # it before matching against the return rail leg's duration.
+                item_text = f"{item.name} {item.note}".casefold()
+                local_transfer_markers = (
+                    "酒店至", "酒店到", "站至酒店", "站到酒店", "前往", "取行李",
+                    "进站", "安检", "检票", "候车", "候机", "登机", "虹桥站",
+                )
+                rail_markers = ("高铁", "动车", "火车", "列车", "航班", "flight", "rail", "train")
+                selected_service_key = str(booking.service_number or "").strip().casefold() if booking else ""
+                candidate = self._match_transport_candidate(item, booking, candidates, item_date)
+                if (
+                    booking is not None
+                    and candidate is None
+                    and not selected_service_key
+                    and booking.transport_scope in {"outbound", "return", "intercity"}
+                    and any(marker in item_text for marker in local_transfer_markers)
+                    and not any(marker in item_text for marker in rail_markers)
+                ):
+                    booking.transport_scope = "local"
+                    continue
+                # Treat the specialist's post-verification candidate set as
+                # authoritative. The planner may select a candidate, but may
+                # not alter its times, source, or evidence state.
+                if booking is not None and transport is not None:
+                    booking.schedule_verified = False
+                    if candidate is not None:
+                        item.start_time = candidate.departure_time
+                        item.end_time = candidate.arrival_time
+                        arrival_date = candidate.arrival_date or candidate.departure_date
+                        item.end_day_offset = max(0, (arrival_date - candidate.departure_date).days)
+                        booking.transport_scope = candidate.scope
+                        booking.duration_minutes_min = candidate.duration_minutes
+                        booking.schedule_status = candidate.schedule_status
+                        booking.schedule_checked_at = candidate.schedule_checked_at
+                        booking.schedule_source_url = candidate.source_url
+                        booking.evidence_status = candidate.evidence_status
+                        booking.evidence_checked_at = candidate.evidence_checked_at
+                        booking.evidence_reason = candidate.evidence_reason
+                        booking.source_urls = list(dict.fromkeys([*booking.source_urls, candidate.source_url]))
+                    elif selected_service_key:
+                        booking.service_number = None
+                        booking.schedule_status = "unknown"
+                        booking.schedule_checked_at = None
+                        booking.schedule_source_url = None
+                        booking.evidence_status = "unknown"
+                        booking.evidence_checked_at = None
+                        booking.evidence_reason = "规划器填写的班次不在交通专家核验后的候选集中。"
                 evidence_complete = bool(
                     booking
                     and booking.schedule_verified
@@ -3745,6 +4401,20 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     and str(booking.schedule_source_url or "").strip().startswith(("http://", "https://"))
                 )
                 if evidence_complete:
+                    continue
+                reference_complete = bool(
+                    booking
+                    and booking.schedule_status in {"reference", "date_specific"}
+                    and str(booking.service_number or "").strip()
+                    and str(booking.schedule_checked_at or "").strip()
+                    and str(booking.schedule_source_url or "").strip().startswith(("http://", "https://"))
+                )
+                if reference_complete:
+                    booking.schedule_verified = False
+                    if reference_note not in booking.notes:
+                        booking.notes.insert(0, reference_note)
+                    if reference_note not in item.note:
+                        item.note = f"{item.note.strip()} {reference_note}".strip()
                     continue
                 if booking is None:
                     booking = LlmBookingInfo()
@@ -3756,15 +4426,157 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     item.note = f"{item.note.strip()} {window_note}".strip()
                 if pending_suffix.strip() not in item.name:
                     item.name = f"{item.name}{pending_suffix}"
+        # An unverified service is only a planning window. If the planner made
+        # the final return window spill past the requested trip end, move that
+        # window (and one contiguous transfer/preparation block) earlier while
+        # preserving their durations. Any resulting overlap still fails the
+        # normal execution validator.
+        if normalized.days:
+            final_day = normalized.days[-1]
+            for index, item in enumerate(final_day.items):
+                booking = item.booking_info
+                if (
+                    not booking
+                    or booking.schedule_verified
+                    or booking.schedule_status in {"reference", "date_specific"}
+                    or booking.transport_scope != "return"
+                    or item.end_day_offset <= 0
+                ):
+                    continue
+                start = self._clock_minutes(item.start_time)
+                end_clock = self._clock_minutes(item.end_time)
+                if start is None or end_clock is None:
+                    continue
+                duration = item.end_day_offset * 1440 + end_clock - start
+                target_end = 23 * 60 + 45
+                new_start = target_end - duration
+                if duration <= 0 or new_start < 0:
+                    continue
+                shift = new_start - start
+                item.start_time = f"{new_start // 60:02d}:{new_start % 60:02d}"
+                item.end_time = "23:45"
+                item.end_day_offset = 0
+                adjustment_note = "未核验返程窗口原会跨出行程结束日，已保持时长并整体前移；实际时刻以出票为准。"
+                if adjustment_note not in item.note:
+                    item.note = f"{item.note.strip()} {adjustment_note}".strip()
+                if index > 0:
+                    prior = final_day.items[index - 1]
+                    prior_end = self._clock_minutes(prior.end_time)
+                    prior_start = self._clock_minutes(prior.start_time)
+                    if self._is_transport_item(prior) and not prior.end_day_offset and prior_end == start and prior_start is not None:
+                        shifted_start = prior_start + shift
+                        shifted_end = prior_end + shift
+                        if shifted_start >= 0:
+                            prior.start_time = f"{shifted_start // 60:02d}:{shifted_start % 60:02d}"
+                            prior.end_time = f"{shifted_end // 60:02d}:{shifted_end % 60:02d}"
         return normalized
+
+    def _normalize_departure_waiting_blocks(
+        self,
+        payload: LlmPlanningPayload,
+        transport: HelloAgentsTransportGuidance,
+    ) -> LlmPlanningPayload:
+        """Cap station waiting without reducing the total return safety buffer."""
+        normalized = payload.model_copy(deep=True)
+        if not normalized.days:
+            return normalized
+        final_day = normalized.days[-1]
+        waiting_markers = ("候车", "候机", "安检", "检票", "进站", "登机")
+        station_buffer = max(int(transport.station_buffer_minutes or 0), 0)
+        waiting_cap = max(station_buffer, min(station_buffer + 30, 90))
+        for departure_index, departure in enumerate(final_day.items):
+            booking = departure.booking_info
+            if not booking or booking.transport_scope != "return" or departure_index < 1:
+                continue
+            departure_start = self._clock_minutes(departure.start_time)
+            waiting = final_day.items[departure_index - 1]
+            waiting_text = f"{waiting.name} {waiting.note}"
+            waiting_start = self._clock_minutes(waiting.start_time)
+            waiting_end = self._clock_minutes(waiting.end_time)
+            if (
+                departure_start is None
+                or waiting_start is None
+                or waiting_end != departure_start
+                or waiting.end_day_offset
+                or not any(marker in waiting_text for marker in waiting_markers)
+            ):
+                continue
+            waiting_duration = waiting_end - waiting_start
+            if waiting_duration <= waiting_cap:
+                continue
+            new_waiting_start = departure_start - waiting_cap
+            if new_waiting_start < 0:
+                continue
+            waiting.start_time = f"{new_waiting_start // 60:02d}:{new_waiting_start % 60:02d}"
+            if waiting.booking_info is not None:
+                waiting.booking_info.transport_scope = "local"
+                waiting.booking_info.duration_minutes_min = waiting_cap
+            note = f"车站候车按{waiting_cap}分钟安全缓冲编排，额外机动时间保留在此前，不计入候车时长。"
+            if note not in waiting.note:
+                waiting.note = f"{waiting.note.strip()} {note}".strip()
+
+            # Keep the immediately preceding luggage/transfer block adjacent
+            # when it can be shifted later without overlapping an activity.
+            if departure_index < 2:
+                continue
+            transfer = final_day.items[departure_index - 2]
+            transfer_booking = transfer.booking_info
+            transfer_start = self._clock_minutes(transfer.start_time)
+            transfer_end = self._clock_minutes(transfer.end_time)
+            if (
+                not self._is_transport_item(transfer)
+                or transfer.end_day_offset
+                or transfer_start is None
+                or transfer_end is None
+                or transfer_end <= transfer_start
+                or (transfer_booking is not None and transfer_booking.transport_scope not in {None, "local"})
+            ):
+                continue
+            duration = transfer_end - transfer_start
+            shifted_start = new_waiting_start - duration
+            prior_end = (
+                self._clock_minutes(final_day.items[departure_index - 3].end_time)
+                if departure_index >= 3
+                else 0
+            )
+            if shifted_start < 0 or (prior_end is not None and shifted_start < prior_end):
+                continue
+            transfer.start_time = f"{shifted_start // 60:02d}:{shifted_start % 60:02d}"
+            transfer.end_time = waiting.start_time
+        return normalized
+
+    @staticmethod
+    def _match_transport_candidate(item, booking, candidates, item_date: date):
+        if booking is None or not str(booking.service_number or "").strip():
+            return None
+        service = str(booking.service_number).strip().casefold()
+        item_text = normalize_identity(f"{item.name} {item.location} {item.note}")
+        expected_scope = booking.transport_scope
+        matches = []
+        for candidate in candidates:
+            if str(candidate.service_number).strip().casefold() != service:
+                continue
+            if candidate.departure_date != item_date:
+                continue
+            if expected_scope in {"outbound", "return", "intercity"} and candidate.scope != expected_scope:
+                continue
+            origin = normalize_identity(candidate.origin)
+            destination = normalize_identity(candidate.destination)
+            if not origin or origin not in item_text or not destination or destination not in item_text:
+                continue
+            matches.append(candidate)
+        return matches[0] if len(matches) == 1 else None
 
     def _validate_execution_constraints(
         self,
         payload: LlmPlanningPayload,
         request: PlanningRequest,
         transport: HelloAgentsTransportGuidance,
+        *,
+        available_poi_count: int = 0,
+        poi_grounding: HelloAgentsPoiGrounding | None = None,
     ) -> None:
-        errors: list[str] = []
+        errors: list[str] = validate_timeline(payload, request, transport)
         generated_at = request.planning_generated_at
         if generated_at is not None:
             local_generated_at = generated_at.astimezone() if generated_at.tzinfo is not None else generated_at
@@ -3784,6 +4596,25 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             for item in day.items:
                 if self._is_transport_item(item):
                     continue
+                matched_poi = self._find_matching_featured_poi(item.name, poi_grounding)
+                if matched_poi is not None:
+                    source_constraint_text = " ".join([
+                        *matched_poi.evidence_notes,
+                        *matched_poi.caveats,
+                        *(
+                            [
+                                str(matched_poi.visit_requirements.advance_booking_note or ""),
+                                *matched_poi.visit_requirements.notes,
+                            ]
+                            if matched_poi.visit_requirements else []
+                        ),
+                        *(matched_poi.booking_info.notes if matched_poi.booking_info else []),
+                    ])
+                    target_date = request.start_date + timedelta(days=day_index - 1)
+                    if has_closed_weekday_constraint(source_constraint_text, target_date.weekday()):
+                        errors.append(
+                            f"{item.name} 安排在 {target_date.isoformat()}，但 POI 专家证据注明当天闭馆"
+                        )
                 key = self._normalize_poi_dedupe_key(item.name)
                 if not key:
                     continue
@@ -3804,33 +4635,94 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 None,
             )
             if departure_index is not None and departure_index > 0:
-                previous_item = departure_day.items[departure_index - 1]
                 departure_item = departure_day.items[departure_index]
-                previous_end = self._clock_minutes(previous_item.end_time)
+                # Station/airport transfers and luggage collection are part of
+                # the departure buffer, not the activity that starts it. Walk
+                # backwards to the last non-transport item so a valid transfer
+                # chain ending exactly at the rail/flight window is not
+                # incorrectly measured as a zero-minute buffer.
+                previous_activity = next(
+                    (
+                        departure_day.items[index]
+                        for index in range(departure_index - 1, -1, -1)
+                        if self._is_departure_buffer_anchor_item(departure_day.items[index])
+                    ),
+                    None,
+                )
+                previous_end = self._clock_minutes(previous_activity.end_time) if previous_activity is not None else None
                 departure_start = self._clock_minutes(departure_item.start_time)
                 required_buffer = max(
-                    120,
                     transport.minimum_departure_buffer_minutes,
                     transport.departure_transfer_minutes + transport.station_buffer_minutes + transport.luggage_buffer_minutes,
                 )
-                if previous_end is None or departure_start is None:
-                    errors.append("返程缓冲无法校验：返程交通或前一项目缺少有效时间")
-                else:
+                if previous_activity is not None and (previous_end is None or departure_start is None):
+                    errors.append("返程缓冲无法校验：返程交通或最后一个游玩/用餐项目缺少有效时间")
+                elif previous_activity is not None:
                     actual_buffer = departure_start - previous_end
                     if actual_buffer < required_buffer:
                         errors.append(
-                            f"返程日前一项目到跨城出发窗口仅 {actual_buffer} 分钟，至少需要 {required_buffer} 分钟"
+                            f"返程日最后一个游玩/用餐项目到跨城出发窗口仅 {actual_buffer} 分钟，至少需要 {required_buffer} 分钟"
                         )
+
+        poi_types = {"sight", "museum", "attraction", "landmark", "park", "district", "experience", "nature", "scenic"}
+        day_pois = [
+            [item for item in day.items if str(getattr(item, "type", "") or "").strip().lower() in poi_types]
+            for day in payload.days
+        ]
+        arrival_evening_available = False
+        if payload.days:
+            first_day = payload.days[0]
+            lodging = next(
+                (
+                    item for item in first_day.items
+                    if str(getattr(item, "type", "") or "").strip().lower() in {"hotel", "stay", "accommodation", "lodging"}
+                    and self._clock_minutes(item.end_time) is not None
+                    and self._clock_minutes(item.end_time) <= 18 * 60
+                ),
+                None,
+            )
+            arrival_evening_available = lodging is not None and not day_pois[0]
+            if arrival_evening_available:
+                errors.append("内容密度不足：抵达日18:00前已完成入住，但当天没有安排住宿周边的傍晚 POI")
+
+        if available_poi_count >= 8 and len(payload.days) >= 3:
+            full_days = sum(
+                1
+                for day in payload.days
+                if not any(self._is_scheduled_transport_item(item) for item in day.items)
+            )
+            density_target = min(available_poi_count, max(4, min(full_days * 3 + int(arrival_evening_available), len(payload.days) + 2)))
+            actual_poi_count = sum(len(items) for items in day_pois)
+            if actual_poi_count < density_target:
+                errors.append(
+                    f"内容密度不足：已有 {available_poi_count} 个候选 POI，但仅安排 {actual_poi_count} 个；当前时段结构至少应安排 {density_target} 个"
+                )
 
         if errors:
             raise ValueError("行程可执行性校验失败：" + "；".join(dict.fromkeys(errors)))
 
     def _is_transport_item(self, item: Any) -> bool:
-        return str(getattr(item, "type", "") or "").strip().lower() in {"transport", "transit", "rail", "flight", "ferry"}
+        return str(getattr(item, "type", "") or "").strip().lower() in {
+            "transport", "transit", "local_transport", "transfer", "rail", "flight", "ferry",
+            "metro", "subway", "bus", "taxi", "walk_transfer",
+        }
+
+    def _is_departure_buffer_anchor_item(self, item: Any) -> bool:
+        if self._is_transport_item(item):
+            return False
+        text = f"{getattr(item, 'name', '')} {getattr(item, 'note', '')}".casefold()
+        logistics_markers = (
+            "取行李", "寄存行李", "退房", "行李领取", "安检", "进站", "候车", "候机", "登机",
+            "collect luggage", "luggage pickup", "check-out", "checkout", "security", "station waiting", "boarding",
+        )
+        return not any(marker in text for marker in logistics_markers)
 
     def _is_scheduled_transport_item(self, item: Any) -> bool:
         if not self._is_transport_item(item):
             return False
+        scope = getattr(getattr(item, "booking_info", None), "transport_scope", None)
+        if scope:
+            return scope in {"outbound", "return", "intercity"}
         text = f"{getattr(item, 'name', '')} {getattr(item, 'note', '')}".casefold()
         return any(
             marker in text
@@ -3970,11 +4862,14 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         weather_guidance: HelloAgentsWeatherGuidance,
         weather_tool_results: dict[str, Any] | None,
     ) -> str:
-        candidates = [
-            selected_outlook,
-            weather_guidance.overall_outlook,
-            *self._flatten_text_values(weather_tool_results or {}),
-        ]
+        # Once daily evidence has been normalized, never reintroduce a
+        # rejected temperature from role-level prose or raw search output.
+        candidates = [selected_outlook]
+        if not weather_guidance.daily_forecasts:
+            candidates.extend([
+                weather_guidance.overall_outlook,
+                *self._flatten_text_values(weather_tool_results or {}),
+            ])
         seen: set[str] = set()
         for candidate in candidates:
             snippet = self._extract_temperature_snippet(candidate)
@@ -4031,6 +4926,75 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 best_match = poi
                 best_score = score
         return best_match if best_score > 0 else None
+
+    def _attach_nearby_poi_suggestions(
+        self,
+        planned_days: list[PlannedDay],
+        poi_grounding: HelloAgentsPoiGrounding | HelloAgentsAttractionGrounding | None,
+    ) -> None:
+        """Expose researched nearby POIs without forcing them into the timeline."""
+        if poi_grounding is None:
+            return
+        scheduled_names = {
+            self._normalize_match_key(item.name)
+            for day in planned_days
+            for item in day.items
+        }
+        candidates = [
+            poi for poi in poi_grounding.featured_pois
+            if not self._is_food_poi(poi) and self._normalize_match_key(poi.name) not in scheduled_names
+        ]
+        assigned: set[str] = set()
+        confidence_rank = {"high": 2, "medium": 1, "low": 0}
+
+        for day in planned_days:
+            for item in day.items:
+                if str(item.type or "").strip().casefold() not in {
+                    "sight", "museum", "attraction", "landmark", "park", "district",
+                    "experience", "nature", "scenic", "photo",
+                }:
+                    continue
+                core = self._find_matching_featured_poi(item.name, poi_grounding)
+                if core is None:
+                    continue
+                core_key = self._normalize_match_key(core.name)
+                core_area = self._normalize_match_key(core.area)
+                core_sources = set(core.source_urls)
+                ranked: list[tuple[int, int, bool, HelloAgentsResearchPoi]] = []
+                for candidate in candidates:
+                    candidate_key = self._normalize_match_key(candidate.name)
+                    if not candidate_key or candidate_key in assigned:
+                        continue
+                    reason_key = self._normalize_match_key(candidate.reason)
+                    explicit_relation = bool(core_key and core_key in reason_key)
+                    same_area = bool(core_area and core_area == self._normalize_match_key(candidate.area))
+                    shared_source = bool(core_sources.intersection(candidate.source_urls))
+                    score = (6 if explicit_relation else 0) + (2 if same_area else 0) + (3 if shared_source else 0)
+                    if score < 5:
+                        continue
+                    ranked.append((score, confidence_rank.get(candidate.confidence.casefold(), 0), explicit_relation, candidate))
+                ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+                for _, _, explicit_relation, candidate in ranked[:3]:
+                    source_urls = list(dict.fromkeys([
+                        *candidate.source_urls,
+                        *(candidate.booking_info.source_urls if candidate.booking_info else []),
+                    ]))[:3]
+                    item.nearby_suggestions.append(NearbyPoiSuggestion(
+                        name=candidate.name,
+                        area=candidate.area,
+                        reason=candidate.reason or f"与{core.name}位于同一片区，可按时间和体力顺路增减。",
+                        suggested_time=candidate.suggested_time,
+                        highlights=candidate.highlights[:4],
+                        source_urls=source_urls,
+                        confidence=candidate.confidence,
+                        relation_type="suggested_pair" if explicit_relation else "same_area",
+                        relation_note=(
+                            "POI 专家建议与当前景点搭配，实际路线和交通时间待确认。"
+                            if explicit_relation
+                            else "同片区或同篇攻略中的备选，实际交通时间待地图确认。"
+                        ),
+                    ))
+                    assigned.add(self._normalize_match_key(candidate.name))
 
     def _find_matching_featured_food(
         self,
@@ -4093,9 +5057,14 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             if poi.booking_info is not None
             else BookingInfo()
         )
+        category_labels = {
+            "attraction": "景点", "district": "街区", "experience": "体验",
+            "landmark": "地标", "museum": "博物馆", "nature": "自然景观",
+        }
+        confidence_labels = {"high": "较高", "medium": "中等", "low": "较低"}
         evidence_notes = [
-            *([f"Category: {poi.category}"] if poi.category else []),
-            *([f"Confidence: {poi.confidence}"] if poi.confidence else []),
+            *([f"类型：{category_labels.get(poi.category.casefold(), poi.category)}"] if poi.category else []),
+            *([f"信息置信度：{confidence_labels.get(poi.confidence.casefold(), poi.confidence)}"] if poi.confidence else []),
             *poi.evidence_notes[:4],
             *poi.caveats[:4],
         ]
@@ -4220,6 +5189,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         if primary_info is None and fallback is None:
             return None
         merged = BookingInfo(
+            **({key: getattr(primary_info, key) for key in BookingDetails.model_fields} if primary_info else {}),
             price_label=(primary_info.price_label if primary_info and primary_info.price_label else None) or (fallback.price_label if fallback else None),
             estimated_price=(primary_info.estimated_price if primary_info and primary_info.estimated_price is not None else None),
             booking_required=bool((primary_info.booking_required if primary_info is not None else False) or (fallback.booking_required if fallback is not None else False)),
@@ -4302,6 +5272,14 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             return None
         first_option = transport_guidance.intercity_options[0] if transport_guidance and transport_guidance.intercity_options else None
         merged = TransportBookingSummary(
+            legs=list(transport_guidance.legs if transport_guidance and transport_guidance.legs else payload_transport.legs if payload_transport else []),
+            service_candidates=list(
+                transport_guidance.service_candidates
+                if transport_guidance is not None
+                else payload_transport.service_candidates
+                if payload_transport
+                else []
+            ),
             summary=(payload_transport.summary if payload_transport and payload_transport.summary else None)
             or (transport_guidance.summary if transport_guidance and transport_guidance.summary else None)
             or (transport_guidance.arrival_strategy[0] if transport_guidance and transport_guidance.arrival_strategy else None),
@@ -4374,6 +5352,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             [
                 merged.summary,
                 merged.recommended_option,
+                merged.service_candidates,
                 merged.estimated_intercity_cost > 0,
                 merged.estimated_local_transport_cost > 0,
                 merged.booking_required,
@@ -4463,10 +5442,41 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             for item in (citations or [])
             if str(item).strip() and str(item).strip() not in all_daily_sources
         ]
-        citation_list = list(dict.fromkeys([*matching_sources, *shared_sources, *fallback_sources]))
+        # A single multi-day forecast page may legitimately support several
+        # dates. Once the specialist supplied date-bound evidence, avoid
+        # polluting the day with unrelated monthly or role-level links.
+        citation_list = list(
+            dict.fromkeys(
+                matching_sources if matching_sources else [*shared_sources, *fallback_sources]
+            )
+        )
+        if matching_forecast is not None and not matching_sources:
+            warning = (
+                f"{resolved_target_date.isoformat()} 未取得独立逐日天气来源，仅保留城市或月份参考。"
+                if re.search(r"[㐀-鿿]", summary)
+                else f"No date-specific weather source was captured for {resolved_target_date.isoformat()}; city or monthly context only."
+            )
+            if warning not in notes:
+                notes.append(warning)
         if not summary and not notes and not citation_list:
             return None
-        return PlannedDayWeather(summary=summary, notes=notes[:2], citations=citation_list[:3])
+        return PlannedDayWeather(
+            summary=summary,
+            notes=notes[:2],
+            citations=citation_list[:3],
+            forecast_type=(matching_forecast.forecast_type or None) if matching_forecast else None,
+            condition=(matching_forecast.condition or None) if matching_forecast else None,
+            temperature_min_c=(matching_forecast.temperature_min_c or None) if matching_forecast else None,
+            temperature_max_c=(matching_forecast.temperature_max_c or None) if matching_forecast else None,
+            precipitation_probability=(matching_forecast.precipitation_probability or None) if matching_forecast else None,
+            wind=(matching_forecast.wind or None) if matching_forecast else None,
+            forecast_updated_at=(matching_forecast.forecast_updated_at or None) if matching_forecast else None,
+            checked_at=(matching_forecast.checked_at or None) if matching_forecast else None,
+            evidence_status=(matching_forecast.evidence_status or None) if matching_forecast else None,
+            evidence_checked_at=(matching_forecast.evidence_checked_at or None) if matching_forecast else None,
+            evidence_reason=(matching_forecast.evidence_reason or None) if matching_forecast else None,
+            field_evidence=dict(matching_forecast.field_evidence) if matching_forecast else {},
+        )
     def _build_result_from_payload(
         self,
         payload: Any,
@@ -4555,6 +5565,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                         type=item.type,
                         name=item.name,
                         start_time=item.start_time,
+                        end_day_offset=item.end_day_offset,
                         end_time=item.end_time,
                         location=location_text,
                         score=item.score,
@@ -4609,6 +5620,8 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 )
             )
 
+        self._attach_nearby_poi_suggestions(planned_days, poi_grounding)
+
         if filtered_food_item_count:
             pipeline_notes.append(
                 f"Filtered {filtered_food_item_count} food/cafe/restaurant itinerary item(s) from the final guide."
@@ -4616,12 +5629,17 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
         host = urlparse(self._llm_config.base_url).netloc or self._llm_config.base_url
         total_budget = payload.total_budget_estimate if payload.total_budget_estimate and payload.total_budget_estimate > 0 else request.budget
+        stay_recommendation = self._build_stay_recommendation(
+            hotel_recommendation,
+            destination=request.destination,
+            accommodation_preference=request.accommodation_preference,
+        )
         plan = PlanningResult(
             summary=payload.summary,
             total_budget_estimate=total_budget,
             days=planned_days,
             risks=payload.risks,
-            stay_recommendation=self._build_stay_recommendation(hotel_recommendation),
+            stay_recommendation=stay_recommendation,
             transport_booking_summary=self._build_transport_booking_summary(
                 getattr(payload, "transport_booking_summary", None),
                 transport_guidance,
@@ -4644,7 +5662,120 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 transport_guidance=transport_guidance.model_dump(mode="json") if transport_guidance is not None else None,
             ),
         )
+        self._clear_unverified_lodging_prices(plan)
+        self._downgrade_unverified_reservation_claims(plan)
+        if weather_guidance is not None:
+            verified_conditions = [
+                forecast.condition
+                for forecast in weather_guidance.daily_forecasts
+                if forecast.forecast_type == "short_range" and forecast.source_urls
+            ]
+            plan.risks = [
+                risk for risk in plan.risks
+                if not has_unsupported_weather_condition(risk, verified_conditions)
+            ]
         return enrich_plan_with_budget(plan, request)
+
+    @staticmethod
+    def _clear_unverified_lodging_prices(plan: PlanningResult) -> None:
+        """Keep area-level stay guidance out of the deterministic ledger."""
+        if plan.stay_recommendation and plan.stay_recommendation.final_recommended_hotel:
+            return
+        warning = "未核验到具体酒店实体与对应房价，住宿费用暂不计入确定性预算。"
+        changed = False
+        for day in plan.days:
+            for item in day.items:
+                if str(item.type or "").strip().casefold() not in {"hotel", "stay", "accommodation", "lodging"}:
+                    continue
+                if item.booking_info is None:
+                    item.booking_info = BookingInfo(price_status="unknown", notes=[warning])
+                else:
+                    item.booking_info.estimated_price = None
+                    item.booking_info.unit_price = None
+                    item.booking_info.price_status = "unknown"
+                    item.booking_info.price_label = "待核实"
+                    item.booking_info.notes = list(dict.fromkeys([*item.booking_info.notes, warning]))
+                changed = True
+        if changed:
+            plan.risks = [
+                risk for risk in plan.risks
+                if not (
+                    re.search(r"酒店|住宿", str(risk))
+                    and re.search(r"\d+(?:\.\d+)?\s*元", str(risk))
+                    and re.search(r"估算|预计|预算", str(risk))
+                )
+            ]
+        if changed and warning not in plan.risks:
+            plan.risks.append(warning)
+
+    @staticmethod
+    def _downgrade_unverified_reservation_claims(plan: PlanningResult) -> None:
+        """Do not present model/guide claims as mandatory booking rules."""
+        warning = "未取得场馆官方预约入口支持，预约要求已降级为出发前核对。"
+        downgraded_names: list[str] = []
+        for day in plan.days:
+            for item in day.items:
+                if str(item.type or "").strip().casefold() not in {
+                    "sight", "museum", "attraction", "landmark", "park", "district", "experience", "nature", "scenic",
+                }:
+                    continue
+                booking = item.booking_info
+                requirements = item.visit_requirements
+                required = bool(
+                    (booking and (booking.booking_required or booking.reservation_required))
+                    or (requirements and str(requirements.reservation_policy or "").casefold() == "required")
+                )
+                if not required or (
+                    booking and HelloAgentsOrchestrator._looks_like_specific_booking_entry(booking.official_booking_url)
+                ):
+                    continue
+                downgraded_names.append(item.name)
+                if booking:
+                    booking.booking_required = False
+                    booking.reservation_required = False
+                    booking.booking_window = None
+                    booking.reminder = warning
+                    if booking.price_label and "预约" in booking.price_label:
+                        booking.price_label = re.split(r"[，,；;]", booking.price_label)[0].strip() or None
+                    booking.notes = [
+                        note for note in booking.notes
+                        if not re.search(r"必须预约|需预约|尽快预约|预约名额|实名预约", str(note))
+                    ]
+                    booking.notes.append(warning)
+                if requirements:
+                    requirements.reservation_policy = "check_before_visit"
+                    requirements.timed_entry = False
+                    requirements.identity_required = False
+                    requirements.advance_booking_note = warning
+                    requirements.notes = [
+                        note for note in requirements.notes
+                        if not re.search(r"必须预约|需预约|尽早预约|预约名额|实名预约", str(note))
+                    ]
+                    requirements.notes.append(warning)
+        if downgraded_names:
+            plan.risks = [
+                risk for risk in plan.risks
+                if not (
+                    "预约" in str(risk)
+                    and any(name in str(risk) for name in downgraded_names)
+                )
+            ]
+            generic_risk = "部分场馆预约规则未取得官方入口支持，出发前应以场馆官网或官方公众号最新公告为准。"
+            if generic_risk not in plan.risks:
+                plan.risks.append(generic_risk)
+
+    @staticmethod
+    def _looks_like_specific_booking_entry(value: str | None) -> bool:
+        try:
+            parsed = urlparse(str(value or "").strip())
+        except ValueError:
+            return False
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+        target = f"{parsed.netloc}{parsed.path}?{parsed.query}".casefold()
+        return any(marker in target for marker in (
+            "book", "booking", "reservation", "reserve", "appointment", "ticket", "order", "yuyue", "subscribe",
+        ))
 
     def _resolve_item_poi(self, item: object, request: PlanningRequest, preferred_index: int) -> PoiDetail:
         item_name = getattr(item, "name", "")

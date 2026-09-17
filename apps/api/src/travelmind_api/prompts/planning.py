@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from travelmind_api.agents.base import PlanningRequest, PlanningResult
 
 
-PLANNING_PROMPT_VERSION = "planning.main.v3"
+PLANNING_PROMPT_VERSION = "planning.main.v4"
 REFINEMENT_PROMPT_VERSION = "planning.refine.v1"
 
 PLANNING_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -28,6 +28,7 @@ PLANNING_OUTPUT_SCHEMA: dict[str, Any] = {
                     "type": "sight",
                     "name": "Ginkaku-ji",
                     "start_time": "09:00",
+                    "end_day_offset": 0,
                     "end_time": "11:00",
                     "location": "Kyoto",
                     "score": 0.85,
@@ -43,9 +44,18 @@ PLANNING_OUTPUT_SCHEMA: dict[str, Any] = {
                         "notes": ["Leave the official booking URL blank if you cannot verify one."],
                         "source_urls": [],
                         "schedule_verified": False,
+                        "schedule_status": "unknown",
                         "service_number": "",
                         "schedule_checked_at": "",
                         "schedule_source_url": "",
+                        "price_status": "unknown",
+                        "transport_scope": None,
+                        "duration_minutes_min": None,
+                        "check_in_date": None,
+                        "check_out_date": None,
+                        "room_count": None,
+                        "nights": None,
+                        "early_check_in_confirmed": False,
                     },
                     "visit_requirements": {
                         "reservation_policy": "not_needed",
@@ -70,6 +80,28 @@ PLANNING_OUTPUT_SCHEMA: dict[str, Any] = {
         "reminders": ["Leave the URL blank when you cannot verify an official booking page."],
         "notes": ["Explain uncertainty instead of inventing precise fare rules."],
         "source_urls": [],
+        "service_candidates": [
+            {
+                "scope": "outbound",
+                "mode": "high_speed_rail",
+                "service_number": "G1234",
+                "origin": "广州南",
+                "destination": "上海虹桥",
+                "departure_date": "2026-09-20",
+                "departure_time": "08:27",
+                "arrival_date": "2026-09-20",
+                "arrival_time": "15:03",
+                "duration_minutes": 396,
+                "fare_class": "二等座",
+                "fare_amount": 949,
+                "price_status": "estimated",
+                "availability_status": "unknown",
+                "schedule_status": "reference",
+                "schedule_checked_at": "2026-09-14 16:00+08:00",
+                "source_url": "https://example.com/date-or-route-timetable",
+                "notes": ["静态参考时刻，实际运行与余票以购票平台为准。"],
+            }
+        ],
     },
 }
 
@@ -85,7 +117,7 @@ def build_planning_prompt_bundle(request: PlanningRequest) -> PromptMessages:
         "Each day must contain 2 to 4 items. "
         "Use 24-hour HH:MM times, realistic sequencing, and scores between 0 and 1. "
         "Treat planning_generated_at and same_day_earliest_start_time in the trip request as hard constraints; never schedule a same-day item in the past. "
-        "Do not present a rail, flight, or ferry time as a verified schedule unless booking_info includes schedule_verified=true plus a service_number, schedule_checked_at, and schedule_source_url. Otherwise use the item times only as a recommended travel window and explicitly say the service time must be confirmed after booking. "
+        "A transport service candidate with a service number, route-matching source URL, schedule_checked_at, and schedule_status=reference/date_specific may be copied into booking_info as a plan-time reference, including its schedule_status. Keep schedule_verified=false for a static reference timetable and always note that availability, delays, and actual operation must be confirmed before departure. If these fields are missing, use the item times only as a recommended travel window. "
         "On the departure day, leave enough time after the last activity for luggage collection, travel to the terminal, security, and boarding. "
         "Do not repeat a named POI across days unless the request explicitly requires a materially different repeat visit. "
         "Keep the total budget estimate aligned with the requested budget whenever feasible, and use risks to explain unavoidable budget pressure. "

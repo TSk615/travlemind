@@ -513,7 +513,15 @@ class OpenAICompatibleClient:
             return self._parse_sse_body(config, "\n".join(lines))
 
     def _parse_post_response(self, config: LlmEndpointConfig, response: httpx.Response) -> dict[str, Any]:
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = response.text[:1200].strip()
+            # Keep upstream validation details in the job log, but never echo
+            # authorization headers or the request payload.
+            if detail:
+                raise httpx.HTTPStatusError(f"{exc}; upstream={detail}", request=exc.request, response=exc.response) from exc
+            raise
         content_type = (response.headers.get("content-type") or "").lower()
         is_event_stream = "text/event-stream" in content_type or response.text.lstrip().startswith(("event:", "data:"))
         if is_event_stream:

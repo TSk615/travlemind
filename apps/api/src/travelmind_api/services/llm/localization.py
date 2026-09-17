@@ -208,13 +208,15 @@ def _iter_user_visible_texts(payload: LlmPlanningPayload) -> Iterable[str]:
                     item.booking_info.price_label,
                     item.booking_info.booking_window,
                     item.booking_info.reminder,
-                    *(item.booking_info.notes or []),
+                    *(
+                        note for note in (item.booking_info.notes or [])
+                        if not re.match(r"^\s*(?:Category|Confidence)\s*:", str(note), re.I)
+                    ),
                 ):
                     if candidate:
                         yield candidate
             if item.visit_requirements is not None:
                 for candidate in (
-                    item.visit_requirements.reservation_policy,
                     item.visit_requirements.advance_booking_note,
                     *(item.visit_requirements.notes or []),
                 ):

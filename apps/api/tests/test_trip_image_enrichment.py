@@ -1,4 +1,5 @@
 import importlib
+import pytest
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 from travelmind_api.agents.base import (
@@ -10,6 +11,13 @@ from travelmind_api.agents.base import (
     PlanningResult,
 )
 from travelmind_api.services.maps.base import GeoPoint
+
+
+@pytest.fixture(autouse=True)
+def mock_image_download(monkeypatch):
+    # These tests cover selection. Byte decoding/HTTP failure has separate tests.
+    monkeypatch.setattr("travelmind_api.services.trip_image_enrichment.validate_image_url",
+                        lambda url: ({"width": 800, "height": 600, "sha256": url}, None))
 
 
 def _search_connector_module():
@@ -156,7 +164,7 @@ def test_enrich_plan_images_directly_uses_tavily_without_image_llm(monkeypatch):
     assert meal_item.image_status == "skipped"
     assert "image_curator" not in run_keys
     assert "image_reviewer" not in run_keys
-    assert any("image LLM roles skipped" in note for note in specialist_run.notes)
+    assert any("视觉复核未配置" in note for note in specialist_run.notes)
 
 
 def test_enrich_plan_images_marks_pending_failed_when_tavily_missing(monkeypatch):
@@ -276,7 +284,7 @@ def test_enrich_plan_images_processes_all_pending_visual_items_in_parallel(monke
     assert next(item for item in result.days[0].items if item.id == "item_activity").image_status == "skipped"
     assert next(item for item in result.days[0].items if item.id == "item_generic_walk").image_status == "skipped"
     specialist_run = next(run for run in result.trace.agent_runs if run.key == "attraction_image_specialist")
-    assert any("direct pending sight items parallel" in note for note in specialist_run.notes)
+    assert any("source extraction, preferred domains, then open search" in note for note in specialist_run.notes)
 
 
 def test_enrich_plan_images_skips_generic_explore_without_structured_anchor():
@@ -569,10 +577,10 @@ def test_enrich_plan_images_fails_when_candidates_do_not_match_sight(monkeypatch
     image_item = result.days[0].items[0]
     assert image_item.image_status == "failed"
     assert image_item.image_urls == []
-    assert "none passed sight relevance filters" in image_item.image_failure_reason
+    assert "未通过相关性、加载或视觉审核" in image_item.image_failure_reason
 
 
-def test_enrich_plan_images_prefers_tavily_top_level_candidate_order(monkeypatch):
+def test_enrich_plan_images_rejects_untraceable_top_level_candidate(monkeypatch):
     monkeypatch.setattr("travelmind_api.services.trip_image_enrichment.ConfiguredSearchGateway.available_tools", lambda self: {"search"})
     monkeypatch.setattr(
         "travelmind_api.services.trip_image_enrichment.ConfiguredSearchGateway.call_operation",
@@ -648,11 +656,11 @@ def test_enrich_plan_images_prefers_tavily_top_level_candidate_order(monkeypatch
     )
 
     image_item = result.days[0].items[0]
-    assert image_item.image_status == "completed"
-    assert image_item.image_urls == ["https://ak-d.tripcdn.com/images/zhongyang-street-good.jpg"]
+    assert image_item.image_status == "failed"
+    assert image_item.image_urls == []
 
 
-def test_enrich_plan_images_uses_top_level_images_when_result_images_are_empty(monkeypatch):
+def test_enrich_plan_images_does_not_guess_top_level_image_source(monkeypatch):
     monkeypatch.setattr("travelmind_api.services.trip_image_enrichment.ConfiguredSearchGateway.available_tools", lambda self: {"search"})
     monkeypatch.setattr(
         "travelmind_api.services.trip_image_enrichment.ConfiguredSearchGateway.call_operation",
@@ -669,8 +677,8 @@ def test_enrich_plan_images_uses_top_level_images_when_result_images_are_empty(m
     )
 
     image_item = result.days[0].items[0]
-    assert image_item.image_status == "completed"
-    assert image_item.image_urls == ["https://cdn.example.com/ginkaku-top.jpg"]
+    assert image_item.image_status == "failed"
+    assert image_item.image_urls == []
 
 
 def test_enrich_plan_images_ranks_candidates_by_relevance_score(monkeypatch):

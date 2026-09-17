@@ -14,6 +14,9 @@ class AgentSettingsUpdateRequest(BaseModel):
     poi_base_url: str | None = Field(default=None, max_length=512)
     poi_api_key: str | None = Field(default=None, max_length=2048)
     poi_model: str | None = Field(default=None, max_length=255)
+    weather_model: str | None = Field(default=None, max_length=255)
+    hotel_model: str | None = Field(default=None, max_length=255)
+    transport_model: str | None = Field(default=None, max_length=255)
     poi_wire_api: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="before")
@@ -105,6 +108,9 @@ class AgentSettingsResponse(BaseModel):
     poi_api_key_masked: str | None = None
     poi_has_api_key: bool = False
     poi_model: str | None = None
+    weather_model: str | None = None
+    hotel_model: str | None = None
+    transport_model: str | None = None
     poi_wire_api: str | None = None
     poi_configured: bool = False
 

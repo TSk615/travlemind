@@ -524,8 +524,8 @@ export const api = {
       method: "DELETE"
     })
   },
-  enrichTripImages(id: string) {
-    return request<JobRecord>(`/api/v1/trips/${id}/images/enrich`, {
+  enrichTripImages(id: string, force = false) {
+    return request<JobRecord>(`/api/v1/trips/${id}/images/enrich?force=${force}`, {
       method: "POST",
       headers: idempotencyHeaders()
     })

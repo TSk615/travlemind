@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import argparse
+from datetime import date, datetime
 from pathlib import Path
 
 from travelmind_api.agents.helloagents import HelloAgentsOrchestrator
@@ -10,12 +11,44 @@ from travelmind_api.db.models import JobRecord, Trip
 from travelmind_api.services.job_service import create_job
 from travelmind_api.jobs.handlers import process_job
 from travelmind_api.core.security import generate_identifier
+from travelmind_api.jobs import handlers as handlers_module
 
 
 USER_ID = "usr_ae160ee04edf63650dba"
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate and capture a TravelMind itinerary audit.")
+    parser.add_argument("--destination", default="", help="Override the source trip destination, for example 上海")
+    parser.add_argument("--origin", default="", help="Override the source trip origin")
+    parser.add_argument("--title", default="", help="Override the generated audit trip title")
+    parser.add_argument("--start-date", default="", help="Override start date in YYYY-MM-DD format")
+    parser.add_argument("--end-date", default="", help="Override end date in YYYY-MM-DD format")
+    parser.add_argument(
+        "--interests",
+        default="",
+        help="Comma-separated interest list used instead of the source trip interests",
+    )
+    parser.add_argument(
+        "--main-wire-api",
+        choices=("responses", "chat_completions"),
+        default="",
+        help="Temporarily override only the primary planner/brief wire API for this audit run",
+    )
+    args = parser.parse_args()
+    audit_interests = [item.strip() for item in args.interests.replace("，", ",").split(",") if item.strip()]
+
+    if args.main_wire_api:
+        original_resolve_llm_config = handlers_module._resolve_llm_config
+
+        def audit_resolve_llm_config(user, payload):
+            config = original_resolve_llm_config(user, payload)
+            if config is None:
+                return None
+            return config.model_copy(update={"wire_api": args.main_wire_api})
+
+        handlers_module._resolve_llm_config = audit_resolve_llm_config
+
     captured: list[dict] = []
     original_run_role = HelloAgentsOrchestrator._run_role
 
@@ -45,8 +78,11 @@ def main() -> None:
             raise
         record["raw_return"] = result
         try:
-            record["parsed_return"] = json.loads(result)
-        except (TypeError, json.JSONDecodeError):
+            # Mirror the orchestrator's tolerant JSON extraction so audits do
+            # not report a false parse failure when a model appends a revised
+            # object after its first complete JSON response.
+            record["parsed_return"] = self._extract_json_payload(result)
+        except (TypeError, ValueError, json.JSONDecodeError):
             record["parsed_return"] = None
         captured.append(record)
         return result
@@ -65,14 +101,14 @@ def main() -> None:
         trip = Trip(
             id=generate_identifier("trip"),
             user_id=source.user_id,
-            title=f"审计-天气来源修复-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-            origin=source.origin,
-            destination=source.destination,
-            start_date=source.start_date,
-            end_date=source.end_date,
+            title=args.title or f"审计-{args.destination or source.destination}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            origin=args.origin or source.origin,
+            destination=args.destination or source.destination,
+            start_date=date.fromisoformat(args.start_date) if args.start_date else source.start_date,
+            end_date=date.fromisoformat(args.end_date) if args.end_date else source.end_date,
             budget=source.budget,
             travelers=source.travelers,
-            interests=list(source.interests or []),
+            interests=audit_interests or list(source.interests or []),
             accommodation_preference=source.accommodation_preference,
             pace=source.pace,
             transport_mode=source.transport_mode,

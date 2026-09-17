@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "TravelMind AI FastAPI backend"
 requires-python = ">=3.10"
 dependencies = [
+  "opencc-python-reimplemented>=0.1.7,<0.2",
+  "pillow>=11.0,<13",
   "fastapi>=0.115.0,<1.0.0",
   "uvicorn>=0.34.0,<1.0.0",
   "sqlalchemy>=2.0.36,<3.0.0",

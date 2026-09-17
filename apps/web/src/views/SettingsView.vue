@@ -50,6 +50,9 @@ const form = reactive<{
   poi_base_url: string
   poi_api_key: string
   poi_model: string
+  weather_model: string
+  hotel_model: string
+  transport_model: string
   poi_wire_api: LlmWireApi
   search_provider: SearchServiceProvider
   search_transport: SearchServiceTransport
@@ -72,6 +75,9 @@ const form = reactive<{
   poi_base_url: "",
   poi_api_key: "",
   poi_model: "",
+  weather_model: "",
+  hotel_model: "",
+  transport_model: "",
   poi_wire_api: "responses",
   search_provider: "groksearch",
   search_transport: "mcp",
@@ -327,11 +333,22 @@ function buildEndpointPreview(
   return base.endsWith("/chat/completions") ? base : `${base}/chat/completions`
 }
 
+function wireApiForSearchModel(model: string): LlmWireApi {
+  const normalized = model.trim().toLowerCase()
+  if (normalized.startsWith("console/")) {
+    return "responses"
+  }
+  if (normalized.startsWith("web/")) {
+    return "chat_completions"
+  }
+  return form.poi_wire_api
+}
+
 const agentEndpointPreview = computed(() =>
   buildEndpointPreview(form.agent_provider_protocol, form.agent_base_url, agentBaseUrlPlaceholder.value, form.agent_model, form.agent_wire_api)
 )
 const poiEndpointPreview = computed(() =>
-  buildEndpointPreview(form.poi_provider_protocol, form.poi_base_url, poiBaseUrlPlaceholder.value, form.poi_model, form.poi_wire_api)
+  buildEndpointPreview(form.poi_provider_protocol, form.poi_base_url, poiBaseUrlPlaceholder.value, form.poi_model, wireApiForSearchModel(form.poi_model))
 )
 const agentModelValue = computed(() => form.agent_model.trim())
 const agentModelValueInOptions = computed(() =>
@@ -341,6 +358,12 @@ const poiModelValue = computed(() => form.poi_model.trim())
 const poiModelValueInOptions = computed(() =>
   poiModelOptions.value.some((model) => model.id === poiModelValue.value)
 )
+const weatherModelValue = computed(() => form.weather_model.trim())
+const hotelModelValue = computed(() => form.hotel_model.trim())
+const transportModelValue = computed(() => form.transport_model.trim())
+const weatherModelValueInOptions = computed(() => poiModelOptions.value.some((model) => model.id === weatherModelValue.value))
+const hotelModelValueInOptions = computed(() => poiModelOptions.value.some((model) => model.id === hotelModelValue.value))
+const transportModelValueInOptions = computed(() => poiModelOptions.value.some((model) => model.id === transportModelValue.value))
 
 function defaultWireApiForProtocol(protocol: LlmProviderProtocol): LlmWireApi {
   return protocol === "newapi" || protocol === "neiapi" ? "chat_completions" : "responses"
@@ -399,6 +422,9 @@ watch(
     form.poi_base_url = settings?.agent.poi_base_url ?? ""
     form.poi_api_key = ""
     form.poi_model = settings?.agent.poi_model ?? ""
+    form.weather_model = settings?.agent.weather_model ?? form.poi_model
+    form.hotel_model = settings?.agent.hotel_model ?? form.poi_model
+    form.transport_model = settings?.agent.transport_model ?? form.poi_model
     form.poi_wire_api = settings?.agent.poi_wire_api ?? defaultWireApiForProtocol(form.poi_provider_protocol)
     form.search_provider = settings?.search.provider ?? "groksearch"
     form.search_transport =
@@ -599,8 +625,8 @@ function handleAgentModelSelection(event: Event) {
   form.agent_model = (event.target as HTMLSelectElement).value
 }
 
-function handlePoiModelSelection(event: Event) {
-  form.poi_model = (event.target as HTMLSelectElement).value
+function handleSearchRoleModelSelection(field: "poi_model" | "weather_model" | "hotel_model" | "transport_model", event: Event) {
+  form[field] = (event.target as HTMLSelectElement).value
 }
 
 async function testAgentConnection() {
@@ -639,8 +665,26 @@ async function fetchPoiModels() {
     })
     form.poi_base_url = result.base_url || form.poi_base_url
     poiModelOptions.value = result.models
-    if (result.models.length > 0 && !form.poi_model.trim()) {
-      form.poi_model = result.models[0].id
+    const available = new Set(result.models.map((model) => model.id))
+    if (!form.poi_model.trim()) {
+      form.poi_model = available.has("Console/grok-4.20-multi-agent-0309")
+        ? "Console/grok-4.20-multi-agent-0309"
+        : (result.models[0]?.id ?? "")
+    }
+    if (!form.weather_model.trim()) {
+      form.weather_model = available.has("Web/grok-chat-fast")
+        ? "Web/grok-chat-fast"
+        : form.poi_model
+    }
+    if (!form.hotel_model.trim()) {
+      form.hotel_model = available.has("Console/grok-4.20-0309-reasoning")
+        ? "Console/grok-4.20-0309-reasoning"
+        : form.poi_model
+    }
+    if (!form.transport_model.trim()) {
+      form.transport_model = available.has("Console/grok-4.20-0309-reasoning")
+        ? "Console/grok-4.20-0309-reasoning"
+        : form.poi_model
     }
     saveSuccess.value = result.models.length > 0 ? copy.value.modelFetchSuccess : copy.value.modelFetchEmpty
   } catch (error) {
@@ -662,7 +706,7 @@ async function testPoiConnection() {
       base_url: form.poi_base_url.trim() || undefined,
       api_key: form.poi_api_key.trim() || undefined,
       model: form.poi_model.trim() || undefined,
-      wire_api: form.poi_wire_api
+      wire_api: wireApiForSearchModel(form.poi_model)
     })
     poiTestMessage.value = copy.value.testConnectionSuccess.replace("{latency}", String(result.latency_ms))
   } catch (error) {
@@ -685,7 +729,10 @@ async function save() {
       poi_provider_protocol: form.poi_provider_protocol,
       poi_base_url: form.poi_base_url.trim(),
       poi_model: form.poi_model.trim(),
-      poi_wire_api: form.poi_wire_api
+      weather_model: form.weather_model.trim(),
+      hotel_model: form.hotel_model.trim(),
+      transport_model: form.transport_model.trim(),
+      poi_wire_api: wireApiForSearchModel(form.poi_model)
     },
     search: {
       provider: form.search_provider,
@@ -910,7 +957,7 @@ void refreshXhsStatus()
 
         <div class="field field--full panel-subsection">
           <p class="kicker">搜索专用模型</p>
-          <p class="muted">统一用于 POI、天气、酒店和交通专家的联网检索。当前推荐使用 Web/grok-chat-fast。</p>
+          <p class="muted">四个专家共享服务地址和密钥，但分别选择模型。推荐：POI 使用 Multi-agent，天气使用 Non-reasoning，酒店和交通使用 Reasoning。</p>
         </div>
 
         <div class="field">
@@ -964,13 +1011,13 @@ void refreshXhsStatus()
         />
 
         <div class="field">
-          <label for="poi-model">{{ copy.modelLabel }}</label>
-          <input id="poi-model" v-model="form.poi_model" :placeholder="'Web/grok-chat-fast'" />
+          <label for="poi-model">POI 专家模型</label>
+          <input id="poi-model" v-model="form.poi_model" placeholder="Console/grok-4.20-multi-agent-0309" />
           <select
             v-if="poiModelOptions.length > 0"
             :value="poiModelValue"
             :aria-label="copy.fetchedModelsLabel"
-            @change="handlePoiModelSelection"
+            @change="handleSearchRoleModelSelection('poi_model', $event)"
           >
             <option value="">{{ copy.fetchedModelsPlaceholder }}</option>
             <option v-if="poiModelValue && !poiModelValueInOptions" :value="poiModelValue">
@@ -981,6 +1028,36 @@ void refreshXhsStatus()
             </option>
           </select>
           <p v-if="poiModelOptions.length > 0" class="muted">{{ copy.fetchedModelsHint }}</p>
+        </div>
+
+        <div class="field">
+          <label for="weather-model">天气专家模型</label>
+          <input id="weather-model" v-model="form.weather_model" placeholder="Web/grok-chat-fast" />
+          <select v-if="poiModelOptions.length > 0" :value="weatherModelValue" :aria-label="copy.fetchedModelsLabel" @change="handleSearchRoleModelSelection('weather_model', $event)">
+            <option value="">{{ copy.fetchedModelsPlaceholder }}</option>
+            <option v-if="weatherModelValue && !weatherModelValueInOptions" :value="weatherModelValue">{{ weatherModelValue }} ({{ copy.currentModelOption }})</option>
+            <option v-for="model in poiModelOptions" :key="`weather-${model.id}`" :value="model.id">{{ model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id }}</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="hotel-model">酒店专家模型</label>
+          <input id="hotel-model" v-model="form.hotel_model" placeholder="Console/grok-4.20-0309-reasoning" />
+          <select v-if="poiModelOptions.length > 0" :value="hotelModelValue" :aria-label="copy.fetchedModelsLabel" @change="handleSearchRoleModelSelection('hotel_model', $event)">
+            <option value="">{{ copy.fetchedModelsPlaceholder }}</option>
+            <option v-if="hotelModelValue && !hotelModelValueInOptions" :value="hotelModelValue">{{ hotelModelValue }} ({{ copy.currentModelOption }})</option>
+            <option v-for="model in poiModelOptions" :key="`hotel-${model.id}`" :value="model.id">{{ model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id }}</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="transport-model">交通专家模型</label>
+          <input id="transport-model" v-model="form.transport_model" placeholder="Console/grok-4.20-0309-reasoning" />
+          <select v-if="poiModelOptions.length > 0" :value="transportModelValue" :aria-label="copy.fetchedModelsLabel" @change="handleSearchRoleModelSelection('transport_model', $event)">
+            <option value="">{{ copy.fetchedModelsPlaceholder }}</option>
+            <option v-if="transportModelValue && !transportModelValueInOptions" :value="transportModelValue">{{ transportModelValue }} ({{ copy.currentModelOption }})</option>
+            <option v-for="model in poiModelOptions" :key="`transport-${model.id}`" :value="model.id">{{ model.name && model.name !== model.id ? `${model.name} (${model.id})` : model.id }}</option>
+          </select>
         </div>
 
         <div class="field">

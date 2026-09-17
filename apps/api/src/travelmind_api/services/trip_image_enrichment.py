@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -12,11 +13,16 @@ from pydantic import BaseModel, Field
 
 from travelmind_api.agents.base import AgentRunStep, PlannedItem, PlanningRequest, PlanningResult
 from travelmind_api.core.env import get_env
-from travelmind_api.services.search_connector import ConfiguredSearchGateway, SearchServiceConfig
+from travelmind_api.services.search_connector import (
+    ConfiguredSearchGateway, SearchServiceConfig, DEFAULT_IMAGE_INCLUDE_DOMAINS, normalize_domain_filter_values,
+)
+from travelmind_api.services.entity_identity import normalize_identity, entity_matches
+from travelmind_api.services.image_validation import validate_image_url
+from travelmind_api.services.image_review import review_images
 
 _logger = logging.getLogger(__name__)
 
-_VISUAL_ITEM_TYPES = {"sight"}
+_VISUAL_ITEM_TYPES = {"sight", "museum", "attraction", "landmark", "park", "district", "experience", "nature", "scenic"}
 _IMAGE_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _IMAGE_EXTENSION_PATTERN = re.compile(r"\.(?:png|jpe?g|webp|gif|bmp|svg)(?:$|[?#])", re.IGNORECASE)
 _IMAGE_HINT_PATTERN = re.compile(r"(?:image|photo|thumbnail|hero|cover|poster)", re.IGNORECASE)
@@ -58,7 +64,7 @@ _IMAGE_AGENT_RUN_KEYS = {"image_curator", "attraction_image_specialist", "image_
 _DIRECT_IMAGE_COUNT_PER_ITEM = 1
 _DIRECT_IMAGE_SEARCH_RESULT_COUNT = 6
 _DIRECT_IMAGE_MAX_WORKERS = 3
-_DIRECT_IMAGE_ITEM_TIMEOUT_SECONDS = 30.0
+_DIRECT_IMAGE_ITEM_TIMEOUT_SECONDS = 180.0
 _SCENE_HINTS_ZH = {
     "sight": "实景照片",
     "meal": "餐厅 菜品",
@@ -77,6 +83,13 @@ _SCENE_HINTS_EN = {
     "stay": "hotel exterior",
     "accommodation": "hotel exterior",
 }
+_IMAGE_QUERY_ALIASES = {
+    "田子坊": ["Tianzifang Shanghai 石库门 街景", "田子坊 石库门 里弄 实景"],
+    "武康路": ["Wukang Road Shanghai street view", "武康路 武康大楼 梧桐街景"],
+    "上海博物馆": ["上海博物馆 人民广场馆 实景 -上海市历史博物馆", "Shanghai Museum People's Square exterior interior"],
+    "豫园": ["豫园 上海 江南园林 湖心亭 实景", "Yu Garden Shanghai classical garden photo"],
+    "安福路": ["安福路 上海 街景 梧桐 历史建筑", "Anfu Road Shanghai street view historic buildings"],
+}
 _STRATEGY_SUFFIX_PATTERN = re.compile(
     r"(二刷|再逛|酒店周边|商圈漫步|周边漫步|周边散步|附近漫步|附近散步|walk|stroll|free time|slow walk|nearby.*walk|surrounding.*walk)",
     re.IGNORECASE,
@@ -86,6 +99,7 @@ _SEPARATOR_PATTERN = re.compile(r"\s*(?:/|／|｜|\||·|•|、|与|和|及| plu
 
 class ImageSearchOutcome(BaseModel):
     item_id: str
+    backup_urls: list[str] = Field(default_factory=list)
     image_urls: list[str] = Field(default_factory=list)
     source_urls: list[str] = Field(default_factory=list)
     status: str = "failed"
@@ -118,7 +132,29 @@ def enrich_plan_images(
     request: PlanningRequest,
     *,
     search_service: SearchServiceConfig | None,
+    force: bool = False,
+    review_config=None,
 ) -> PlanningResult:
+    if force:
+        for day in plan.days:
+            for item in day.items:
+                if _is_visual_candidate(item):
+                    item.image_urls = []
+                    item.image_backup_urls = []
+                    item.image_source_urls = []
+    # Carry the POI stage's evidence into the image stage.
+    for day in plan.days:
+        for item in day.items:
+            if not _is_visual_candidate(item):
+                continue
+            if item.booking_info is None:
+                from travelmind_api.agents.base import BookingInfo
+                item.booking_info = BookingInfo()
+            for document in plan.trace.grounding_documents:
+                if entity_matches(_best_item_name(item), str(document.get("title") or "")):
+                    source = str(document.get("url") or "")
+                    if source and source not in item.booking_info.source_urls:
+                        item.booking_info.source_urls.append(source)
     visual_items = _collect_and_prepare_visual_items(plan)
     plan.trace.agent_runs = [run for run in plan.trace.agent_runs if run.key not in _IMAGE_AGENT_RUN_KEYS]
 
@@ -126,6 +162,7 @@ def enrich_plan_images(
         request,
         search_service=search_service,
         visual_items=visual_items,
+        review_config=review_config,
     )
     plan.trace.agent_runs.append(specialist_run)
     return plan
@@ -186,6 +223,7 @@ def _run_direct_tavily_image_specialist(
     *,
     search_service: SearchServiceConfig | None,
     visual_items: list[PlannedItem],
+    review_config=None,
 ) -> AgentRunStep:
     if not visual_items:
         return AgentRunStep(
@@ -275,7 +313,8 @@ def _run_direct_tavily_image_specialist(
         )
         try:
             futures = [
-                (item, executor.submit(_search_item_images_direct, resolved_search_service, request, item))
+                (item, executor.submit(_search_item_images_direct, resolved_search_service, request, item,
+                                       **({"review_config": review_config} if review_config is not None else {})))
                 for item in unique_search_targets
             ]
             for item, future in futures:
@@ -324,7 +363,8 @@ def _run_direct_tavily_image_specialist(
             failed += 1
             continue
         item.image_urls = list(outcome.image_urls)
-        item.image_source_urls = list(outcome.source_urls[: max(1, min(len(outcome.source_urls), len(outcome.image_urls) or 1))])
+        item.image_backup_urls = list(outcome.backup_urls)
+        item.image_source_urls = list(outcome.source_urls)
         item.image_status = outcome.status
         item.image_failure_reason = outcome.failure_reason if outcome.status == "failed" else None
         all_citations.extend(outcome.source_urls)
@@ -357,7 +397,9 @@ def _run_direct_tavily_image_specialist(
         output_summary=f"Attached images for {completed} pending items; {failed} pending items remained without usable images.",
         prompt_version="tavily.direct_image_enrichment.v1",
         status="completed" if failed == 0 else "partial",
-        model=None,
+        model=(review_config.config_for_role("image_reviewer").model
+               if review_config is not None and hasattr(review_config, "config_for_role")
+               else getattr(review_config, "model", None)),
         notes=[
             "Provider: tavily.",
             f"Third-party endpoint: {endpoint}.",
@@ -365,12 +407,13 @@ def _run_direct_tavily_image_specialist(
             "Search tool: search.",
             "Image mode: include_images + include_image_descriptions.",
             f"Image source domains: {', '.join(domains) or 'default Tavily'}.",
-            f"Execution strategy: direct pending sight items parallel (max {_DIRECT_IMAGE_MAX_WORKERS} workers); image LLM roles skipped.",
+            f"Execution strategy: source extraction, preferred domains, then open search (max {_DIRECT_IMAGE_MAX_WORKERS} workers).",
+            "视觉复核：使用主模型或 image_reviewer 覆盖配置。" if review_config is not None else "视觉复核未配置：只检查来源及图片加载，不保证画面实体。",
             f"Search targets deduplicated: unique={len(unique_search_targets)}, total={len(search_targets)}.",
             f"Per-item image cap: {_DIRECT_IMAGE_COUNT_PER_ITEM}.",
             *query_previews,
             f"Candidate counts: raw={total_raw_candidates}, selected={total_selected}.",
-            *candidate_debug_notes[:12],
+            *candidate_debug_notes,
         ],
         citations=_dedupe(all_citations),
     )
@@ -395,6 +438,10 @@ def _resolve_tavily_image_search_config(search_service: SearchServiceConfig | No
         base_url=tavily_base_url.rstrip("/"),
         api_key=tavily_api_key,
         timeout_seconds=tavily_timeout,
+        image_include_domains=normalize_domain_filter_values(
+            get_env("TRAVELMIND_TAVILY_IMAGE_INCLUDE_DOMAINS") or get_env("TRAVELMIND_IMAGE_SEARCH_INCLUDE_DOMAINS"),
+            default=search_service.image_include_domains if search_service is not None else DEFAULT_IMAGE_INCLUDE_DOMAINS,
+        ),
     )
 
 
@@ -430,29 +477,111 @@ def _search_item_images_direct(
     search_service: SearchServiceConfig,
     request: PlanningRequest,
     item: PlannedItem,
+    *, review_config=None,
 ) -> ImageSearchOutcome:
     gateway = ConfiguredSearchGateway(search_service)
     query = _direct_image_query_for_item(item, request)
     try:
-        search_payload = gateway.call_operation(
-            "search",
-            {
-                "query": query,
+        candidates = []
+        ranked_candidates = []
+        selected_candidates = []
+        checked_urls = set()
+        content_hashes = set()
+        rejection_reasons = []
+        completed_rounds = 0
+        review_attempted = False
+        deadline = time.monotonic() + (160 if review_config is not None else 65)
+        known_sources = list(item.booking_info.source_urls if item.booking_info else [])[:2]
+        rounds = [
+            ("extract", {"urls": known_sources, "include_images": True}),
+            ("search", {"query": query, "num_results": _DIRECT_IMAGE_SEARCH_RESULT_COUNT,
+                        "include_images": True, "include_image_descriptions": True,
+                        "include_domains": [domain for domain in search_service.image_include_domains if domain not in {"pixabay.com", "pexels.com"}], "split_domains": False}),
+            ("search", {"query": f"{_best_item_name(item)} {request.destination} 景点 实景",
+                        "num_results": _DIRECT_IMAGE_SEARCH_RESULT_COUNT,
+                        "include_images": True, "include_image_descriptions": True,
+                        "include_domains": [], "split_domains": False}),
+        ]
+        # A small, entity-specific alias fallback helps when a Chinese POI's
+        # primary search is dominated by generic travel pages or undersized
+        # thumbnails. Keep it bounded to avoid turning image enrichment into
+        # an unbounded crawl.
+        canonical_name = _derive_canonical_item_name(item) or _best_item_name(item)
+        for alias_query in _IMAGE_QUERY_ALIASES.get(canonical_name, [])[:2]:
+            rounds.append(("search", {
+                "query": alias_query,
                 "num_results": _DIRECT_IMAGE_SEARCH_RESULT_COUNT,
                 "include_images": True,
                 "include_image_descriptions": True,
-            },
-        )
-        candidates = _extract_tavily_image_candidates(search_payload)
-        ranked_candidates = _rank_tavily_image_candidates(candidates, item, request)
-        selected_candidates = ranked_candidates[:_DIRECT_IMAGE_COUNT_PER_ITEM]
-        image_urls = _dedupe([candidate.url for candidate in selected_candidates])
+                "include_domains": [],
+                "split_domains": False,
+            }))
+        for operation, arguments in rounds:
+            round_checks = 0
+            source_checks = {}
+            loaded_candidates = []
+            if operation == "extract" and not known_sources:
+                continue
+            if time.monotonic() >= deadline:
+                break
+            try:
+                search_payload = gateway.call_operation(operation, arguments)
+                completed_rounds += 1
+            except Exception as exc:
+                rejection_reasons.append(f"{operation}：{type(exc).__name__}")
+                continue
+            # Extract may return text without a title. Use its actual document
+            # heading for matching, never the query as a manufactured title.
+            if operation == "extract":
+                for row in search_payload.get("results", []):
+                    if isinstance(row, dict) and not row.get("title"):
+                        row["title"] = str(row.get("raw_content") or "").strip().split("\n")[0][:200]
+            candidates.extend(_extract_tavily_image_candidates(search_payload))
+            ranked_candidates = _rank_tavily_image_candidates(candidates, item, request)
+            for candidate in ranked_candidates:
+                if candidate.url in checked_urls or time.monotonic() >= deadline or round_checks >= 6:
+                    continue
+                if source_checks.get(candidate.source_url, 0) >= 2:
+                    continue
+                checked_urls.add(candidate.url)
+                round_checks += 1
+                source_checks[candidate.source_url] = source_checks.get(candidate.source_url, 0) + 1
+                validated_candidate = candidate
+                metadata = None
+                reason = None
+                # A number of public Wikimedia thumbnails reject the
+                # thumbnail host while the canonical upload URL remains
+                # accessible. Try only deterministic public variants; keep
+                # the original page/source evidence unchanged.
+                for image_url in _image_url_variants(candidate.url):
+                    metadata, reason = validate_image_url(image_url)
+                    if metadata is not None:
+                        if image_url != candidate.url:
+                            validated_candidate = candidate.model_copy(update={"url": image_url})
+                        break
+                if metadata is None:
+                    rejection_reasons.append(f"{candidate.url}：{reason}")
+                    continue
+                if metadata["sha256"] in content_hashes:
+                    continue
+                content_hashes.add(metadata["sha256"])
+                loaded_candidates.append((validated_candidate, metadata))
+                if len(loaded_candidates) >= (4 if review_config is not None else 2):
+                    break
+            if loaded_candidates:
+                review_attempted = review_config is not None
+                selected_candidates, review_notes = review_images(review_config, item.name, request.destination, loaded_candidates)
+                selected_candidates = selected_candidates[:2]
+                rejection_reasons.extend(review_notes)
+            if selected_candidates:
+                break
+        image_urls = _dedupe([candidate.url for candidate in selected_candidates[:1]])
         source_urls = _dedupe([candidate.source_url for candidate in selected_candidates if candidate.source_url])
         if not image_urls:
-            failure_reason = (
-                f"Tavily returned no image candidates for query: {query}"
+            failure_reason = "图片来源服务调用失败，未完成搜索；可稍后重试。" if not completed_rounds else (
+                f"未找到景点图片候选：{query}"
                 if not candidates
-                else f"Tavily returned {len(candidates)} image candidates, but none passed sight relevance filters for query: {query}"
+                else f"找到 {len(candidates)} 张候选，但未通过相关性、加载或视觉审核：{query}"
             )
             return ImageSearchOutcome(
                 item_id=item.id,
@@ -463,8 +592,9 @@ def _search_item_images_direct(
                 candidate_count_raw=len(candidates),
                 candidate_count_after_rules=len(ranked_candidates),
                 candidate_count_after_review=0,
-                review_mode="rules_only",
-                review_summary="Direct Tavily rule ranking found no usable sight image candidates.",
+                review_mode="search_failed" if not completed_rounds else ("vision" if review_attempted else "rules_only"),
+                review_summary="未找到通过全部配图检查的候选；拒绝原因见审计记录。",
+                review_rejection_reasons=rejection_reasons,
                 debug_query=query,
                 debug_candidates_raw=[_serialize_tavily_candidate(candidate) for candidate in candidates[:8]],
                 debug_candidates_after_rules=[_serialize_tavily_candidate(candidate) for candidate in ranked_candidates[:8]],
@@ -473,14 +603,17 @@ def _search_item_images_direct(
         return ImageSearchOutcome(
             item_id=item.id,
             image_urls=image_urls,
+            backup_urls=[candidate.url for candidate in selected_candidates[1:]],
             source_urls=source_urls,
             status="completed",
             failure_reason=None,
             candidate_count_raw=len(candidates),
             candidate_count_after_rules=len(ranked_candidates),
             candidate_count_after_review=len(selected_candidates),
-            review_mode="rules_only",
-            review_summary="Direct Tavily candidate selection with rule ranking; image LLM roles skipped.",
+            review_mode="vision" if review_config is not None else "rules_only",
+            review_summary=("已通过名称与来源匹配、图片加载及视觉实体复核。" if review_config is not None
+                            else "已通过名称与来源匹配、图片加载及解码检查；不代表视觉实体已独立确认。"),
+            review_rejection_reasons=rejection_reasons,
             debug_query=query,
             debug_candidates_raw=[_serialize_tavily_candidate(candidate) for candidate in candidates[:8]],
             debug_candidates_after_rules=[_serialize_tavily_candidate(candidate) for candidate in ranked_candidates[:8]],
@@ -529,9 +662,40 @@ def _serialize_tavily_candidate(candidate: TavilyImageCandidate) -> dict[str, An
     }
 
 
+def _image_url_variants(url: str) -> list[str]:
+    """Return safe canonical variants for hosts that block thumbnails."""
+    original = str(url or "").strip()
+    variants = [original] if original else []
+    parsed = urlparse(original)
+    if parsed.hostname and parsed.hostname.casefold() in {"thumb.wikimedia.org", "upload.wikimedia.org"}:
+        # thumb URL shape: /wikipedia/commons/thumb/<hash>/<file>/<size>-<file>
+        parts = [part for part in parsed.path.split("/") if part]
+        try:
+            thumb_index = parts.index("thumb")
+            remainder = parts[thumb_index + 1 :]
+            if len(remainder) >= 3:
+                filename = remainder[-1]
+                size_match = re.match(r"\d+px-(.+)$", filename)
+                if size_match:
+                    canonical = "/" + "/".join(["wikipedia", "commons", *remainder[:-1]])
+                    variants.append(f"https://upload.wikimedia.org{canonical}")
+        except ValueError:
+            pass
+    if parsed.hostname and parsed.hostname.casefold().endswith("tripcdn.com"):
+        # Tavily frequently returns 200px Trip thumbnails that fail the
+        # minimum-size check even though the same public asset has a standard
+        # 600x400 rendition. Preserve the asset id and only change its CDN
+        # rendition suffix.
+        upgraded_path = re.sub(r"_W_\d+_0_R\d+_Q\d+(?=\.[A-Za-z]+$)", "_R_600_400_R5_Q90", parsed.path)
+        if upgraded_path != parsed.path:
+            variants.append(parsed._replace(path=upgraded_path).geturl())
+    return _dedupe(variants)
+
 def _build_candidate_debug_notes(item: PlannedItem, outcome: ImageSearchOutcome) -> list[str]:
     label = _best_item_name(item)
-    notes = [f"Image debug [{label}] query: {outcome.debug_query or 'n/a'}"]
+    notes = [f"Image debug [{label}] query: {outcome.debug_query or 'n/a'}",
+             f"Image debug [{label}] review_mode={outcome.review_mode}: {outcome.review_summary or ''}"]
+    notes.extend(f"Image debug [{label}] rejected: {reason}" for reason in outcome.review_rejection_reasons)
     for index, candidate in enumerate(outcome.debug_candidates_raw[:3], start=1):
         notes.append(
             f"Image debug [{label}] raw#{index}: title={candidate.get('source_title') or '-'} | origin={candidate.get('origin') or '-'} | image={candidate.get('url') or '-'} | source={candidate.get('source_url') or '-'}"
@@ -613,7 +777,7 @@ def _extract_tavily_image_candidates(payload: dict[str, Any]) -> list[TavilyImag
                 candidates.append(
                     TavilyImageCandidate(
                         url=url,
-                        source_url="",
+                        source_url=str(image.get("source_url") or "") if isinstance(image, dict) else "",
                         source_title=image_title,
                         source_snippet="",
                         image_description=image_description,
@@ -662,12 +826,18 @@ def _extract_tavily_image_candidates(payload: dict[str, Any]) -> list[TavilyImag
                     )
 
     deduped: list[TavilyImageCandidate] = []
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
     for candidate in candidates:
-        key = candidate.url.casefold()
+        key = candidate.url
         if key in seen:
+            previous = deduped[seen[key]]
+            # Keep the page-linked variant when the same image is returned in
+            # the independent top-level search and in a source page.
+            if candidate.source_url and not previous.source_url:
+                candidate.image_description = candidate.image_description or previous.image_description
+                deduped[seen[key]] = candidate
             continue
-        seen.add(key)
+        seen[key] = len(deduped)
         deduped.append(candidate)
     return deduped
 
@@ -679,6 +849,13 @@ def _rank_tavily_image_candidates(
 ) -> list[TavilyImageCandidate]:
     filtered: list[TavilyImageCandidate] = []
     for candidate in candidates:
+        if not candidate.source_url:
+            continue
+        source_path = urlparse(candidate.source_url).path.lower()
+        if any(part in source_path for part in ("/hotels/", "/hotel/", "/restaurants/")):
+            continue
+        if re.search(r"酒店|宾馆|民宿|饭店|hotel|restaurant", candidate.source_title, re.I):
+            continue
         if _looks_like_disallowed_image_url(candidate.url):
             continue
         if _looks_like_page_chrome_image(candidate):
@@ -687,6 +864,9 @@ def _rank_tavily_image_candidates(
             continue
         if not _candidate_matches_item_subject(candidate, item):
             continue
+        if _best_item_name(item) in {"人民公园", "中山公园", "植物园", "城隍庙", "老街"}:
+            if not entity_matches(request.destination, candidate.source_title + candidate.image_description + candidate.source_snippet):
+                continue
         filtered.append(candidate)
     scored = [
         (_score_tavily_image_candidate(candidate, item, request), index, candidate)
@@ -712,6 +892,7 @@ def _candidate_matches_item_subject(candidate: TavilyImageCandidate, item: Plann
     aliases = _dedupe_preserve_order(
         [
             _normalize_text(_best_item_name(item)),
+            re.sub(r"(历史文化街区|历史风貌区)$", "", _normalize_text(_best_item_name(item))),
             _normalize_text(str(item.name or "")),
             _normalize_text(str(item.location_ref.name if item.location_ref is not None and _looks_like_real_location_ref_name(item) else "")),
         ]
@@ -736,17 +917,12 @@ def _candidate_matches_item_subject(candidate: TavilyImageCandidate, item: Plann
 
 
 def _normalize_match_text(value: str) -> str:
-    normalized = _normalize_text(value).casefold().translate(_TRADITIONAL_TO_SIMPLIFIED)
-    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", normalized)
+    return normalize_identity(value)
 
 
 def _cjk_fuzzy_match(alias: str, source: str) -> bool:
-    alias_chars = [char for char in _CJK_CHAR_PATTERN.findall(alias) if char not in _CJK_WEAK_MATCH_CHARS]
-    if len(alias_chars) < 3:
-        return False
-    source_chars = set(_CJK_CHAR_PATTERN.findall(source))
-    overlap = sum(1 for char in alias_chars if char in source_chars)
-    return overlap >= max(3, int(len(alias_chars) * 0.75))
+    # Character overlap cannot distinguish 上海博物馆 from 上海公安博物馆.
+    return False
 
 
 def _looks_like_disallowed_image_url(url: str) -> bool:
@@ -766,7 +942,7 @@ def _score_tavily_image_candidate(candidate: TavilyImageCandidate, item: Planned
         ]
         if part
     )
-    normalized_source = _normalize_text(source_text).casefold()
+    normalized_source = _normalize_match_text(source_text)
     primary_name = _normalize_text(_best_item_name(item))
     destination = _normalize_text(str(request.destination or ""))
     category = _normalize_text(str(item.location_ref.category if item.location_ref is not None else item.type or ""))
@@ -784,12 +960,11 @@ def _score_tavily_image_candidate(candidate: TavilyImageCandidate, item: Planned
         score -= 10
     if candidate.origin == "result":
         score += max(0, 12 - (candidate.result_rank * 3))
-        score += min(candidate.image_index, 4) * 4
 
     for alias in aliases:
         if not alias:
             continue
-        alias_lower = alias.casefold()
+        alias_lower = _normalize_match_text(alias)
         if alias_lower and alias_lower in normalized_source:
             score += 90 if alias == primary_name else 55
 
@@ -853,7 +1028,8 @@ def _looks_like_generic_page_asset(candidate: TavilyImageCandidate) -> bool:
         for part in [candidate.url, candidate.image_description, candidate.source_title]
         if part
     )
-    generic_markers = ("cover", "thumb", "thumbnail", "default", "placeholder", "share", "social")
+    generic_markers = ("placeholder", "default-avatar", "share-icon", "trip-og-image", "maxresdefault", "hqdefault",
+                       "triangle_down", "/others/images/", "og-default", "share-default")
     return any(marker in normalized for marker in generic_markers)
 
 

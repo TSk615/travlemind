@@ -113,7 +113,7 @@ def test_tavily_gateway_calls_search_api(monkeypatch):
         {"query": "Kyoto quiet hotels", "num_results": 6, "include_images": True, "include_image_descriptions": True},
     )
 
-    assert gateway.available_tools() == {"search"}
+    assert gateway.available_tools() == {"search", "extract"}
     assert [call[0] for call in calls] == [
         "https://api.tavily.com/search",
         "https://api.tavily.com/search",

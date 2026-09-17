@@ -239,6 +239,7 @@ def refine_trip_endpoint(
 def enrich_trip_images_endpoint(
     trip_id: str,
     background_tasks: BackgroundTasks,
+    force: bool = False,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -252,7 +253,7 @@ def enrich_trip_images_endpoint(
         job_type="trip.image_enrich",
         owner_user_id=current_user.id,
         trip_id=trip.id,
-        payload={"trip_id": trip.id},
+        payload={"trip_id": trip.id, "force": force},
         idempotency_key=idempotency_key,
     )
     dispatch_job(job.id, settings, background_tasks)

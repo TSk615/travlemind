@@ -238,6 +238,9 @@ def serialize_runtime_settings(user: User, settings: Settings) -> RuntimeSetting
             poi_api_key_masked=mask_api_key(getattr(user, "poi_llm_api_key", None)),
             poi_has_api_key=bool(getattr(user, "poi_llm_api_key", None)),
             poi_model=getattr(user, "poi_llm_model", None),
+            weather_model=getattr(user, "weather_llm_model", None) or getattr(user, "poi_llm_model", None),
+            hotel_model=getattr(user, "hotel_llm_model", None) or getattr(user, "poi_llm_model", None),
+            transport_model=getattr(user, "transport_llm_model", None) or getattr(user, "poi_llm_model", None),
             poi_wire_api=getattr(user, "poi_llm_wire_api", None),
             poi_configured=bool(getattr(user, "poi_llm_base_url", None) and getattr(user, "poi_llm_api_key", None) and getattr(user, "poi_llm_model", None)),
         ),
@@ -467,6 +470,12 @@ def update_user_runtime_settings(session: Session, user: User, payload: RuntimeS
         user.poi_llm_api_key = _normalize_api_key(agent_updates["poi_api_key"])
     if "poi_model" in agent_updates:
         user.poi_llm_model = _normalize_model(agent_updates["poi_model"])
+    if "weather_model" in agent_updates:
+        user.weather_llm_model = _normalize_model(agent_updates["weather_model"])
+    if "hotel_model" in agent_updates:
+        user.hotel_llm_model = _normalize_model(agent_updates["hotel_model"])
+    if "transport_model" in agent_updates:
+        user.transport_llm_model = _normalize_model(agent_updates["transport_model"])
     if "poi_wire_api" in agent_updates:
         user.poi_llm_wire_api = _normalize_wire_api_value(agent_updates["poi_wire_api"])
     clearing_saved_poi_config = (

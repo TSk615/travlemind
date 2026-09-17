@@ -166,6 +166,7 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
                         type=item.type,
                         name=item.name,
                         start_time=item.start_time,
+                        end_day_offset=item.end_day_offset,
                         end_time=item.end_time,
                         location=location_text,
                         score=item.score,

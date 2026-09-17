@@ -68,6 +68,9 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
             "poi_api_key_masked": None,
             "poi_has_api_key": False,
             "poi_model": None,
+            "weather_model": None,
+            "hotel_model": None,
+            "transport_model": None,
             "poi_wire_api": None,
             "poi_configured": False,
         },
@@ -106,8 +109,11 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
                 "poi_provider_protocol": "newapi",
                 "poi_base_url": " https://poi.example.com/v1/ ",
                 "poi_api_key": "poi-secret-4321",
-                "poi_model": "grok-4.20-multi-agent-xhigh",
-                "poi_wire_api": "chat_completions",
+                "poi_model": "Console/grok-4.20-multi-agent-0309",
+                "weather_model": "Console/grok-4.20-0309-non-reasoning",
+                "hotel_model": "Console/grok-4.20-0309-reasoning",
+                "transport_model": "Console/grok-4.20-0309-reasoning",
+                "poi_wire_api": "responses",
             },
             "search": {
                 "provider": "groksearch",
@@ -140,8 +146,11 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
     assert updated["agent"]["api_key_masked"] != raw_api_key
     assert updated["agent"]["poi_provider_protocol"] == "newapi"
     assert updated["agent"]["poi_base_url"] == "https://poi.example.com/v1"
-    assert updated["agent"]["poi_model"] == "grok-4.20-multi-agent-xhigh"
-    assert updated["agent"]["poi_wire_api"] == "chat_completions"
+    assert updated["agent"]["poi_model"] == "Console/grok-4.20-multi-agent-0309"
+    assert updated["agent"]["weather_model"] == "Console/grok-4.20-0309-non-reasoning"
+    assert updated["agent"]["hotel_model"] == "Console/grok-4.20-0309-reasoning"
+    assert updated["agent"]["transport_model"] == "Console/grok-4.20-0309-reasoning"
+    assert updated["agent"]["poi_wire_api"] == "responses"
     assert updated["agent"]["poi_has_api_key"] is True
     assert updated["agent"]["poi_configured"] is True
     assert updated["agent"]["poi_api_key_masked"].startswith("poi-")
@@ -190,8 +199,11 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
         assert user.llm_agent_provider == "helloagents"
         assert user.poi_llm_base_url == "https://poi.example.com/v1"
         assert user.poi_llm_api_key == "poi-secret-4321"
-        assert user.poi_llm_model == "grok-4.20-multi-agent-xhigh"
-        assert user.poi_llm_wire_api == "chat_completions"
+        assert user.poi_llm_model == "Console/grok-4.20-multi-agent-0309"
+        assert user.weather_llm_model == "Console/grok-4.20-0309-non-reasoning"
+        assert user.hotel_llm_model == "Console/grok-4.20-0309-reasoning"
+        assert user.transport_llm_model == "Console/grok-4.20-0309-reasoning"
+        assert user.poi_llm_wire_api == "responses"
         assert user.poi_llm_provider_protocol == "newapi"
         assert user.search_service_provider == "groksearch"
         assert user.search_service_transport == "mcp"

@@ -6,6 +6,7 @@ import type {
   ItineraryItem,
   SearchDocument,
   TransportBookingSummary,
+  TransportServiceCandidate,
   Trip,
   TripRefineInput,
   TripRefineSession,
@@ -53,6 +54,7 @@ interface BrowserLlmBookingInfo {
   notes?: string[]
   source_urls?: string[]
   schedule_verified?: boolean
+  schedule_status?: "unknown" | "reference" | "date_specific"
   service_number?: string | null
   schedule_checked_at?: string | null
   schedule_source_url?: string | null
@@ -78,6 +80,7 @@ interface BrowserLlmTransportBookingSummary {
   reminders?: string[]
   notes?: string[]
   source_urls?: string[]
+  service_candidates?: TransportServiceCandidate[]
 }
 
 interface BrowserLlmPayload {
@@ -513,6 +516,7 @@ function normalizeBookingInfo(payload?: BrowserLlmBookingInfo | null, previous?:
     notes: normalizeStringArray(payload?.notes, previous?.notes),
     source_urls: normalizeUrlArray(payload?.source_urls, previous?.source_urls),
     schedule_verified: normalizeOptionalBoolean(payload?.schedule_verified, previous?.schedule_verified ?? false),
+    schedule_status: payload?.schedule_status ?? previous?.schedule_status ?? "unknown",
     service_number: normalizeOptionalText(payload?.service_number ?? previous?.service_number),
     schedule_checked_at: normalizeOptionalText(payload?.schedule_checked_at ?? previous?.schedule_checked_at),
     schedule_source_url: normalizeOptionalUrl(payload?.schedule_source_url ?? previous?.schedule_source_url)
@@ -544,6 +548,7 @@ function normalizeTransportBookingSummary(
   const normalized: TransportBookingSummary = {
     summary: normalizeOptionalText(payload?.summary ?? previous?.summary),
     recommended_option: normalizeOptionalText(payload?.recommended_option ?? previous?.recommended_option),
+    service_candidates: Array.isArray(payload?.service_candidates) ? payload.service_candidates : (previous?.service_candidates ?? []),
     estimated_intercity_cost: normalizeOptionalNumber(payload?.estimated_intercity_cost, previous?.estimated_intercity_cost) ?? 0,
     estimated_local_transport_cost: normalizeOptionalNumber(payload?.estimated_local_transport_cost, previous?.estimated_local_transport_cost) ?? 0,
     booking_required: normalizeOptionalBoolean(payload?.booking_required, previous?.booking_required ?? false),
@@ -567,6 +572,7 @@ function hasBookingInfoContent(value: BookingInfo): boolean {
       value.booking_window ||
       value.reminder ||
       value.schedule_verified ||
+      (value.schedule_status && value.schedule_status !== "unknown") ||
       value.service_number ||
       value.schedule_checked_at ||
       value.schedule_source_url ||
@@ -597,6 +603,7 @@ function hasTransportBookingSummaryContent(value: TransportBookingSummary): bool
       value.pass_or_ticket_notes?.length ||
       value.reminders?.length ||
       value.notes?.length ||
+      value.service_candidates?.length ||
       value.source_urls?.length
   )
 }
