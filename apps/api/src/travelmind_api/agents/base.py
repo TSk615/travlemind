@@ -262,6 +262,9 @@ class ExportDraft(BaseModel):
 
 
 class AgentOrchestrator(Protocol):
+    def set_execution_context(self, *, job_id: str | None = None) -> None:
+        ...
+
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:
         ...
 

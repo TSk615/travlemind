@@ -727,7 +727,6 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         self._current_xhs_source_enabled = False
         self._current_user_id: str | None = None
         self._current_search_service: SearchServiceConfig | None = None
-        self._current_job_id: str | None = None
         self._resume_checkpoint: dict[str, Any] | None = None
         self._last_checkpoint: dict[str, Any] | None = None
         self._native_role_citations: dict[str, list[str]] = {}
@@ -780,7 +779,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _log_event(self, event: str, *, message: str, level: str = "INFO", **payload: Any) -> None:
         log_job_event(
             event,
-            job_id=self._current_job_id,
+            job_id=self._execution_job_id,
             logger_name=__name__,
             level=level,
             message=message,
@@ -796,7 +795,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "version": _CHECKPOINT_VERSION,
             "workflow": _CHECKPOINT_WORKFLOW,
             "trip_id": request.trip_id,
-            "job_id": self._current_job_id,
+            "job_id": self._execution_job_id,
             "trip_request": trip_payload,
             "roles": deepcopy(roles),
             "completed_roles": [role for role in _ROLE_SEQUENCE if isinstance(roles.get(role), dict) and roles[role].get("status") == "completed"],

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from travelmind_api.agents.base import PlanningRequest
 from travelmind_api.agents.helloagents import HelloAgentsBrief, HelloAgentsOrchestrator
+from travelmind_api.agents.factory import build_orchestrator
+from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator
+from travelmind_api.agents.provider import normalize_agent_provider
 from travelmind_api.agents.runtime import WorkflowCancelled, WorkflowRuntime
 from travelmind_api.agents.workflows.trip_generation import (
     TripGenerationDependencies,
@@ -16,6 +20,8 @@ from travelmind_api.agents.workflows.trip_generation import (
 )
 from travelmind_api.prompts.roles.helloagents import build_brief_parser_prompt as build_legacy_brief_prompt
 from travelmind_api.prompts.roles.trip import build_brief_parser_prompt
+from travelmind_api.core.config import Settings
+from travelmind_api.services.llm.config import LlmConfig
 from travelmind_api.services.llm.config import LlmEndpointConfig
 from travelmind_api.services.llm.role_invoker import (
     OpenAICompatibleRoleInvoker,
@@ -24,6 +30,7 @@ from travelmind_api.services.llm.role_invoker import (
 )
 from travelmind_api.services.planning.payloads import build_trip_request_payload
 from travelmind_api.services.planning.role_models import PlanningBrief
+from travelmind_api.services.maps.stub import StubMapsPoiProvider
 
 
 def _request() -> PlanningRequest:
@@ -191,3 +198,170 @@ def test_runtime_checks_cancellation_before_progress_callback():
         runtime.emit_progress("brief_parser", "Brief parser", "Cancelled", 24)
     assert called == []
 
+
+def test_langgraph_provider_normalizes_and_factory_builds_new_orchestrator():
+    assert normalize_agent_provider("langgraph-workflow") == "langgraph"
+    orchestrator = build_orchestrator(
+        Settings(agent_provider="langgraph"),
+        llm_config=LlmConfig(
+            base_url="https://llm.example.test/v1",
+            api_key="test-key",
+            model="test-model",
+            wire_api="responses",
+        ),
+        agent_provider="langgraph",
+    )
+    assert isinstance(orchestrator, LangGraphOrchestrator)
+
+
+def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monkeypatch):
+    from test_llm_orchestrator import _fake_helloagents_module
+    import travelmind_api.agents.langgraph_orchestrator as langgraph_module
+
+    calls: list[str] = []
+    fake_module = _fake_helloagents_module(calls)
+
+    class FixtureRoleInvoker:
+        def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
+            agent = fake_module.SimpleAgent(
+                name=invocation.role_name,
+                llm=SimpleNamespace(kwargs={}),
+                system_prompt=invocation.system_prompt,
+            )
+            content = agent.run(json.dumps(dict(invocation.input_payload), ensure_ascii=False))
+            return RoleInvocationResult(
+                request_id=f"llmreq-{invocation.role_name}",
+                role_name=invocation.role_name,
+                content=content,
+                model=invocation.endpoint.model,
+                provider_protocol=invocation.endpoint.provider_protocol,
+                wire_api=invocation.endpoint.wire_api,
+                endpoint_host="llm.example.test",
+                prompt_version=invocation.prompt_version,
+                latency_ms=1,
+                citations=[],
+                usage=None,
+            )
+
+    monkeypatch.setattr(langgraph_module, "verify_daily_forecast_pages", lambda value, _config: value)
+    monkeypatch.setattr(langgraph_module, "verify_transport_candidate_pages", lambda value, _config: value)
+    monkeypatch.setattr(langgraph_module, "verify_hotel_pages", lambda value, _config: value)
+    monkeypatch.setattr(
+        langgraph_module,
+        "verify_poi_open_days",
+        lambda value, **_kwargs: value,
+    )
+    request = _request().model_copy(
+        update={
+            "title": "Kyoto weekend",
+            "origin": "Osaka",
+            "destination": "Kyoto",
+            "start_date": date(2026, 4, 14),
+            "end_date": date(2026, 4, 15),
+            "interests": ["temples", "coffee"],
+            "accommodation_preference": "Quiet boutique hotel",
+            "locale": "en-US",
+        }
+    )
+    orchestrator = LangGraphOrchestrator(
+        LlmConfig(
+            base_url="https://llm.example.test/v1",
+            api_key="test-key",
+            model="test-model",
+            wire_api="responses",
+        ),
+        maps_provider=StubMapsPoiProvider(),
+        role_invoker=FixtureRoleInvoker(),
+    )
+
+    result = orchestrator.plan_trip(request)
+    checkpoint = orchestrator.get_graph_state()
+
+    assert result.trace.provider == "langgraph"
+    assert result.trace.license_notice is None
+    assert len(result.days) == 2
+    assert calls[0] == "brief_parser"
+    assert set(calls[1:3]) == {"poi_specialist", "weather_specialist"}
+    assert set(calls[3:5]) == {"hotel_specialist", "transport_specialist"}
+    assert calls[-1] == "itinerary_planner"
+    assert checkpoint is not None
+    assert checkpoint["repair_count"] == 0
+    assert set(checkpoint["role_results"]) == set(calls)
+    serialized = json.dumps(checkpoint, ensure_ascii=False, sort_keys=True)
+    assert "test-key" not in serialized
+    assert "user-1" not in serialized
+
+
+def test_langgraph_orchestrator_repairs_one_invalid_draft(monkeypatch):
+    from test_llm_orchestrator import _fake_helloagents_module
+    import travelmind_api.agents.langgraph_orchestrator as langgraph_module
+
+    calls: list[str] = []
+    fake_module = _fake_helloagents_module(calls)
+    planner_calls = 0
+
+    class RepairingFixtureInvoker:
+        def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
+            nonlocal planner_calls
+            agent = fake_module.SimpleAgent(
+                name=invocation.role_name,
+                llm=SimpleNamespace(kwargs={}),
+                system_prompt=invocation.system_prompt,
+            )
+            content = agent.run(json.dumps(dict(invocation.input_payload), ensure_ascii=False))
+            if invocation.role_name == "itinerary_planner":
+                planner_calls += 1
+                if planner_calls == 1:
+                    invalid = json.loads(content)
+                    invalid["days"][0]["items"][1]["start_time"] = "10:30"
+                    content = json.dumps(invalid)
+            return RoleInvocationResult(
+                request_id=f"llmreq-{invocation.role_name}-{planner_calls}",
+                role_name=invocation.role_name,
+                content=content,
+                model=invocation.endpoint.model,
+                provider_protocol=invocation.endpoint.provider_protocol,
+                wire_api=invocation.endpoint.wire_api,
+                endpoint_host="llm.example.test",
+                prompt_version=invocation.prompt_version,
+                latency_ms=1,
+                citations=[],
+                usage=None,
+            )
+
+    monkeypatch.setattr(langgraph_module, "verify_daily_forecast_pages", lambda value, _config: value)
+    monkeypatch.setattr(langgraph_module, "verify_transport_candidate_pages", lambda value, _config: value)
+    monkeypatch.setattr(langgraph_module, "verify_hotel_pages", lambda value, _config: value)
+    monkeypatch.setattr(langgraph_module, "verify_poi_open_days", lambda value, **_kwargs: value)
+    request = _request().model_copy(
+        update={
+            "title": "Kyoto weekend",
+            "origin": "Osaka",
+            "destination": "Kyoto",
+            "start_date": date(2026, 4, 14),
+            "end_date": date(2026, 4, 15),
+            "interests": ["temples", "coffee"],
+            "accommodation_preference": "Quiet boutique hotel",
+            "locale": "en-US",
+        }
+    )
+    orchestrator = LangGraphOrchestrator(
+        LlmConfig(
+            base_url="https://llm.example.test/v1",
+            api_key="test-key",
+            model="test-model",
+            wire_api="responses",
+        ),
+        maps_provider=StubMapsPoiProvider(),
+        role_invoker=RepairingFixtureInvoker(),
+    )
+
+    result = orchestrator.plan_trip(request)
+    checkpoint = orchestrator.get_graph_state()
+
+    assert len(result.days) == 2
+    assert planner_calls == 2
+    assert checkpoint is not None
+    assert checkpoint["repair_count"] == 1
+    assert checkpoint["validation_errors"] == []
+    assert any("required one deterministic-validation repair" in note for note in result.trace.notes)

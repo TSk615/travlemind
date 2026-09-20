@@ -4,9 +4,14 @@ from collections.abc import Callable
 
 from travelmind_api.agents.base import AgentOrchestrator
 from travelmind_api.agents.helloagents import HelloAgentsOrchestrator
+from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator
 from travelmind_api.agents.runtime import RoleProgressCallback
 from travelmind_api.agents.openai_compatible import OpenAICompatibleOrchestrator
-from travelmind_api.agents.provider import AGENT_PROVIDER_HELLOAGENTS, normalize_agent_provider
+from travelmind_api.agents.provider import (
+    AGENT_PROVIDER_HELLOAGENTS,
+    AGENT_PROVIDER_LANGGRAPH,
+    normalize_agent_provider,
+)
 from travelmind_api.agents.stub import StubOrchestrator
 from travelmind_api.core.config import Settings
 from travelmind_api.services.llm import LlmConfig
@@ -28,6 +33,9 @@ def build_orchestrator(
 
     if enable_helloagents and resolved_provider == AGENT_PROVIDER_HELLOAGENTS:
         return HelloAgentsOrchestrator(resolved_llm_config, maps_provider=maps_provider, progress_callback=progress_callback)
+
+    if resolved_provider == AGENT_PROVIDER_LANGGRAPH:
+        return LangGraphOrchestrator(resolved_llm_config, maps_provider=maps_provider, progress_callback=progress_callback)
 
     if resolved_llm_config is not None:
         return OpenAICompatibleOrchestrator(resolved_llm_config, maps_provider=maps_provider)

@@ -113,6 +113,7 @@ const enCopy = {
   protocolNeiApi: "NEI API",
   providerLabel: "Planning provider",
   providerStandard: "Standard",
+  providerLangGraph: "LangGraph",
   providerHelloAgents: "HelloAgents (PoC)",
   baseUrlLabel: "Base URL",
   baseUrlPlaceholder: "https://api.example.com/v1",
@@ -183,6 +184,7 @@ const zhCopy = {
   protocolNeiApi: "NEI API",
   providerLabel: "规划提供方",
   providerStandard: "标准模式",
+  providerLangGraph: "LangGraph",
   providerHelloAgents: "HelloAgents（PoC）",
   baseUrlLabel: "接口地址",
   baseUrlPlaceholder: "https://api.example.com/v1",
@@ -864,6 +866,7 @@ void refreshXhsStatus()
           <label for="agent-provider">{{ copy.providerLabel }}</label>
           <select id="agent-provider" v-model="form.agent_provider">
             <option value="standard">{{ copy.providerStandard }}</option>
+            <option value="langgraph">{{ copy.providerLangGraph }}</option>
             <option value="helloagents">{{ copy.providerHelloAgents }}</option>
           </select>
         </div>

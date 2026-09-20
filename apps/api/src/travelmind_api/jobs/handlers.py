@@ -350,11 +350,11 @@ def _resolve_agent_provider(user: User | None) -> str:
 
 
 
-def _emit_helloagents_progress(job_id: str, role_key: str, role_title: str, role_description: str, progress_percent: int) -> None:
+def _emit_agent_progress(job_id: str, role_key: str, role_title: str, role_description: str, progress_percent: int) -> None:
     _transition_job(
         job_id,
         stage="route_planning",
-        stage_message=f"HelloAgents {role_title}: {role_description}",
+        stage_message=f"{role_title}: {role_description}",
         progress_percent=progress_percent,
     )
 
@@ -452,14 +452,14 @@ def _process_trip_generation(job: JobExecution) -> dict:
         if not trip:
             raise HTTPException(status_code=404, detail="Trip not found for job")
         user = session.query(User).filter(User.id == trip.user_id).one_or_none()
-        if _resolve_agent_provider(user) == "helloagents":
+        if _resolve_agent_provider(user) in {"helloagents", "langgraph"}:
             missing_poi_fields = user_poi_role_override_missing_fields(user)
             if missing_poi_fields:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail={
                         "code": "poi_llm_override_incomplete",
-                        "message": "Complete POI base URL, API key, and model, or clear all POI model fields before generating with HelloAgents.",
+                        "message": "Complete POI base URL, API key, and model, or clear all POI model fields before generating with the selected backend workflow.",
                         "missing_fields": missing_poi_fields,
                     },
                 )
@@ -474,7 +474,7 @@ def _process_trip_generation(job: JobExecution) -> dict:
             llm_config=_resolve_llm_config(user, job.payload),
             agent_provider=_resolve_agent_provider(user),
             enable_helloagents=True,
-            progress_callback=lambda role_key, role_title, role_description, progress_percent: _emit_helloagents_progress(
+            progress_callback=lambda role_key, role_title, role_description, progress_percent: _emit_agent_progress(
                 job.id,
                 role_key,
                 role_title,
@@ -482,7 +482,7 @@ def _process_trip_generation(job: JobExecution) -> dict:
                 progress_percent,
             ),
         )
-        setattr(orchestrator, "_current_job_id", job.id)
+        orchestrator.set_execution_context(job_id=job.id)
         resume_checkpoint = job.payload.get("resume_checkpoint")
         set_resume_checkpoint = getattr(orchestrator, "set_resume_checkpoint", None)
         if callable(set_resume_checkpoint) and isinstance(resume_checkpoint, dict):
@@ -558,7 +558,7 @@ def _process_trip_refine(job: JobExecution) -> dict:
             agent_provider=_resolve_agent_provider(user),
             enable_helloagents=False,
         )
-        setattr(orchestrator, "_current_job_id", job.id)
+        orchestrator.set_execution_context(job_id=job.id)
 
         _transition_job(job.id, stage="source_search", stage_message="Collecting context for refinement.", progress_percent=24)
         _transition_job(job.id, stage="source_scoring", stage_message="Scoring refinement context.", progress_percent=42)
@@ -656,7 +656,7 @@ def _process_pdf_export(job: JobExecution) -> dict:
             agent_provider=_resolve_agent_provider(user),
             enable_helloagents=False,
         )
-        setattr(orchestrator, "_current_job_id", job.id)
+        orchestrator.set_execution_context(job_id=job.id)
         request = _build_request(trip, user)
         plan = _load_plan_from_trip(trip)
         if plan is None:

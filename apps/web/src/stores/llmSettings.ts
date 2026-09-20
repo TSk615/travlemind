@@ -57,7 +57,10 @@ function normalizeProviderProtocol(value: string | null | undefined): LlmProvide
 }
 
 function normalizeAgentProvider(value: string | null | undefined): LlmAgentProvider {
-  return value === "helloagents" ? "helloagents" : "standard"
+  if (value === "helloagents" || value === "langgraph") {
+    return value
+  }
+  return "standard"
 }
 
 function normalizeSearchTransport(value: string | null | undefined): SearchServiceTransport {
@@ -156,7 +159,9 @@ export const useLlmSettingsStore = defineStore("llm-settings", {
     resolvedImageConfig: (state) => state.imageRuntimeConfig,
     agentProvider: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider),
     providerProtocol: (state) => normalizeProviderProtocol(state.settings?.agent.provider_protocol),
-    usesHelloAgents: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider) === "helloagents"
+    usesHelloAgents: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider) === "helloagents",
+    usesLangGraph: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider) === "langgraph",
+    usesBackendGeneration: (state) => normalizeAgentProvider(state.settings?.agent.agent_provider) !== "standard"
   },
   actions: {
     reset() {

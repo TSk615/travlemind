@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -28,6 +28,43 @@ class TripGenerationDependencies:
     role_invoker: RoleInvoker
     brief_endpoint: LlmEndpointConfig
     runtime: WorkflowRuntime
+
+
+class TripGenerationOperations(Protocol):
+    """Business operations plugged into the framework-owned graph topology."""
+
+    def parse_brief(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def research_pois(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def research_weather(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def join_initial_research(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def research_hotels(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def research_transport(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def verify_evidence(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def draft_itinerary(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def validate_itinerary(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def repair_itinerary(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
+
+    def assemble_result(self, state: TripGenerationState) -> dict[str, Any]:
+        ...
 
 
 def build_initial_state(
@@ -113,3 +150,56 @@ def run_brief_probe(
     config = {"configurable": {"thread_id": dependencies.runtime.run_id}}
     return graph.invoke(initial_state, config=config)
 
+
+def build_trip_generation_graph(
+    operations: TripGenerationOperations,
+    *,
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
+):
+    """Build the six-role generation graph with explicit batch joins.
+
+    The list-form edges are intentional: POI/weather and hotel/transport must
+    both finish before their downstream join runs.
+    """
+
+    builder = StateGraph(TripGenerationState)
+    builder.add_node("brief_parser", operations.parse_brief)
+    builder.add_node("poi_specialist", operations.research_pois)
+    builder.add_node("weather_specialist", operations.research_weather)
+    builder.add_node("initial_research_join", operations.join_initial_research)
+    builder.add_node("hotel_specialist", operations.research_hotels)
+    builder.add_node("transport_specialist", operations.research_transport)
+    builder.add_node("evidence_join", operations.verify_evidence)
+    builder.add_node("itinerary_planner", operations.draft_itinerary)
+    builder.add_node("execution_validation", operations.validate_itinerary)
+    builder.add_node("itinerary_repair", operations.repair_itinerary)
+    builder.add_node("result_assembly", operations.assemble_result)
+
+    builder.add_edge(START, "brief_parser")
+    builder.add_edge("brief_parser", "poi_specialist")
+    builder.add_edge("brief_parser", "weather_specialist")
+    builder.add_edge(["poi_specialist", "weather_specialist"], "initial_research_join")
+    builder.add_edge("initial_research_join", "hotel_specialist")
+    builder.add_edge("initial_research_join", "transport_specialist")
+    builder.add_edge(["hotel_specialist", "transport_specialist"], "evidence_join")
+    builder.add_edge("evidence_join", "itinerary_planner")
+    builder.add_edge("itinerary_planner", "execution_validation")
+
+    def route_after_validation(state: TripGenerationState) -> str:
+        if not state.get("validation_errors"):
+            return "result_assembly"
+        if int(state.get("repair_count", 0)) >= 1:
+            raise ValueError("Itinerary still failed deterministic validation after one repair")
+        return "itinerary_repair"
+
+    builder.add_conditional_edges(
+        "execution_validation",
+        route_after_validation,
+        {
+            "itinerary_repair": "itinerary_repair",
+            "result_assembly": "result_assembly",
+        },
+    )
+    builder.add_edge("itinerary_repair", "execution_validation")
+    builder.add_edge("result_assembly", END)
+    return builder.compile(checkpointer=checkpointer)

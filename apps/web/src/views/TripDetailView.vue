@@ -390,6 +390,7 @@ const canResumeGeneration = computed(() =>
   Boolean(activeJob.value?.status === "failed" && activeJob.value?.type === "trip.generate" && activeJob.value?.can_resume && !resumeGeneratePending.value && !isJobRunning.value)
 )
 const usesHelloAgents = computed(() => settingsStore.usesHelloAgents)
+const usesBackendGeneration = computed(() => settingsStore.usesBackendGeneration)
 const communityPublication = computed(() => trip.value?.community_post ?? null)
 const communityActionLocked = computed(() => actionLocked.value || communityPending.value)
 const communityPreviewImage = computed(() => {
@@ -756,6 +757,8 @@ const currentModeTitle = computed(() => {
   switch (latestTrace.value?.provider) {
     case "helloagents-poc":
       return locale.value === "zh-CN" ? "最近一次实际执行：HelloAgents 多 Agent 工作流" : "Latest execution: HelloAgents multi-agent workflow"
+    case "langgraph":
+      return locale.value === "zh-CN" ? "最近一次实际执行：LangGraph 工作流" : "Latest execution: LangGraph workflow"
     case "openai-compatible-relay":
       return locale.value === "zh-CN" ? "最近一次实际执行：浏览器 relay" : "Latest execution: Browser relay"
     case "openai-compatible":
@@ -789,6 +792,16 @@ const currentModeMessage = computed(() => {
       : locale.value === "zh-CN"
         ? "最近一次成功执行来自后端 HelloAgents 工作流，但当前 trace 没有逐 agent 明细。"
         : "The latest successful run came from the backend HelloAgents workflow, but this trace did not persist per-agent details."
+  }
+
+  if (latestTrace.value.provider === "langgraph") {
+    return agentRuns.value.length > 0
+      ? locale.value === "zh-CN"
+        ? `最近一次成功执行来自后端 LangGraph 工作流，已记录 ${agentRuns.value.length} 个角色的 endpoint、model 与状态。`
+        : `The latest successful run came from the backend LangGraph workflow, with ${agentRuns.value.length} recorded roles and their endpoints, models, and statuses.`
+      : locale.value === "zh-CN"
+        ? "最近一次成功执行来自后端 LangGraph 工作流。"
+        : "The latest successful run came from the backend LangGraph workflow."
   }
 
   if (latestTrace.value.provider === "openai-compatible-relay") {
@@ -1677,6 +1690,8 @@ function formatTraceProvider(value?: string | null): string {
   switch ((value ?? "").trim()) {
     case "helloagents-poc":
       return locale.value === "zh-CN" ? "HelloAgents 后端工作流" : "HelloAgents backend workflow"
+    case "langgraph":
+      return locale.value === "zh-CN" ? "LangGraph 后端工作流" : "LangGraph backend workflow"
     case "openai-compatible-relay":
       return locale.value === "zh-CN" ? "浏览器 relay（经由后端代理）" : "Browser relay via backend proxy"
     case "openai-compatible":
@@ -2038,7 +2053,7 @@ async function generate() {
   try {
     await settingsStore.fetch(true)
 
-    if (usesHelloAgents.value) {
+    if (usesBackendGeneration.value) {
       const job = await api.generateTrip(tripId.value)
       activeJob.value = job
       await pollJob(job.job_id, "generate")

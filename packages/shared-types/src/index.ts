@@ -1,7 +1,7 @@
 export type JobStatus = "queued" | "running" | "retrying" | "completed" | "failed" | "cancelled"
 export type LlmWireApi = "chat_completions" | "responses"
 export type LlmProviderProtocol = "openai" | "newapi" | "gemini" | "claude" | "neiapi"
-export type LlmAgentProvider = "standard" | "helloagents"
+export type LlmAgentProvider = "standard" | "helloagents" | "langgraph"
 export type SearchServiceProvider = "groksearch" | "tavily"
 export type SearchServiceTransport = "mcp" | "api"
 export type ImageProvider = "openai_compatible" | "huggingface" | "gitee_ai" | "modelscope" | "a4f"

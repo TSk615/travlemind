@@ -22,6 +22,10 @@ from travelmind_api.services.maps import MapsPoiProvider, PoiDetail, PoiSearchRe
 class StubOrchestrator:
     def __init__(self, maps_provider: MapsPoiProvider | None = None) -> None:
         self._maps_provider = maps_provider or build_maps_provider("stub")
+        self._execution_job_id: str | None = None
+
+    def set_execution_context(self, *, job_id: str | None = None) -> None:
+        self._execution_job_id = job_id
 
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:
         zh_output = is_chinese_output(request)

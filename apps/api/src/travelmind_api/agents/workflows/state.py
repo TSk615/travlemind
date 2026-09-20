@@ -1,6 +1,6 @@
 import hashlib
 import json
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 from urllib.parse import urlparse
 
 from travelmind_api.services.llm.config import LlmEndpointConfig
@@ -8,6 +8,13 @@ from travelmind_api.services.llm.config import LlmEndpointConfig
 
 TRIP_GENERATION_GRAPH_VERSION = "trip-generation.v1"
 TRIP_GENERATION_STATE_SCHEMA_VERSION = 1
+
+
+def merge_state_mappings(
+    left: dict[str, dict[str, Any]],
+    right: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {**(left or {}), **(right or {})}
 
 
 class TripGenerationState(TypedDict, total=False):
@@ -18,7 +25,26 @@ class TripGenerationState(TypedDict, total=False):
     output_locale: str
     trip_request: dict[str, Any]
     planning_brief: dict[str, Any]
-    role_results: dict[str, dict[str, Any]]
+    role_results: Annotated[dict[str, dict[str, Any]], merge_state_mappings]
+    poi_payload: dict[str, Any]
+    weather_payload: dict[str, Any]
+    hotel_payload: dict[str, Any]
+    transport_payload: dict[str, Any]
+    planner_payload: dict[str, Any]
+    poi_grounding: dict[str, Any]
+    weather_guidance: dict[str, Any]
+    poi_collection: dict[str, Any]
+    hotel_recommendation: dict[str, Any]
+    transport_guidance: dict[str, Any]
+    final_payload: dict[str, Any]
+    validation_errors: list[str]
+    repair_count: int
+    agent_runs: list[dict[str, Any]]
+    pipeline_notes: list[str]
+    weather_citations: list[str]
+    weather_tool_results: dict[str, Any]
+    grounding_documents: list[dict[str, Any]]
+    planning_result: dict[str, Any]
 
 
 def non_sensitive_model_identity(endpoint: LlmEndpointConfig) -> dict[str, str]:
