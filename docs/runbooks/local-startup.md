@@ -157,5 +157,5 @@ curl -X POST "http://127.0.0.1:8000/trips/$tripId/generate" `
 
 # 查看最新日志
 Start-Sleep -Seconds 180
-Get-ChildItem E:\travel\logs\jobs\*.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Get-Content | Select-String "poi_source|helloagents_poi_answer"
+Get-ChildItem E:\travel\logs\jobs\*.jsonl | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Get-Content | Select-String "langgraph_role_started|langgraph_role_completed|langgraph_role_failed"
 ```

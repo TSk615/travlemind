@@ -32,6 +32,24 @@ def test_create_job_reuses_idempotency_key(client):
         assert session.query(JobRecord).filter(JobRecord.owner_user_id == "usr-idempotent").count() == 1
 
 
+def test_trip_job_freezes_planning_timestamp_in_payload(client):
+    del client
+    from travelmind_api.core.database import SessionLocal
+    from travelmind_api.services.job_service import create_job
+
+    with SessionLocal() as session:
+        job = create_job(
+            session,
+            job_type="trip.generate",
+            owner_user_id="usr-stable-time",
+            trip_id="trip-stable-time",
+            payload={"trip_id": "trip-stable-time"},
+        )
+        frozen = datetime.fromisoformat(job.payload_json["planning_generated_at"])
+
+    assert frozen.tzinfo is not None
+
+
 def test_claim_and_transient_retry_increment_attempts(client):
     del client
     from travelmind_api.core.database import SessionLocal

@@ -133,6 +133,9 @@ def create_job(
             return existing
 
     now = _utcnow()
+    normalized_payload = dict(payload)
+    if job_type in {"trip.generate", "trip.refine"}:
+        normalized_payload.setdefault("planning_generated_at", now.isoformat())
     configured_attempts = max_attempts if max_attempts is not None else get_settings().job_max_attempts
     job = JobRecord(
         id=generate_identifier("job"),
@@ -140,7 +143,7 @@ def create_job(
         status="queued",
         owner_user_id=owner_user_id,
         trip_id=trip_id,
-        payload_json=payload,
+        payload_json=normalized_payload,
         stage="queued",
         stage_message="Job queued for execution.",
         progress_percent=0,

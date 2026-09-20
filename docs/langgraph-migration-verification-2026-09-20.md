@@ -14,9 +14,13 @@
 - `WorkflowRun`、SQLite/PostgreSQL checkpointer、恢复指纹、取消、重试预算、版本冲突与幂等提交已经落地。
 - HTTP 请求总数和跨重试/协议回退的总截止时间在角色级硬限制；多 worker 使用 Redis
   共享端点/凭据限流，inline 模式在进程内共享。取消在模型请求前再次检查。
+- PostgreSQL checkpointer 初始化使用数据库 advisory lock，避免多个 Worker 首次启动时并发执行
+  checkpoint schema migration；Compose 显式给 API/worker 注入同一个 PostgreSQL checkpoint URL。
 - trace 持久化角色请求标识、端点、协议、耗时、usage、实际重试/请求次数与缓存复用；
   恢复时按稳定 request ID 标记复用节点。回放脚本可按显式 token 单价计算已知费用，
   缺少 usage 时保持未知。
+- 首次生成/微调时间固定写入 Job payload，ARQ 自动重试和手动生成恢复复用相同时间，避免
+  时间漂移改变 input fingerprint；用户主动创建的新 Job 则重新获取证据。
 - provider 灰度按 Job ID 稳定分桶，任务首次执行后固定 provider；回滚使用 `standard` 或保留部署版本。
 - 30 组受控时钟回放、协议矩阵和质量/延迟/费用门禁已经实现。
 - `hello-agents` 包、旧 orchestrator/LLM adapter、旧 prompt 模块、浏览器 planner 与旧专用脚本已经删除。
@@ -30,7 +34,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `284 passed, 1 skipped` |
+| API 全量测试 | `287 passed, 2 skipped`（本机无 PostgreSQL） |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | 请求预算/截止时间、共享限流、恢复与 LangGraph 定向测试 | `61 passed` |
 | 前端单元测试 | `10 passed` |
@@ -42,14 +46,17 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 | 安装环境中 `hello_agents` 模块不存在 | 通过 |
 | Windows 本地启动脚本语法解析 | 通过 |
 
-API 全量测试中唯一跳过项是 PostgreSQL 迁移测试：本机未配置
-`TRAVELMIND_TEST_POSTGRES_URL`，Docker daemon 与本地 5432 端口也未运行。
+API 全量测试中两个跳过项是 PostgreSQL Alembic 循环与 PostgreSQL LangGraph checkpoint
+跨连接恢复测试：本机未配置 `TRAVELMIND_TEST_POSTGRES_URL`，Docker daemon 与本地 5432
+端口也未运行。GitHub Actions 的 API job 已配置 PostgreSQL 16 service 和该环境变量，因此
+这两项属于 CI 强制门禁，而不是永久跳过测试。
 
 ## 发布前必须完成的外部门禁
 
 1. 在一次性 PostgreSQL 测试库设置 `TRAVELMIND_TEST_POSTGRES_URL`，运行
-   `apps/api/tests/test_postgres_migrations.py`，确认迁移头为 `0005_workflow_runs`，并完成
-   upgrade → downgrade → upgrade。
+   `apps/api/tests/test_postgres_migrations.py`，确认迁移头为 `0005_workflow_runs`，完成
+   upgrade → downgrade → upgrade，并验证 LangGraph checkpoint 跨 PostgreSQL 连接恢复且不重跑
+   已成功节点。
 2. 在目标数据库先执行迁移，再运行
    `scripts/audit_workflow_rollout.py --require-drained`。必须得到
    `schema_ready_for_langgraph=true`、空 `schema_blockers`，且没有 legacy/unknown 阻塞任务。

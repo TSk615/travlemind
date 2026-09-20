@@ -142,7 +142,7 @@ docker build -f apps/groksearch-bridge/Dockerfile -t travelmind-groksearch-bridg
 
 ### Run the full container stack
 
-The Compose stack builds `web`, `api`, and `worker`, shares a writable `storage` volume for SQLite and PDF exports, and starts Redis for ARQ. By default it uses SQLite inside the shared volume so the MVP can run without changing Python dependencies.
+The Compose stack builds `web`, `api`, and `worker`, starts PostgreSQL for application data and shared LangGraph checkpoints, and starts Redis for ARQ. API and worker receive the same explicit PostgreSQL checkpoint URL so resumable jobs work across worker processes. The writable `storage` volume remains available for generated files such as PDF exports.
 
 ```powershell
 docker compose --env-file infra/.env.example -f infra/docker-compose.yml up --build
@@ -161,22 +161,23 @@ To stop and remove containers:
 docker compose --env-file infra/.env.example -f infra/docker-compose.yml down
 ```
 
-### Optional Postgres profile
+### Start only PostgreSQL
 
-Compose includes a `postgres` service as an opt-in profile:
+To start only the managed PostgreSQL service for direct local API/worker runs:
 
 ```powershell
-docker compose --env-file infra/.env.example -f infra/docker-compose.yml --profile postgres up postgres -d
+docker compose --env-file infra/.env.example -f infra/docker-compose.yml up postgres -d
 ```
 
-This is only a deployment placeholder right now. The current Python dependencies in `apps/api` and `apps/worker` do not yet include a PostgreSQL driver, so switching `TRAVELMIND_DATABASE_URL` from SQLite to Postgres will require that dependency to be added in a later business-code change.
+Both Python applications include the Psycopg driver. Application tables use the SQLAlchemy URL in `TRAVELMIND_COMPOSE_DATABASE_URL`; LangGraph uses the Psycopg URL in `TRAVELMIND_COMPOSE_WORKFLOW_CHECKPOINT_URL`.
 
 ## CI Baseline
 
-GitHub Actions currently validates four things:
+GitHub Actions currently validates:
 
-- web workspace install and production build
-- API dependency sync plus pytest
+- whitespace and Python compilation
+- web unit tests, production build, and Chromium E2E
+- API dependency sync plus the full pytest suite against a real PostgreSQL 16 service, including Alembic cycling and checkpoint recovery
 - worker dependency sync plus import smoke test
 - Dockerfile builds for `web`, `api`, and `worker`, plus Compose config validation
 
@@ -189,6 +190,7 @@ See [ci.yml](E:/travel/.github/workflows/ci.yml).
 - `TRAVELMIND_AGENT_PROVIDER=stub` is the safe default for local development and CI
 - `TRAVELMIND_QUEUE_MODE=inline` is the simplest direct-run mode
 - `TRAVELMIND_QUEUE_MODE=arq` requires Redis and the worker
+- multi-worker LangGraph deployments must give API and worker the same PostgreSQL `TRAVELMIND_WORKFLOW_CHECKPOINT_URL`; Compose does this explicitly
 - `VITE_API_BASE_URL` is baked into the web image at build time
 - `TRAVELMIND_CORS_ORIGINS` must include the browser origin you use locally
 - `TRAVELMIND_SEARCH_SERVICE_PROVIDER=groksearch` switches backend search defaults to the bundled GrokSearch bridge

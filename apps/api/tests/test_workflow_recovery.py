@@ -285,6 +285,7 @@ def test_retry_job_reuses_durable_run_without_legacy_checkpoint(client):
 
     with SessionLocal() as session:
         first_job = session.get(JobRecord, first_job_id)
+        first_planning_generated_at = first_job.payload_json["planning_generated_at"]
         retry_job = session.get(JobRecord, retry_job_id)
         run = session.get(WorkflowRun, run_id)
         assert first_job.workflow_run_id == run_id
@@ -292,6 +293,7 @@ def test_retry_job_reuses_durable_run_without_legacy_checkpoint(client):
         assert run.original_job_id == first_job_id
         assert run.current_job_id == retry_job_id
         assert retry_job.payload_json["resume_from_job_id"] == first_job_id
+        assert retry_job.payload_json["planning_generated_at"] == first_planning_generated_at
         assert "resume_checkpoint" not in retry_job.payload_json
 
 

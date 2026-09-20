@@ -41,6 +41,7 @@
     environment:
       TRAVELMIND_ENVIRONMENT: ${TRAVELMIND_ENVIRONMENT:-development}
       TRAVELMIND_DATABASE_URL: ${TRAVELMIND_COMPOSE_DATABASE_URL:-postgresql+psycopg://travelmind:travelmind@postgres:5432/travelmind}
+      TRAVELMIND_WORKFLOW_CHECKPOINT_URL: ${TRAVELMIND_COMPOSE_WORKFLOW_CHECKPOINT_URL:-postgresql://travelmind:travelmind@postgres:5432/travelmind}
       TRAVELMIND_EXPORT_ROOT: /app/storage/exports
       TRAVELMIND_JWT_SECRET: ${TRAVELMIND_JWT_SECRET:-travelmind-dev-secret-change-me-32-bytes-minimum}
       TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY: ${TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY:-travelmind-dev-credential-key-change-me-32-bytes}
@@ -101,6 +102,7 @@
     environment:
       TRAVELMIND_ENVIRONMENT: ${TRAVELMIND_ENVIRONMENT:-development}
       TRAVELMIND_DATABASE_URL: ${TRAVELMIND_COMPOSE_DATABASE_URL:-postgresql+psycopg://travelmind:travelmind@postgres:5432/travelmind}
+      TRAVELMIND_WORKFLOW_CHECKPOINT_URL: ${TRAVELMIND_COMPOSE_WORKFLOW_CHECKPOINT_URL:-postgresql://travelmind:travelmind@postgres:5432/travelmind}
       TRAVELMIND_EXPORT_ROOT: /app/storage/exports
       TRAVELMIND_JWT_SECRET: ${TRAVELMIND_JWT_SECRET:-travelmind-dev-secret-change-me-32-bytes-minimum}
       TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY: ${TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY:-travelmind-dev-credential-key-change-me-32-bytes}

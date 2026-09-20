@@ -28,6 +28,7 @@ from travelmind_api.db.models import JobRecord, Trip, WorkflowRun
 
 _POSTGRES_SETUP_LOCK = Lock()
 _POSTGRES_SETUP_URLS: set[str] = set()
+_POSTGRES_CHECKPOINT_SETUP_LOCK_ID = 741852964
 
 
 class WorkflowRunError(RuntimeError):
@@ -80,8 +81,23 @@ def workflow_checkpointer(settings: Settings) -> Iterator[BaseCheckpointSaver[An
             saver = PostgresSaver(connection, serde=_strict_serializer())
             with _POSTGRES_SETUP_LOCK:
                 if checkpoint_url not in _POSTGRES_SETUP_URLS:
-                    saver.setup()
-                    _POSTGRES_SETUP_URLS.add(checkpoint_url)
+                    # The Python lock protects threads in this process; the
+                    # session-level advisory lock serializes first-time setup
+                    # across independently started ARQ worker processes.
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT pg_advisory_lock(%s)",
+                            (_POSTGRES_CHECKPOINT_SETUP_LOCK_ID,),
+                        )
+                    try:
+                        saver.setup()
+                        _POSTGRES_SETUP_URLS.add(checkpoint_url)
+                    finally:
+                        with connection.cursor() as cursor:
+                            cursor.execute(
+                                "SELECT pg_advisory_unlock(%s)",
+                                (_POSTGRES_CHECKPOINT_SETUP_LOCK_ID,),
+                            )
             yield saver
         finally:
             connection.close()

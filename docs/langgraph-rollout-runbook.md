@@ -45,6 +45,10 @@ uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline 
 默认配置下，普通角色跨 3 次 ARQ 尝试的理论上限是 6 次请求，POI 角色为 3 次；
 已 checkpoint 的成功节点不会重跑。
 
+首次执行的 `planning_generated_at` 固定在 Job payload 中，同一 ARQ 重试或显式 checkpoint
+恢复会复用该时间和已经核验的证据。用户主动发起新的生成任务会创建新的时间指纹并重新获取
+证据；日期、prompt 版本、模型标识或规范化输入变化时，旧 WorkflowRun 不允许继续恢复。
+
 协议回归使用模拟 HTTP 端点，覆盖 Responses、Chat Completions、Gemini、Claude、
 NewAPI、NeiAPI、Grok 引用及流式异常：
 

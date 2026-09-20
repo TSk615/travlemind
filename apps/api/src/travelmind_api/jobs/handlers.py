@@ -302,8 +302,27 @@ def _claim_job(job_id: str) -> JobExecution | None:
 
 
 
-def _build_request(trip: Trip, user: User | None = None) -> PlanningRequest:
-    planning_generated_at = datetime.now().astimezone()
+def _planning_generated_at_for_job(job: JobRecord) -> datetime:
+    payload = dict(job.payload_json or {})
+    raw_value = str(payload.get("planning_generated_at") or "").strip()
+    try:
+        planning_generated_at = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        planning_generated_at = datetime.now(timezone.utc)
+        payload["planning_generated_at"] = planning_generated_at.isoformat()
+        job.payload_json = payload
+    if planning_generated_at.tzinfo is None:
+        planning_generated_at = planning_generated_at.replace(tzinfo=timezone.utc)
+    return planning_generated_at
+
+
+def _build_request(
+    trip: Trip,
+    user: User | None = None,
+    *,
+    planning_generated_at: datetime | None = None,
+) -> PlanningRequest:
+    planning_generated_at = planning_generated_at or datetime.now().astimezone()
     return PlanningRequest(
         trip_id=trip.id,
         user_id=getattr(user, "id", None),
@@ -679,7 +698,11 @@ def _process_trip_generation(job: JobExecution) -> dict:
                         "missing_fields": missing_poi_fields,
                     },
                 )
-        request = _build_request(trip, user)
+        request = _build_request(
+            trip,
+            user,
+            planning_generated_at=_planning_generated_at_for_job(job_record),
+        )
         validate_trip_dates_for_generation(
             request.start_date,
             request.end_date,
@@ -835,7 +858,11 @@ def _process_trip_refine(job: JobExecution) -> dict:
         ).strip()
         existing_run = session.get(WorkflowRun, requested_run_id) if requested_run_id else None
         provider = _resolve_job_agent_provider(user=user, job=job_record, existing_run=existing_run)
-        request = _build_request(trip, user)
+        request = _build_request(
+            trip,
+            user,
+            planning_generated_at=_planning_generated_at_for_job(job_record),
+        )
         validate_trip_dates_for_generation(
             request.start_date,
             request.end_date,
