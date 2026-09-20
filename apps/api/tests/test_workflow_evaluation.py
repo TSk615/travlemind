@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from travelmind_api.services.workflow_evaluation import (
+    REQUIRED_REPLAY_CATEGORIES,
+    ReplayObservation,
+    evaluate_replay_gate,
+    hard_constraint_violations,
+    load_replay_cases,
+)
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "langgraph-replay-cases.json"
+
+
+def _observations(cases, provider: str, *, latency_ms: float, cost_usd: float):
+    return [
+        ReplayObservation(
+            case_id=case.id,
+            provider=provider,
+            success=True,
+            hard_violations=[],
+            quality_score=0.95,
+            latency_ms=latency_ms,
+            cost_usd=cost_usd,
+        )
+        for case in cases
+    ]
+
+
+def test_replay_fixture_has_thirty_controlled_cases_and_required_coverage():
+    cases = load_replay_cases(FIXTURE)
+    assert len(cases) == 30
+    assert set().union(*(case.categories for case in cases)) >= REQUIRED_REPLAY_CATEGORIES
+    assert all(case.request.planning_generated_at == case.controlled_now for case in cases)
+    assert all(case.request.start_date >= case.controlled_now.date() for case in cases)
+    assert sum(case.operation == "refine" for case in cases) == 2
+
+
+def test_replay_hard_gate_runs_all_cases_against_deterministic_contract():
+    from travelmind_api.agents.stub import StubOrchestrator
+
+    orchestrator = StubOrchestrator()
+    for case in load_replay_cases(FIXTURE):
+        original = orchestrator.plan_trip(case.request)
+        if case.operation == "refine":
+            refinement = case.refinement or {}
+            result = orchestrator.refine_trip(
+                case.request,
+                original,
+                instruction=str(refinement["instruction"]),
+                scope=str(refinement["scope"]),
+                day_index=int(refinement["day_index"]),
+            )
+        else:
+            result = original
+        assert hard_constraint_violations(case, result, original_plan=original) == [], case.id
+
+
+def test_replay_quality_gate_accepts_equal_quality_within_ten_percent_limits():
+    cases = load_replay_cases(FIXTURE)
+    baseline = _observations(cases, "helloagents", latency_ms=1000, cost_usd=0.10)
+    candidate = _observations(cases, "langgraph", latency_ms=1099, cost_usd=0.109)
+
+    report = evaluate_replay_gate(cases, baseline, candidate)
+
+    assert report.passed is True
+    assert report.failures == []
+    assert report.candidate.case_count == 30
+    assert report.candidate.hard_violation_count == 0
+
+
+def test_replay_quality_gate_rejects_hard_violation_and_missing_cost():
+    cases = load_replay_cases(FIXTURE)
+    baseline = _observations(cases, "helloagents", latency_ms=1000, cost_usd=0.10)
+    candidate = _observations(cases, "langgraph", latency_ms=900, cost_usd=0.09)
+    candidate[0] = candidate[0].model_copy(
+        update={"hard_violations": ["closed POI scheduled"], "cost_usd": None}
+    )
+
+    report = evaluate_replay_gate(cases, baseline, candidate)
+
+    assert report.passed is False
+    assert "candidate has 1 hard-constraint violation(s)" in report.failures
+    assert "cost comparison is incomplete" in report.failures
+
+
+def test_replay_quality_gate_rejects_latency_and_cost_regressions():
+    cases = load_replay_cases(FIXTURE)
+    baseline = _observations(cases, "helloagents", latency_ms=1000, cost_usd=0.10)
+    candidate = _observations(cases, "langgraph", latency_ms=1200, cost_usd=0.12)
+
+    report = evaluate_replay_gate(cases, baseline, candidate)
+
+    assert report.passed is False
+    assert "candidate p95 latency regressed by more than the allowed ratio" in report.failures
+    assert "candidate cost regressed by more than the allowed ratio" in report.failures

@@ -20,6 +20,27 @@ provider 快照的新 Job。
 3. 将灰度从 5% 依次提高到 25%、50%、100%。每一级至少观察一个完整业务周期，核对成功率、硬约束违规、p95 延迟和费用。
 4. 100% 后继续保留旧部署版本和向后兼容数据库迁移，直到回滚窗口结束。
 
+## 固定回放与协议矩阵
+
+回放数据位于 `apps/api/tests/fixtures/langgraph-replay-cases.json`，包含 30 个使用受控时钟的案例。直接执行 orchestrator 的脚本不会保存 Trip，也不会派发图片任务；网络调用需要命令行参数和环境变量双重确认：
+
+```powershell
+$env:TRAVELMIND_REPLAY_ALLOW_NETWORK = "1"
+uv run --project apps/api python scripts/run_workflow_replay.py --provider helloagents --output .tmp/replay/baseline.json --allow-network
+uv run --project apps/api python scripts/run_workflow_replay.py --provider langgraph --output .tmp/replay/candidate.json --allow-network
+uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline .tmp/replay/baseline.json --candidate .tmp/replay/candidate.json
+```
+
+费用缺失时质量门禁默认失败；只有在验证功能而非发布决策时才可传
+`--allow-missing-cost`。少量真实端点预检可用 `--limit`，完整放量判断必须覆盖全部案例。
+
+协议回归使用模拟 HTTP 端点，覆盖 Responses、Chat Completions、Gemini、Claude、
+NewAPI、NeiAPI、Grok 引用及流式异常：
+
+```powershell
+uv run --project apps/api pytest apps/api/tests/test_llm_proxy.py apps/api/tests/test_llm_orchestrator.py -q
+```
+
 ## 回滚演练
 
 把 `TRAVELMIND_LANGGRAPH_ROLLOUT_PERCENT` 设为 `0` 并重启 API/worker。验证一个新 Job

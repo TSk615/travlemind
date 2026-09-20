@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "controlled_now": "2026-09-20T09:00:00+08:00",
+  "request_defaults": {
+    "user_id": "replay-user",
+    "origin": "上海",
+    "destination": "杭州",
+    "start_date": "2026-10-10",
+    "end_date": "2026-10-12",
+    "budget": 6000,
+    "travelers": 2,
+    "interests": ["历史", "美食"],
+    "accommodation_preference": "安静中档酒店",
+    "pace": "balanced",
+    "transport_mode": "rail",
+    "locale": "zh-CN"
+  },
+  "cases": [
+    {
+      "id": "single-shanghai-museums",
+      "categories": ["single_city"],
+      "request_overrides": {"destination": "上海", "interests": ["博物馆", "建筑"]}
+    },
+    {
+      "id": "single-beijing-history",
+      "categories": ["single_city", "poi_closure"],
+      "request_overrides": {"origin": "天津", "destination": "北京", "start_date": "2026-10-11", "end_date": "2026-10-13", "interests": ["故宫", "历史"]}
+    },
+    {
+      "id": "single-chengdu-food",
+      "categories": ["single_city"],
+      "request_overrides": {"origin": "重庆", "destination": "成都", "interests": ["川菜", "茶馆"]}
+    },
+    {
+      "id": "single-hangzhou-budget",
+      "categories": ["single_city", "low_budget"],
+      "request_overrides": {"destination": "杭州", "budget": 1200, "travelers": 1, "interests": ["西湖", "步行"]}
+    },
+    {
+      "id": "single-suzhou-hotel",
+      "categories": ["single_city", "hotel_preference"],
+      "request_overrides": {"destination": "苏州", "accommodation_preference": "平江路附近安静精品酒店"}
+    },
+    {
+      "id": "single-kyoto-weather",
+      "categories": ["single_city", "future_weather"],
+      "request_overrides": {"origin": "大阪", "destination": "京都", "start_date": "2027-03-20", "end_date": "2027-03-22", "interests": ["寺庙", "樱花"]}
+    },
+    {
+      "id": "single-tokyo-no-upstream",
+      "categories": ["single_city", "no_upstream", "insufficient_evidence"],
+      "request_overrides": {"origin": "横滨", "destination": "东京", "interests": ["小型画廊", "咖啡"]}
+    },
+    {
+      "id": "single-singapore-sparse-evidence",
+      "categories": ["single_city", "insufficient_evidence"],
+      "request_overrides": {"origin": "新山", "destination": "新加坡", "interests": ["临时展览", "社区活动"]}
+    },
+    {
+      "id": "multi-beijing-shanghai",
+      "categories": ["multi_city"],
+      "request_overrides": {"origin": "北京", "destination": "北京 / 上海", "start_date": "2026-11-01", "end_date": "2026-11-05", "budget": 10000}
+    },
+    {
+      "id": "multi-kyoto-osaka",
+      "categories": ["multi_city"],
+      "request_overrides": {"origin": "关西机场", "destination": "京都 / 大阪", "start_date": "2026-11-10", "end_date": "2026-11-14", "interests": ["寺庙", "现代建筑"]}
+    },
+    {
+      "id": "multi-paris-brussels",
+      "categories": ["multi_city"],
+      "request_overrides": {"origin": "巴黎", "destination": "巴黎 / 布鲁塞尔", "start_date": "2026-12-01", "end_date": "2026-12-05", "transport_mode": "rail", "locale": "en-US"}
+    },
+    {
+      "id": "multi-dali-lijiang-budget",
+      "categories": ["multi_city", "low_budget"],
+      "request_overrides": {"origin": "昆明", "destination": "大理 / 丽江", "start_date": "2026-10-20", "end_date": "2026-10-24", "budget": 2800, "travelers": 1}
+    },
+    {
+      "id": "multi-guangzhou-shenzhen",
+      "categories": ["multi_city"],
+      "request_overrides": {"origin": "广州", "destination": "广州 / 深圳", "start_date": "2026-10-15", "end_date": "2026-10-18", "interests": ["岭南文化", "设计"]}
+    },
+    {
+      "id": "multi-xian-luoyang",
+      "categories": ["multi_city", "poi_closure"],
+      "request_overrides": {"origin": "西安", "destination": "西安 / 洛阳", "start_date": "2026-10-11", "end_date": "2026-10-15", "interests": ["博物馆", "石窟"]}
+    },
+    {
+      "id": "overnight-shanghai-beijing",
+      "categories": ["multi_city", "overnight_transport"],
+      "request_overrides": {"origin": "上海", "destination": "上海 / 北京", "start_date": "2026-10-20", "end_date": "2026-10-23", "transport_mode": "overnight_rail"}
+    },
+    {
+      "id": "overnight-berlin-vienna",
+      "categories": ["multi_city", "overnight_transport"],
+      "request_overrides": {"origin": "柏林", "destination": "柏林 / 维也纳", "start_date": "2026-12-10", "end_date": "2026-12-14", "transport_mode": "overnight_rail", "locale": "en-US"}
+    },
+    {
+      "id": "overnight-bangkok-chiangmai",
+      "categories": ["multi_city", "overnight_transport", "low_budget"],
+      "request_overrides": {"origin": "曼谷", "destination": "曼谷 / 清迈", "start_date": "2026-11-20", "end_date": "2026-11-24", "budget": 3200, "transport_mode": "overnight_rail"}
+    },
+    {
+      "id": "budget-guilin-solo",
+      "categories": ["single_city", "low_budget"],
+      "request_overrides": {"origin": "南宁", "destination": "桂林", "budget": 900, "travelers": 1, "start_date": "2026-10-24", "end_date": "2026-10-25"}
+    },
+    {
+      "id": "budget-nanjing-family",
+      "categories": ["single_city", "low_budget"],
+      "request_overrides": {"origin": "合肥", "destination": "南京", "budget": 1800, "travelers": 3, "interests": ["免费博物馆", "公园"]}
+    },
+    {
+      "id": "budget-macau-daytrip",
+      "categories": ["single_city", "low_budget"],
+      "request_overrides": {"origin": "珠海", "destination": "澳门", "start_date": "2026-10-18", "end_date": "2026-10-18", "budget": 700, "travelers": 1}
+    },
+    {
+      "id": "hotel-tokyo-accessible",
+      "categories": ["single_city", "hotel_preference"],
+      "request_overrides": {"origin": "成田机场", "destination": "东京", "accommodation_preference": "无障碍客房，靠近地铁电梯出口", "pace": "relaxed"}
+    },
+    {
+      "id": "hotel-london-family",
+      "categories": ["single_city", "hotel_preference"],
+      "request_overrides": {"origin": "希思罗机场", "destination": "伦敦", "start_date": "2026-12-20", "end_date": "2026-12-23", "travelers": 4, "accommodation_preference": "家庭房和厨房", "locale": "en-US"}
+    },
+    {
+      "id": "hotel-sanya-beach",
+      "categories": ["single_city", "hotel_preference", "future_weather"],
+      "request_overrides": {"origin": "海口", "destination": "三亚", "start_date": "2027-01-12", "end_date": "2027-01-15", "accommodation_preference": "安静海滩酒店，不要夜店区"}
+    },
+    {
+      "id": "closure-forbidden-city-monday",
+      "categories": ["single_city", "poi_closure"],
+      "request_overrides": {"origin": "天津", "destination": "北京", "start_date": "2026-10-12", "end_date": "2026-10-13", "interests": ["故宫博物院"]}
+    },
+    {
+      "id": "closure-louvre-tuesday",
+      "categories": ["single_city", "poi_closure"],
+      "request_overrides": {"origin": "里昂", "destination": "巴黎", "start_date": "2026-10-13", "end_date": "2026-10-14", "interests": ["卢浮宫"], "locale": "en-US"}
+    },
+    {
+      "id": "weather-iceland-future",
+      "categories": ["multi_city", "future_weather", "insufficient_evidence"],
+      "request_overrides": {"origin": "雷克雅未克", "destination": "雷克雅未克 / 维克", "start_date": "2027-02-10", "end_date": "2027-02-14", "transport_mode": "car", "interests": ["极光", "冰川"]}
+    },
+    {
+      "id": "weather-bali-future",
+      "categories": ["single_city", "future_weather"],
+      "request_overrides": {"origin": "登巴萨机场", "destination": "巴厘岛", "start_date": "2027-04-02", "end_date": "2027-04-06", "interests": ["海滩", "寺庙"]}
+    },
+    {
+      "id": "evidence-remote-town-offline",
+      "categories": ["single_city", "insufficient_evidence", "no_upstream"],
+      "request_overrides": {"origin": "成都", "destination": "川西示例小镇", "interests": ["临时市集", "未公开步道"], "transport_mode": "car"}
+    },
+    {
+      "id": "refine-day-two-preserve",
+      "categories": ["single_city", "day_refinement"],
+      "request_overrides": {"destination": "杭州"},
+      "operation": "refine",
+      "refinement": {"scope": "day", "day_index": 2, "instruction": "只把第二天改得更轻松，其他天保持不变。"}
+    },
+    {
+      "id": "refine-day-one-evidence",
+      "categories": ["single_city", "day_refinement", "insufficient_evidence"],
+      "request_overrides": {"origin": "大阪", "destination": "京都", "interests": ["寺庙", "庭园"]},
+      "operation": "refine",
+      "refinement": {"scope": "day", "day_index": 1, "instruction": "只调整第一天；没有证据的营业时间不要写成确定事实。"}
+    }
+  ]
+}

@@ -169,6 +169,37 @@ def test_llm_connection_test_supports_newapi_chat_completions(client, monkeypatc
     assert captured["payload"]["messages"][0]["content"] == "Reply with exactly: ok"
 
 
+def test_llm_connection_test_supports_neiapi_chat_completions(client, monkeypatch):
+    _register(client)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _patch_httpx_client(monkeypatch, httpx.MockTransport(handler))
+
+    response = client.post(
+        "/api/v1/llm/test",
+        json={
+            "provider_protocol": "neiapi",
+            "base_url": "https://api.neiapi.com/v1",
+            "api_key": "neiapi-key",
+            "model": "gpt-test",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["provider_protocol"] == "neiapi"
+    assert payload["wire_api"] == "chat_completions"
+    assert payload["reply"] == "ok"
+    assert captured["url"] == "https://api.neiapi.com/v1/chat/completions"
+    assert captured["authorization"] == "Bearer neiapi-key"
+
+
 def test_llm_connection_test_can_use_saved_poi_settings(client, monkeypatch):
     _register(client)
     settings_response = client.put(
