@@ -114,6 +114,13 @@ def test_framework_neutral_brief_schema_and_prompt_remain_legacy_compatible():
     assert PlanningCore(None)._build_trip_payload(_request()) == build_trip_request_payload(_request())
 
 
+def test_result_assembly_is_owned_by_framework_neutral_planning_service():
+    assert (
+        PlanningCore._build_result_from_payload.__module__
+        == "travelmind_api.services.planning.result_builder"
+    )
+
+
 def test_openai_compatible_role_invoker_preserves_citations_and_unknown_usage():
     clients = []
 

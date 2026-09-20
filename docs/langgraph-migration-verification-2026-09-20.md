@@ -10,7 +10,8 @@
 - 生成与微调统一使用后端 LangGraph 工作流；浏览器编排器已删除。
 - 六角色生成图、微调图、一次修复、证据核验与结果装配已经接入中立业务核心。
 - 业务 Pydantic Schema 已从编排核心提取到 `services/planning/role_models.py`，API 探针、
-  脚本与测试均改用中立模块。
+  脚本与测试均改用中立模块；结果转换、地图关联及最终 trace 装配已提取到
+  `services/planning/result_builder.py`，工作流不再承载产品模型转换算法。
 - `WorkflowRun`、SQLite/PostgreSQL checkpointer、恢复指纹、取消、重试预算、版本冲突与幂等提交已经落地。
 - HTTP 请求总数和跨重试/协议回退的总截止时间在角色级硬限制；生产环境和 ARQ 模式使用
   Redis 共享端点/凭据限流，本地 inline 模式在进程内共享。取消在模型请求前再次检查。
@@ -36,7 +37,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `289 passed, 2 skipped`（本机无 PostgreSQL） |
+| API 全量测试 | `290 passed, 2 skipped`（本机无 PostgreSQL） |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | 请求预算/截止时间、共享限流、恢复与 LangGraph 定向测试 | `61 passed` |
 | 前端单元测试 | `10 passed` |
