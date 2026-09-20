@@ -161,14 +161,14 @@
       "categories": ["single_city", "day_refinement"],
       "request_overrides": {"destination": "杭州"},
       "operation": "refine",
-      "refinement": {"scope": "day", "day_index": 2, "instruction": "只把第二天改得更轻松，其他天保持不变。"}
+      "refinement": {"scope": "day_plan", "day_index": 2, "instruction": "只把第二天改得更轻松，其他天保持不变。"}
     },
     {
       "id": "refine-day-one-evidence",
       "categories": ["single_city", "day_refinement", "insufficient_evidence"],
       "request_overrides": {"origin": "大阪", "destination": "京都", "interests": ["寺庙", "庭园"]},
       "operation": "refine",
-      "refinement": {"scope": "day", "day_index": 1, "instruction": "只调整第一天；没有证据的营业时间不要写成确定事实。"}
+      "refinement": {"scope": "day_plan", "day_index": 1, "instruction": "只调整第一天；没有证据的营业时间不要写成确定事实。"}
     }
   ]
 }

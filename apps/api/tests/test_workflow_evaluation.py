@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from travelmind_api.agents.base import AgentRunStep, AgentTrace
 from travelmind_api.services.workflow_evaluation import (
     REQUIRED_REPLAY_CATEGORIES,
+    ReplayDefinition,
     ReplayObservation,
     estimate_trace_cost_usd,
     evaluate_replay_gate,
@@ -72,6 +75,11 @@ def test_replay_fixture_has_thirty_controlled_cases_and_required_coverage():
     assert all(case.request.planning_generated_at == case.controlled_now for case in cases)
     assert all(case.request.start_date >= case.controlled_now.date() for case in cases)
     assert sum(case.operation == "refine" for case in cases) == 2
+    assert all(
+        case.refinement and case.refinement["scope"] == "day_plan"
+        for case in cases
+        if case.operation == "refine"
+    )
 
 
 def test_replay_hard_gate_runs_all_cases_against_deterministic_contract():
@@ -92,6 +100,31 @@ def test_replay_hard_gate_runs_all_cases_against_deterministic_contract():
         else:
             result = original
         assert hard_constraint_violations(case, result, original_plan=original) == [], case.id
+
+
+def test_replay_definition_rejects_obsolete_refinement_scope():
+    with pytest.raises(ValueError, match="Unsupported refinement scope"):
+        ReplayDefinition.model_validate(
+            {
+                "id": "obsolete-day-scope",
+                "categories": ["day_refinement"],
+                "operation": "refine",
+                "refinement": {"scope": "day", "day_index": 1, "instruction": "Adjust day one."},
+            }
+        )
+
+
+def test_replay_hard_gate_detects_changes_outside_day_plan_scope():
+    from travelmind_api.agents.stub import StubOrchestrator
+
+    case = next(case for case in load_replay_cases(FIXTURE) if case.id == "refine-day-two-preserve")
+    original = StubOrchestrator().plan_trip(case.request)
+    candidate = original.model_copy(deep=True)
+    candidate.days[0].title = "Unexpected replacement"
+
+    violations = hard_constraint_violations(case, candidate, original_plan=original)
+
+    assert "day 1 changed outside day-refinement scope" in violations
 
 
 def test_replay_quality_gate_accepts_equal_quality_within_ten_percent_limits():

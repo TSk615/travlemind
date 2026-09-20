@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from travelmind_api.agents.base import AgentTrace, PlanningRequest, PlanningResult
+from travelmind_api.agents.workflows.trip_refinement import validate_refinement_target
 from travelmind_api.services.execution_validation import validate_timeline
 from travelmind_api.services.llm.parser import LlmPlanningPayload
 
@@ -80,6 +81,15 @@ class ReplayDefinition(BaseModel):
     def validate_refinement(self) -> "ReplayDefinition":
         if self.operation == "refine" and not isinstance(self.refinement, dict):
             raise ValueError("refine replay cases require refinement settings")
+        if self.operation == "refine":
+            refinement = dict(self.refinement or {})
+            scope, day_index = validate_refinement_target(
+                str(refinement.get("scope") or ""),
+                refinement.get("day_index"),
+            )
+            refinement["scope"] = scope
+            refinement["day_index"] = day_index
+            self.refinement = refinement
         return self
 
 
@@ -224,7 +234,7 @@ def hard_constraint_violations(
 
     if case.operation == "refine" and original_plan is not None:
         refinement = case.refinement or {}
-        if refinement.get("scope") == "day":
+        if refinement.get("scope") == "day_plan":
             target = int(refinement.get("day_index") or 0)
             original_by_day = {day.day_index: day.model_dump(mode="json") for day in original_plan.days}
             result_by_day = {day.day_index: day.model_dump(mode="json") for day in result.days}
