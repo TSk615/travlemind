@@ -24,6 +24,14 @@ _BACKOFF_BASE_SECONDS = 1.0
 _MAX_RETRY_AFTER_SECONDS = 30.0
 
 
+class LlmRequestBudgetExceeded(RuntimeError):
+    """Raised before a request would exceed one role invocation's HTTP budget."""
+
+
+class LlmRequestDeadlineExceeded(TimeoutError):
+    """Raised when one role invocation exhausts its shared wall-clock budget."""
+
+
 class OpenAICompatibleClient:
     def __init__(self, config: LlmEndpointConfig, *, http_client: httpx.Client | None = None) -> None:
         self._config = config
@@ -32,6 +40,13 @@ class OpenAICompatibleClient:
         # Keep the metadata available to callers without changing the long-standing
         # create_chat_completion() string return type.
         self.last_citations: list[str] = []
+        self.last_usage: dict[str, Any] | None = None
+        self.last_retry_count = 0
+        self.last_request_count = 0
+        self.request_attempt_limit = _MAX_RETRY_ATTEMPTS + 1
+        self.request_deadline_seconds = float(config.timeout_seconds)
+        self._deadline_at: float | None = None
+        self._monotonic: Callable[[], float] = time.monotonic
         # Injection point so tests can avoid real waiting during retry backoff.
         self._sleep: Callable[[float], None] = time.sleep
 
@@ -43,7 +58,7 @@ class OpenAICompatibleClient:
         max_tokens: int | None = None,
         stream: bool = False,
     ) -> str:
-        self.last_citations = []
+        self._begin_invocation()
         protocol = normalize_provider_protocol(self._config.provider_protocol)
         stream = bool(stream or self._requires_streaming())
         if protocol == "gemini":
@@ -51,6 +66,13 @@ class OpenAICompatibleClient:
         if protocol == "claude":
             return self._create_claude_completion(messages=messages, temperature=temperature, max_tokens=max_tokens)
         return self._create_openai_compatible_completion(messages=messages, temperature=temperature, max_tokens=max_tokens, stream=stream)
+
+    def _begin_invocation(self) -> None:
+        self.last_citations = []
+        self.last_usage = None
+        self.last_retry_count = 0
+        self.last_request_count = 0
+        self._deadline_at = self._monotonic() + max(float(self.request_deadline_seconds), 0.001)
 
     def _requires_streaming(self) -> bool:
         model = str(getattr(self._config, "model", "") or "").strip().lower()
@@ -134,6 +156,7 @@ class OpenAICompatibleClient:
         temperature: float = 0.2,
         max_tokens: int | None = None,
     ) -> Any:
+        self._begin_invocation()
         protocol = normalize_provider_protocol(self._config.provider_protocol)
         if protocol not in {"openai", "newapi", "neiapi"}:
             raise ValueError(f"Tool calling is not implemented for {protocol} protocol")
@@ -438,8 +461,22 @@ class OpenAICompatibleClient:
     ) -> dict[str, Any]:
         attempt = 0
         while True:
+            self._remaining_request_timeout(self._config)
+            if self.last_request_count >= max(int(self.request_attempt_limit), 1):
+                raise LlmRequestBudgetExceeded(
+                    f"LLM request budget exhausted after {self.last_request_count} attempt(s)"
+                )
+            self.last_request_count += 1
+            if attempt > 0:
+                # Count only retry requests that are actually sent. A retry that
+                # is rejected by the per-role budget is not an upstream call.
+                self.last_retry_count += 1
             try:
-                return send()
+                result = send()
+                # A synchronous transport may only return after its timeout.
+                # Do not let an over-deadline response continue the workflow.
+                self._remaining_request_timeout(self._config)
+                return result
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code if exc.response is not None else None
                 if status_code in escalate_statuses:
@@ -459,8 +496,23 @@ class OpenAICompatibleClient:
                 else:
                     delay = self._retry_delay_seconds(attempt, None)
             attempt += 1
+            if self.last_request_count >= max(int(self.request_attempt_limit), 1):
+                raise LlmRequestBudgetExceeded(
+                    f"LLM request budget exhausted after {self.last_request_count} attempt(s)"
+                )
             if delay > 0:
+                if delay >= self._remaining_request_timeout(self._config):
+                    raise LlmRequestDeadlineExceeded("LLM role deadline would be exceeded by retry backoff")
                 self._sleep(delay)
+
+    def _remaining_request_timeout(self, config: LlmEndpointConfig) -> float:
+        configured = max(float(config.timeout_seconds), 0.001)
+        if self._deadline_at is None:
+            return configured
+        remaining = self._deadline_at - self._monotonic()
+        if remaining <= 0:
+            raise LlmRequestDeadlineExceeded("LLM role deadline exhausted")
+        return min(configured, remaining)
 
     def _retry_delay_seconds(self, attempt: int, response: httpx.Response | None) -> float:
         if response is not None and response.status_code == 429:
@@ -482,22 +534,24 @@ class OpenAICompatibleClient:
         }
         if payload.get("stream") is True:
             return self._post_sse_once(config, headers, payload)
+        request_timeout = self._remaining_request_timeout(config)
         if self._http_client is not None:
             response = self._http_client.post(
-                config.endpoint_url, headers=headers, json=payload, timeout=config.timeout_seconds
+                config.endpoint_url, headers=headers, json=payload, timeout=request_timeout
             )
         else:
-            with httpx.Client(timeout=config.timeout_seconds, follow_redirects=True) as client:
+            with httpx.Client(timeout=request_timeout, follow_redirects=True) as client:
                 response = client.post(config.endpoint_url, headers=headers, json=payload)
         return self._parse_post_response(config, response)
 
     def _post_sse_once(self, config: LlmEndpointConfig, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+        request_timeout = self._remaining_request_timeout(config)
         if self._http_client is not None:
             stream_ctx = self._http_client.stream(
-                "POST", config.endpoint_url, headers=headers, json=payload, timeout=config.timeout_seconds
+                "POST", config.endpoint_url, headers=headers, json=payload, timeout=request_timeout
             )
             return self._consume_sse_response(config, stream_ctx)
-        with httpx.Client(timeout=config.timeout_seconds, follow_redirects=True) as client:
+        with httpx.Client(timeout=request_timeout, follow_redirects=True) as client:
             stream_ctx = client.stream("POST", config.endpoint_url, headers=headers, json=payload)
             return self._consume_sse_response(config, stream_ctx)
 
@@ -509,7 +563,10 @@ class OpenAICompatibleClient:
             if response.status_code >= 400 or "text/event-stream" not in content_type:
                 response.read()
                 return self._parse_post_response(config, response)
-            lines = list(response.iter_lines())
+            lines: list[str] = []
+            for line in response.iter_lines():
+                self._remaining_request_timeout(config)
+                lines.append(line)
             return self._parse_sse_body(config, "\n".join(lines))
 
     def _parse_post_response(self, config: LlmEndpointConfig, response: httpx.Response) -> dict[str, Any]:
@@ -604,10 +661,11 @@ class OpenAICompatibleClient:
         return self._request_with_retry(lambda: self._post_json_to_url_once(url, headers, payload))
 
     def _post_json_to_url_once(self, url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+        request_timeout = self._remaining_request_timeout(self._config)
         if self._http_client is not None:
-            response = self._http_client.post(url, headers=headers, json=payload, timeout=self._config.timeout_seconds)
+            response = self._http_client.post(url, headers=headers, json=payload, timeout=request_timeout)
         else:
-            with httpx.Client(timeout=self._config.timeout_seconds, follow_redirects=True) as client:
+            with httpx.Client(timeout=request_timeout, follow_redirects=True) as client:
                 response = client.post(url, headers=headers, json=payload)
 
         response.raise_for_status()
@@ -653,6 +711,31 @@ class OpenAICompatibleClient:
             return
         prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens", usage.get("promptTokenCount")))
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens", usage.get("candidatesTokenCount")))
+        total_tokens = usage.get("total_tokens", usage.get("totalTokenCount"))
+        normalized: dict[str, int | float] = {}
+        for key, value in (
+            ("prompt_tokens", prompt_tokens),
+            ("completion_tokens", completion_tokens),
+            ("total_tokens", total_tokens),
+        ):
+            if isinstance(value, bool):
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            normalized[key] = int(numeric) if numeric.is_integer() else numeric
+        if "total_tokens" not in normalized and {
+            "prompt_tokens",
+            "completion_tokens",
+        }.issubset(normalized):
+            normalized["total_tokens"] = normalized["prompt_tokens"] + normalized["completion_tokens"]
+        if normalized:
+            previous = self.last_usage or {}
+            combined = dict(previous)
+            for key, value in normalized.items():
+                combined[key] = previous.get(key, 0) + value
+            self.last_usage = combined
         if prompt_tokens is None and completion_tokens is None:
             return
         logger.info(
@@ -660,7 +743,7 @@ class OpenAICompatibleClient:
             self._config.model,
             prompt_tokens,
             completion_tokens,
-            usage.get("total_tokens", usage.get("totalTokenCount")),
+            total_tokens,
         )
 
     def _is_retryable_stream_eof_error(self, exc: httpx.TransportError) -> bool:

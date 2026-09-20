@@ -5,11 +5,12 @@ import json
 from pathlib import Path
 
 from travelmind_api.agents.base import AgentTrace, PlanningResult
-from travelmind_api.agents.planning_core import PlanningCore, PoiGrounding
+from travelmind_api.agents.planning_core import PlanningCore
 from travelmind_api.core.database import SessionLocal
 from travelmind_api.db.models import Trip, User
 from travelmind_api.jobs.handlers import _build_request, _persist_trip_plan
 from travelmind_api.services.budgeting import enrich_plan_with_budget
+from travelmind_api.services.planning.role_models import PoiGrounding
 from travelmind_api.services.weather_evidence import has_unsupported_weather_condition
 
 

@@ -3,22 +3,21 @@ from __future__ import annotations
 import json
 import time
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import timedelta
-from threading import Lock
 from typing import Any
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
 from travelmind_api.agents.base import AgentRunStep, PlanningRequest, PlanningResult, RefinementContext
-from travelmind_api.agents.planning_core import (
+from travelmind_api.agents.planning_core import PlanningCore, PlanningRoleConfig
+from travelmind_api.services.planning.role_models import (
     PlanningBrief,
     HotelRecommendation,
     PoiGrounding,
-    PlanningRoleConfig,
     TransportGuidance,
     WeatherGuidance,
-    PlanningCore,
 )
 from travelmind_api.agents.runtime import RoleProgressCallback, WorkflowRuntime
 from travelmind_api.agents.workflows.state import (
@@ -48,6 +47,10 @@ from travelmind_api.services.llm.role_invoker import (
     RoleInvocationResult,
     RoleInvoker,
 )
+from travelmind_api.services.llm.concurrency import (
+    EndpointConcurrencyLimiter,
+    InProcessEndpointConcurrencyLimiter,
+)
 from travelmind_api.services.maps import MapsPoiProvider
 from travelmind_api.services.planning.role_models import parse_structured_response
 from travelmind_api.services.poi_operation_evidence import verify_poi_open_days
@@ -72,7 +75,7 @@ class LangGraphOrchestrator(PlanningCore):
     """LangGraph execution over framework-neutral travel planning rules.
 
     Model calls go through ``RoleInvoker``; the inherited core contains only
-    product schemas, evidence handling, validation, and result assembly.
+    evidence handling, validation, and result assembly rules.
     """
 
     def __init__(
@@ -83,6 +86,7 @@ class LangGraphOrchestrator(PlanningCore):
         progress_callback: RoleProgressCallback | None = None,
         role_invoker: RoleInvoker | None = None,
         checkpointer: BaseCheckpointSaver[Any] | None = None,
+        concurrency_limiter: EndpointConcurrencyLimiter | None = None,
     ) -> None:
         super().__init__(
             llm_config,
@@ -90,12 +94,12 @@ class LangGraphOrchestrator(PlanningCore):
             progress_callback=progress_callback,
         )
         self._role_invoker = role_invoker or OpenAICompatibleRoleInvoker()
+        self._concurrency_limiter = concurrency_limiter or InProcessEndpointConcurrencyLimiter()
         self._graph_checkpointer = checkpointer or InMemorySaver()
         self._workflow_runtime: WorkflowRuntime | None = None
         self._workflow_request: PlanningRequest | None = None
         self._workflow_role_configs: dict[str, PlanningRoleConfig] = {}
         self._workflow_llm_configs: dict[str, LlmEndpointConfig] = {}
-        self._workflow_role_locks: dict[tuple[str, str, str], Lock] = {}
         self._last_graph_state: TripGenerationState | None = None
         self._last_input_fingerprint: str | None = None
         self._last_failed_node: str | None = None
@@ -120,9 +124,9 @@ class LangGraphOrchestrator(PlanningCore):
         self._workflow_request = request
         self._workflow_role_configs = self._build_role_configs(request)
         self._workflow_llm_configs = self._build_role_llm_configs()
-        self._workflow_role_locks = {}
         self._last_graph_state = None
         self._last_failed_node = None
+        persisted_role_results: dict[str, Any] = {}
 
         try:
             self._log_event(
@@ -172,6 +176,7 @@ class LangGraphOrchestrator(PlanningCore):
                 persisted_state = dict(persisted_snapshot.values) if persisted_snapshot.values else {}
                 self._last_graph_state = persisted_state or None
                 if persisted_state:
+                    persisted_role_results = dict(persisted_state.get("role_results") or {})
                     if persisted_state.get("graph_version") != TRIP_GENERATION_GRAPH_VERSION:
                         raise RuntimeError("Persisted workflow graph version changed; start a new generation")
                     if persisted_state.get("schema_version") != TRIP_GENERATION_STATE_SCHEMA_VERSION:
@@ -188,8 +193,10 @@ class LangGraphOrchestrator(PlanningCore):
                 self._last_graph_state = dict(snapshot.values) if snapshot.values else None
                 self._last_failed_node = ",".join(snapshot.next) or None
                 raise
-            self._last_graph_state = final_state
             result = PlanningResult.model_validate(final_state["planning_result"])
+            self._mark_reused_agent_runs(result, persisted_role_results)
+            final_state["planning_result"] = result.model_dump(mode="json")
+            self._last_graph_state = final_state
             self._log_event(
                 "langgraph_plan_trip_completed",
                 message="LangGraph trip planning completed.",
@@ -203,7 +210,6 @@ class LangGraphOrchestrator(PlanningCore):
             self._workflow_request = None
             self._workflow_role_configs = {}
             self._workflow_llm_configs = {}
-            self._workflow_role_locks = {}
             self._current_xhs_source_enabled = False
             self._current_user_id = None
             self._current_search_service = None
@@ -239,9 +245,9 @@ class LangGraphOrchestrator(PlanningCore):
         self._workflow_request = request
         self._workflow_role_configs = self._build_role_configs(request)
         self._workflow_llm_configs = self._build_role_llm_configs()
-        self._workflow_role_locks = {}
         self._last_graph_state = None
         self._last_failed_node = None
+        persisted_role_results: dict[str, Any] = {}
         refinement_context = context or RefinementContext()
 
         try:
@@ -273,6 +279,7 @@ class LangGraphOrchestrator(PlanningCore):
                 persisted = dict(snapshot.values) if snapshot.values else {}
                 self._last_graph_state = persisted or None
                 if persisted:
+                    persisted_role_results = dict(persisted.get("role_results") or {})
                     if persisted.get("graph_version") != TRIP_REFINEMENT_GRAPH_VERSION:
                         raise RuntimeError("Persisted refinement graph version changed; start a new refinement")
                     if persisted.get("schema_version") != TRIP_REFINEMENT_STATE_SCHEMA_VERSION:
@@ -286,14 +293,16 @@ class LangGraphOrchestrator(PlanningCore):
                 self._last_graph_state = dict(snapshot.values) if snapshot.values else None
                 self._last_failed_node = ",".join(snapshot.next) or None
                 raise
+            result = PlanningResult.model_validate(final_state["planning_result"])
+            self._mark_reused_agent_runs(result, persisted_role_results)
+            final_state["planning_result"] = result.model_dump(mode="json")
             self._last_graph_state = final_state
-            return PlanningResult.model_validate(final_state["planning_result"])
+            return result
         finally:
             self._workflow_runtime = None
             self._workflow_request = None
             self._workflow_role_configs = {}
             self._workflow_llm_configs = {}
-            self._workflow_role_locks = {}
             self._current_xhs_source_enabled = False
             self._current_user_id = None
             self._current_search_service = None
@@ -326,6 +335,7 @@ class LangGraphOrchestrator(PlanningCore):
         *,
         repair: bool,
     ) -> RoleInvocationResult:
+        started = time.perf_counter()
         request = self._request()
         current_plan = PlanningResult.model_validate(state["current_plan"])
         context = RefinementContext.model_validate(state.get("refinement_context", {}))
@@ -352,13 +362,23 @@ class LangGraphOrchestrator(PlanningCore):
                     ),
                 }
             )
-        endpoint = self._workflow_llm_configs["itinerary_planner"]
+        role_config = self._workflow_role_configs["itinerary_planner"]
+        endpoint = self._effective_role_endpoint(
+            role_config,
+            self._workflow_llm_configs["itinerary_planner"],
+        )
+        role_deadline = started + float(endpoint.timeout_seconds)
         self._runtime().emit_progress(
             "itinerary_refiner",
             "Itinerary refiner",
             "Applies the requested scope while preserving unaffected itinerary context.",
             72 if not repair else 82,
         )
+        self._runtime().check_cancelled()
+        remaining_seconds = role_deadline - time.perf_counter()
+        if remaining_seconds <= 0:
+            raise TimeoutError("LangGraph refinement exhausted its total deadline before the model request")
+        endpoint = endpoint.model_copy(update={"timeout_seconds": remaining_seconds})
         return self._role_invoker.invoke(
             RoleInvocation(
                 role_name="itinerary_refiner",
@@ -366,6 +386,7 @@ class LangGraphOrchestrator(PlanningCore):
                 system_prompt=prompt.system_prompt,
                 input_payload=input_payload,
                 endpoint=endpoint,
+                max_request_attempts=max(int(role_config.max_request_attempts), 1),
             )
         )
 
@@ -420,6 +441,15 @@ class LangGraphOrchestrator(PlanningCore):
             output_summary=payload.summary,
             prompt_version=str(metadata.get("prompt_version") or REFINEMENT_PROMPT_VERSION),
             model=endpoint.model,
+            request_id=str(metadata.get("request_id") or "") or None,
+            endpoint_host=str(metadata.get("endpoint_host") or self._describe_endpoint(endpoint)),
+            provider_protocol=str(metadata.get("provider_protocol") or endpoint.provider_protocol),
+            wire_api=str(metadata.get("wire_api") or endpoint.wire_api),
+            latency_ms=(int(metadata["latency_ms"]) if metadata.get("latency_ms") is not None else None),
+            usage=(dict(metadata["usage"]) if isinstance(metadata.get("usage"), dict) else None),
+            retry_count=int(metadata.get("retry_count") or 0),
+            request_count=int(metadata.get("request_count") or 0),
+            cache_reused=bool(metadata.get("cache_reused", False)),
             notes=[
                 f"Affected evidence domains: {', '.join(state.get('affected_evidence', [])) or 'none'}.",
                 "Server assembled conversation, uploaded-guide, and community-source context.",
@@ -510,6 +540,34 @@ class LangGraphOrchestrator(PlanningCore):
     def check_cancelled(self) -> None:
         self._runtime().check_cancelled()
 
+    def _mark_reused_agent_runs(
+        self,
+        result: PlanningResult,
+        persisted_role_results: dict[str, Any],
+    ) -> None:
+        for agent_run in result.trace.agent_runs:
+            metadata = persisted_role_results.get(agent_run.key)
+            if not isinstance(metadata, dict):
+                continue
+            persisted_request_id = str(metadata.get("request_id") or "").strip()
+            if persisted_request_id and persisted_request_id == str(agent_run.request_id or "").strip():
+                agent_run.cache_reused = True
+
+    def _effective_role_endpoint(
+        self,
+        role_config: PlanningRoleConfig,
+        endpoint: LlmEndpointConfig,
+    ) -> LlmEndpointConfig:
+        timeout_seconds = max(
+            float(endpoint.timeout_seconds),
+            float(role_config.min_timeout_seconds),
+        )
+        if role_config.timeout_cap_seconds is not None:
+            timeout_seconds = min(timeout_seconds, float(role_config.timeout_cap_seconds))
+        if timeout_seconds == float(endpoint.timeout_seconds):
+            return endpoint
+        return endpoint.model_copy(update={"timeout_seconds": timeout_seconds})
+
     def _invoke_workflow_role(
         self,
         role_name: str,
@@ -524,16 +582,9 @@ class LangGraphOrchestrator(PlanningCore):
             role_config.description,
             role_config.progress_percent,
         )
-        effective_endpoint = endpoint
-        if role_config.timeout_cap_seconds is not None:
-            effective_endpoint = endpoint.model_copy(
-                update={
-                    "timeout_seconds": min(
-                        float(endpoint.timeout_seconds),
-                        float(role_config.timeout_cap_seconds),
-                    )
-                }
-            )
+        effective_endpoint = self._effective_role_endpoint(role_config, endpoint)
+        started = time.perf_counter()
+        role_deadline = started + float(effective_endpoint.timeout_seconds)
         enriched_payload = self._augment_payload_with_tool_results(role_name, input_payload)
         prompt_payload = self._build_role_prompt_payload(enriched_payload, role_name=role_name)
         invocation = RoleInvocation(
@@ -545,13 +596,8 @@ class LangGraphOrchestrator(PlanningCore):
             temperature=role_config.temperature,
             max_tokens=role_config.max_tokens,
             stream=role_config.stream,
+            max_request_attempts=max(int(role_config.max_request_attempts), 1),
         )
-        lock_context = nullcontext()
-        if role_name in _SEARCH_ROLES and self._role_config_uses_search_capable_grok(role_name, endpoint):
-            lock = self._workflow_role_locks.setdefault(self._rate_limit_identity(endpoint), Lock())
-            lock_context = lock
-
-        started = time.perf_counter()
         self._log_event(
             "langgraph_role_started",
             message=f"Role {role_name} started.",
@@ -562,8 +608,24 @@ class LangGraphOrchestrator(PlanningCore):
             payload_keys=sorted(prompt_payload.keys()),
         )
         try:
+            remaining_seconds = role_deadline - time.perf_counter()
+            if remaining_seconds <= 0:
+                raise TimeoutError(f"LangGraph role '{role_name}' exhausted its total deadline before the model request")
+            if role_name in _SEARCH_ROLES and self._role_config_uses_search_capable_grok(role_name, endpoint):
+                lock_context = self._concurrency_limiter.acquire(
+                    self._rate_limit_identity(endpoint),
+                    timeout_seconds=remaining_seconds,
+                    cancellation_check=runtime.check_cancelled,
+                )
+            else:
+                lock_context = nullcontext()
             with lock_context:
-                result = self._role_invoker.invoke(invocation)
+                runtime.check_cancelled()
+                remaining_seconds = role_deadline - time.perf_counter()
+                if remaining_seconds <= 0:
+                    raise TimeoutError(f"LangGraph role '{role_name}' exhausted its total deadline before the model request")
+                bounded_endpoint = effective_endpoint.model_copy(update={"timeout_seconds": remaining_seconds})
+                result = self._role_invoker.invoke(replace(invocation, endpoint=bounded_endpoint))
         except Exception as exc:
             self._log_event(
                 "langgraph_role_failed",
@@ -590,6 +652,10 @@ class LangGraphOrchestrator(PlanningCore):
             model=result.model,
             elapsed_seconds=round(max(time.perf_counter() - started, 0.0), 3),
             response_chars=len(result.content),
+            retry_count=result.retry_count,
+            request_count=result.request_count,
+            cache_reused=result.cache_reused,
+            usage=result.usage,
         )
         return result, enriched_payload
 
@@ -762,16 +828,19 @@ class LangGraphOrchestrator(PlanningCore):
 
         role_configs = self._workflow_role_configs
         endpoints = self._workflow_llm_configs
+        role_results = state.get("role_results", {})
         agent_runs = [
             self._build_agent_run(
                 role_configs["brief_parser"],
                 endpoints["brief_parser"],
                 self._summarize_brief(brief),
+                invocation_metadata=role_results.get("brief_parser"),
             ),
             self._build_agent_run(
                 role_configs["poi_specialist"],
                 endpoints["poi_specialist"],
                 self._summarize_pois(poi_grounding),
+                invocation_metadata=role_results.get("poi_specialist"),
                 extra_notes=self._build_poi_debug_notes(
                     state.get("poi_payload", {}),
                     poi_grounding,
@@ -783,18 +852,21 @@ class LangGraphOrchestrator(PlanningCore):
                 role_configs["weather_specialist"],
                 endpoints["weather_specialist"],
                 self._summarize_weather(weather),
+                invocation_metadata=role_results.get("weather_specialist"),
                 extra_citations=weather_citations,
             ),
             self._build_agent_run(
                 role_configs["hotel_specialist"],
                 endpoints["hotel_specialist"],
                 self._summarize_hotels(hotel, destination=request.destination),
+                invocation_metadata=role_results.get("hotel_specialist"),
                 extra_citations=hotel_citations,
             ),
             self._build_agent_run(
                 role_configs["transport_specialist"],
                 endpoints["transport_specialist"],
                 self._summarize_transport(transport),
+                invocation_metadata=role_results.get("transport_specialist"),
                 extra_citations=transport_citations,
             ),
         ]
@@ -926,6 +998,7 @@ class LangGraphOrchestrator(PlanningCore):
                 planner_role,
                 self._workflow_llm_configs["itinerary_planner"],
                 self._summarize_itinerary(payload.summary, payload.days, payload.risks),
+                invocation_metadata=state.get("role_results", {}).get("itinerary_planner"),
             )
         )
         pipeline_notes = self._build_pipeline_notes(state, weather, payload)

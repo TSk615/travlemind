@@ -235,6 +235,15 @@ class AgentRunStep(BaseModel):
     prompt_version: str | None = None
     status: str = "completed"
     model: str | None = None
+    request_id: str | None = None
+    endpoint_host: str | None = None
+    provider_protocol: str | None = None
+    wire_api: str | None = None
+    latency_ms: int | None = None
+    usage: dict[str, Any] | None = None
+    retry_count: int = 0
+    request_count: int = 0
+    cache_reused: bool = False
     notes: list[str] = Field(default_factory=list)
     citations: list[str] = Field(default_factory=list)
 

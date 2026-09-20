@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from travelmind_api.agents.base import PlanningRequest, PlanningResult
+from travelmind_api.agents.base import AgentTrace, PlanningRequest, PlanningResult
 from travelmind_api.services.execution_validation import validate_timeline
 from travelmind_api.services.llm.parser import LlmPlanningPayload
 
@@ -30,6 +30,43 @@ REQUIRED_REPLAY_CATEGORIES = frozenset(
         "no_upstream",
     }
 )
+
+
+def estimate_trace_cost_usd(
+    trace: AgentTrace,
+    *,
+    input_cost_per_million: float,
+    output_cost_per_million: float,
+) -> float | None:
+    """Estimate known model cost; return unknown if any recorded role lacks usage."""
+
+    if input_cost_per_million < 0 or output_cost_per_million < 0:
+        raise ValueError("model token prices cannot be negative")
+    if not trace.agent_runs:
+        return None
+
+    prompt_tokens = 0.0
+    completion_tokens = 0.0
+    for run in trace.agent_runs:
+        usage = run.usage
+        if not isinstance(usage, dict):
+            return None
+        raw_prompt = usage.get("prompt_tokens", usage.get("input_tokens", usage.get("promptTokenCount")))
+        raw_completion = usage.get(
+            "completion_tokens",
+            usage.get("output_tokens", usage.get("candidatesTokenCount")),
+        )
+        try:
+            prompt_tokens += float(raw_prompt)
+            completion_tokens += float(raw_completion)
+        except (TypeError, ValueError):
+            return None
+
+    return round(
+        prompt_tokens * input_cost_per_million / 1_000_000
+        + completion_tokens * output_cost_per_million / 1_000_000,
+        8,
+    )
 
 
 class ReplayDefinition(BaseModel):

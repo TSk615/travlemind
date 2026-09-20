@@ -15,6 +15,7 @@ from travelmind_api.agents.provider import (
 from travelmind_api.agents.stub import StubOrchestrator
 from travelmind_api.core.config import Settings
 from travelmind_api.services.llm import LlmConfig
+from travelmind_api.services.llm.concurrency import build_endpoint_concurrency_limiter
 from travelmind_api.services.maps import build_maps_provider
 
 
@@ -37,6 +38,7 @@ def build_orchestrator(
             maps_provider=maps_provider,
             progress_callback=progress_callback,
             checkpointer=checkpointer,
+            concurrency_limiter=build_endpoint_concurrency_limiter(settings),
         )
 
     if resolved_llm_config is not None:

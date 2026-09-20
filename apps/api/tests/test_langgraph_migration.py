@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import date
 from types import SimpleNamespace
 
@@ -15,7 +16,7 @@ from travelmind_api.agents.base import (
     PlanningResult,
     RefinementContext,
 )
-from travelmind_api.agents.planning_core import PlanningBrief, PlanningCore
+from travelmind_api.agents.planning_core import PlanningCore
 from travelmind_api.agents.factory import build_orchestrator
 from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator
 from travelmind_api.agents.provider import normalize_agent_provider, select_agent_provider_for_new_job
@@ -144,6 +145,33 @@ def test_openai_compatible_role_invoker_preserves_citations_and_unknown_usage():
     assert result.endpoint_host == "llm.example.test"
     assert "secret-key" not in json.dumps(result.checkpoint_metadata())
     assert clients[0].messages[0] == {"role": "system", "content": "Return JSON."}
+
+
+def test_openai_compatible_role_invoker_preserves_known_usage_and_retries():
+    class FakeClient:
+        def __init__(self, _config):
+            self.last_citations = []
+            self.last_usage = {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+            self.last_retry_count = 1
+            self.last_request_count = 2
+
+        def create_chat_completion(self, **_kwargs):
+            return '{"destination":"京都","trip_days":2}'
+
+    result = OpenAICompatibleRoleInvoker(client_factory=FakeClient).invoke(
+        RoleInvocation(
+            role_name="brief_parser",
+            prompt_version="trip.brief_parser.test",
+            system_prompt="Return JSON.",
+            input_payload={"trip_request": {"destination": "京都"}},
+            endpoint=_endpoint(),
+        )
+    )
+
+    assert result.usage == {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+    assert result.retry_count == 1
+    assert result.request_count == 2
+    assert result.checkpoint_metadata()["usage"]["total_tokens"] == 20
 
 
 def test_brief_probe_runs_without_helloagents_and_checkpoint_state_excludes_credentials():
@@ -305,10 +333,22 @@ def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monke
     import travelmind_api.agents.langgraph_orchestrator as langgraph_module
 
     calls: list[str] = []
+    invocations: list[RoleInvocation] = []
+    limited_endpoints: list[tuple[str, str, str]] = []
     fake_module = _fake_planning_core_module(calls)
+
+    class RecordingLimiter:
+        @contextmanager
+        def acquire(self, identity, *, timeout_seconds, cancellation_check=None):
+            assert timeout_seconds > 0
+            if cancellation_check is not None:
+                cancellation_check()
+            limited_endpoints.append(identity)
+            yield
 
     class FixtureRoleInvoker:
         def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
+            invocations.append(invocation)
             agent = fake_module.SimpleAgent(
                 name=invocation.role_name,
                 llm=SimpleNamespace(kwargs={}),
@@ -326,7 +366,9 @@ def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monke
                 prompt_version=invocation.prompt_version,
                 latency_ms=1,
                 citations=[],
-                usage=None,
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                retry_count=1,
+                request_count=2,
             )
 
     monkeypatch.setattr(langgraph_module, "verify_daily_forecast_pages", lambda value, _config: value)
@@ -353,11 +395,12 @@ def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monke
         LlmConfig(
             base_url="https://llm.example.test/v1",
             api_key="test-key",
-            model="test-model",
+            model="Web/grok-chat-fast",
             wire_api="responses",
         ),
         maps_provider=StubMapsPoiProvider(),
         role_invoker=FixtureRoleInvoker(),
+        concurrency_limiter=RecordingLimiter(),
     )
 
     result = orchestrator.plan_trip(request)
@@ -370,12 +413,29 @@ def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monke
     assert set(calls[1:3]) == {"poi_specialist", "weather_specialist"}
     assert set(calls[3:5]) == {"hotel_specialist", "transport_specialist"}
     assert calls[-1] == "itinerary_planner"
+    assert len(invocations) == 6
+    assert next(call for call in invocations if call.role_name == "poi_specialist").max_request_attempts == 1
+    assert next(call for call in invocations if call.role_name == "poi_specialist").endpoint.timeout_seconds > 299
+    assert all(call.endpoint.timeout_seconds > 119 for call in invocations if call.role_name != "poi_specialist")
     assert checkpoint is not None
     assert checkpoint["repair_count"] == 0
     assert set(checkpoint["role_results"]) == set(calls)
+    assert all(run.usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15} for run in result.trace.agent_runs)
+    assert all(run.retry_count == 1 for run in result.trace.agent_runs)
+    assert all(run.request_count == 2 for run in result.trace.agent_runs)
+    assert not any(run.cache_reused for run in result.trace.agent_runs)
+    assert len(limited_endpoints) == 4
+    assert {identity[2] for identity in limited_endpoints} == {"test-key"}
     serialized = json.dumps(checkpoint, ensure_ascii=False, sort_keys=True)
     assert "test-key" not in serialized
     assert "user-1" not in serialized
+
+    orchestrator._mark_reused_agent_runs(
+        result,
+        {"brief_parser": {"request_id": "llmreq-brief_parser"}},
+    )
+    assert next(run for run in result.trace.agent_runs if run.key == "brief_parser").cache_reused is True
+    assert not any(run.cache_reused for run in result.trace.agent_runs if run.key != "brief_parser")
 
 
 def test_langgraph_orchestrator_repairs_one_invalid_draft(monkeypatch):

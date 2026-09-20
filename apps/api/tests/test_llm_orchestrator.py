@@ -16,13 +16,12 @@ from travelmind_api.agents.base import (
     TransportBookingSummary,
 )
 from travelmind_api.agents.factory import build_orchestrator
-from travelmind_api.agents.planning_core import (
+from travelmind_api.agents.planning_core import PlanningCore, PlanningRoleConfig
+from travelmind_api.services.planning.role_models import (
     PlanningBrief,
     HotelCandidate,
     HotelRecommendation,
-    PlanningCore,
     PoiGrounding,
-    PlanningRoleConfig,
     TransportGuidance,
 )
 from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from travelmind_api.agents.base import AgentRunStep, AgentTrace
 from travelmind_api.services.workflow_evaluation import (
     REQUIRED_REPLAY_CATEGORIES,
     ReplayObservation,
+    estimate_trace_cost_usd,
     evaluate_replay_gate,
     hard_constraint_violations,
     load_replay_cases,
@@ -12,6 +14,40 @@ from travelmind_api.services.workflow_evaluation import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "langgraph-replay-cases.json"
+
+
+def _trace_with_usage(*usage_rows):
+    return AgentTrace(
+        provider="langgraph",
+        workflow_id="run-cost",
+        notes=[],
+        agent_runs=[
+            AgentRunStep(
+                key=f"role-{index}",
+                title="Role",
+                description="Role",
+                usage=usage,
+            )
+            for index, usage in enumerate(usage_rows)
+        ],
+    )
+
+
+def test_trace_cost_uses_all_role_usage_and_missing_usage_stays_unknown():
+    trace = _trace_with_usage(
+        {"prompt_tokens": 1000, "completion_tokens": 500},
+        {"prompt_tokens": 2000, "completion_tokens": 1000},
+    )
+    assert estimate_trace_cost_usd(
+        trace,
+        input_cost_per_million=2,
+        output_cost_per_million=8,
+    ) == 0.018
+    assert estimate_trace_cost_usd(
+        _trace_with_usage({"prompt_tokens": 1, "completion_tokens": 1}, None),
+        input_cost_per_million=2,
+        output_cost_per_million=8,
+    ) is None
 
 
 def _observations(cases, provider: str, *, latency_ms: float, cost_usd: float):

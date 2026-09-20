@@ -286,6 +286,15 @@ export interface AgentRunStep {
   prompt_version?: string | null
   status: string
   model?: string | null
+  request_id?: string | null
+  endpoint_host?: string | null
+  provider_protocol?: string | null
+  wire_api?: string | null
+  latency_ms?: number | null
+  usage?: Record<string, unknown> | null
+  retry_count?: number
+  request_count?: number
+  cache_reused?: boolean
   notes: string[]
   citations?: string[]
 }

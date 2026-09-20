@@ -337,7 +337,23 @@ def test_trip_itinerary_save_without_trace_preserves_latest_trace(client: TestCl
         "provider": "stub",
         "workflow_id": "wf_manual_edit_test",
         "notes": ["Generated before manual edit."],
-        "agent_runs": [],
+        "agent_runs": [
+            {
+                "key": "itinerary_planner",
+                "title": "Itinerary planner",
+                "description": "Creates the itinerary.",
+                "model": "test-model",
+                "request_id": "llmreq_contract",
+                "endpoint_host": "llm.example.test",
+                "provider_protocol": "openai",
+                "wire_api": "responses",
+                "latency_ms": 123,
+                "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+                "retry_count": 1,
+                "request_count": 2,
+                "cache_reused": False,
+            }
+        ],
         "grounding_documents": [],
         "transport_guidance": None,
     }
@@ -348,6 +364,10 @@ def test_trip_itinerary_save_without_trace_preserves_latest_trace(client: TestCl
     )
     assert initial_save.status_code == 200, initial_save.text
     assert initial_save.json()["data"]["latest_agent_trace"]["workflow_id"] == "wf_manual_edit_test"
+    saved_run = initial_save.json()["data"]["latest_agent_trace"]["agent_runs"][0]
+    assert saved_run["usage"]["total_tokens"] == 20
+    assert saved_run["retry_count"] == 1
+    assert saved_run["request_count"] == 2
 
     edited_itinerary = {**base_itinerary, "summary": "Manual edits keep the prior execution trace."}
     edited_save = client.put(

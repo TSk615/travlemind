@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from travelmind_api.agents.planning_core import PlanningCore, PoiGrounding
+from travelmind_api.agents.planning_core import PlanningCore
 from travelmind_api.api.schemas.common import success_response
 from travelmind_api.api.schemas.llm import LlmConnectionTestRequest, LlmConnectionTestResponse, LlmModelsRequest, LlmProxyRequest
 from travelmind_api.core.config import get_settings
@@ -25,6 +25,7 @@ from travelmind_api.services.llm import LlmConfig, OpenAICompatibleClient
 from travelmind_api.services.llm.config import default_base_url_for_protocol, normalize_provider_protocol, normalize_wire_api
 from travelmind_api.services.llm.models import fetch_llm_models
 from travelmind_api.services.llm.user_config import build_user_poi_role_overrides
+from travelmind_api.services.planning.role_models import PoiGrounding
 from travelmind_api.services.search_connector import (
     ConfiguredSearchGateway,
     DEFAULT_IMAGE_INCLUDE_DOMAINS,

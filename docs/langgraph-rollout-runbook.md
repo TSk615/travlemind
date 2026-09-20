@@ -26,13 +26,24 @@ provider 快照的新 Job。
 
 ```powershell
 $env:TRAVELMIND_REPLAY_ALLOW_NETWORK = "1"
+$env:TRAVELMIND_REPLAY_INPUT_COST_PER_MILLION = "<input-token-price>"
+$env:TRAVELMIND_REPLAY_OUTPUT_COST_PER_MILLION = "<output-token-price>"
 ## 基线文件应由仍包含旧实现的保留部署版本生成并复制到 .tmp/replay/baseline.json
 uv run --project apps/api python scripts/run_workflow_replay.py --provider langgraph --output .tmp/replay/candidate.json --allow-network
 uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline .tmp/replay/baseline.json --candidate .tmp/replay/candidate.json
 ```
 
-费用缺失时质量门禁默认失败；只有在验证功能而非发布决策时才可传
+也可以用 `--input-cost-per-million` 和 `--output-cost-per-million` 显式传入本次端点价格。
+回放会汇总每个角色返回的 prompt/completion token；任一角色缺少 usage 时，该案例费用仍记为
+未知，不会错误地按零成本处理。费用缺失时质量门禁默认失败；只有在验证功能而非发布决策时才可传
 `--allow-missing-cost`。少量真实端点预检可用 `--limit`，完整放量判断必须覆盖全部案例。
+
+每个 LangGraph 角色默认最多发送 2 次 HTTP 请求，POI 角色最多 1 次；请求数和实际重试数
+分别写入 trace。角色截止时间跨预处理、共享限流等待、HTTP 重试和协议回退统一扣减；
+同步传输无法保证立刻中断，但超时响应不会继续进入结果提交。ARQ 的任务级最大尝试次数
+继续构成外层恢复上限，图节点不再额外叠加默认重试。
+默认配置下，普通角色跨 3 次 ARQ 尝试的理论上限是 6 次请求，POI 角色为 3 次；
+已 checkpoint 的成功节点不会重跑。
 
 协议回归使用模拟 HTTP 端点，覆盖 Responses、Chat Completions、Gemini、Claude、
 NewAPI、NeiAPI、Grok 引用及流式异常：

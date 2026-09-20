@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 from urllib.parse import urlparse
 
 from travelmind_api.agents.base import (
+    AgentRunStep,
     AgentTrace,
     BookingInfo,
     PlannedDay,
@@ -37,12 +39,15 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
         super().__init__(maps_provider=maps_provider)
         self._llm_config = llm_config
         self._llm_client = llm_client or OpenAICompatibleClient(llm_config)
+        self._last_invocation_latency_ms: int | None = None
 
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:
         target_locale = infer_output_locale(request)
         try:
             prompt_bundle = build_planning_prompt_bundle(request)
+            started = time.perf_counter()
             content = self._llm_client.create_chat_completion(messages=prompt_bundle.as_messages())
+            self._last_invocation_latency_ms = int((time.perf_counter() - started) * 1000)
             payload = parse_planning_response(content)
             language_warning = planning_payload_needs_language_repair(payload, request)
             result = self._build_result_from_payload(payload, request, prompt_bundle.version, mode="plan")
@@ -83,7 +88,9 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
                 day_index=day_index,
                 context=context,
             )
+            started = time.perf_counter()
             content = self._llm_client.create_chat_completion(messages=prompt_bundle.as_messages())
+            self._last_invocation_latency_ms = int((time.perf_counter() - started) * 1000)
             payload = parse_planning_response(content)
             language_warning = planning_payload_needs_language_repair(payload, request)
             result = self._build_result_from_payload(payload, request, prompt_bundle.version, mode="refine")
@@ -211,6 +218,9 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
         host = urlparse(self._llm_config.base_url).netloc or self._llm_config.base_url
         total_budget = payload.total_budget_estimate if payload.total_budget_estimate and payload.total_budget_estimate > 0 else request.budget
         trace_notes = self._build_trace_notes(host, prompt_version, mode)
+        run_key = "itinerary_planner" if mode == "plan" else "itinerary_refiner"
+        run_title = "Itinerary planner" if mode == "plan" else "Itinerary refiner"
+        usage = getattr(self._llm_client, "last_usage", None)
         plan = PlanningResult(
             summary=payload.summary,
             total_budget_estimate=total_budget,
@@ -221,6 +231,23 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
                 provider=self._trace_provider_name(),
                 workflow_id=generate_workflow_id(),
                 notes=trace_notes,
+                agent_runs=[
+                    AgentRunStep(
+                        key=run_key,
+                        title=run_title,
+                        description="Runs the configured single-model planning workflow.",
+                        prompt_version=prompt_version,
+                        model=self._llm_config.model,
+                        request_id=generate_identifier("llmreq"),
+                        endpoint_host=host,
+                        provider_protocol=self._llm_config.provider_protocol,
+                        wire_api=self._llm_config.wire_api,
+                        latency_ms=self._last_invocation_latency_ms,
+                        usage=(dict(usage) if isinstance(usage, dict) else None),
+                        retry_count=int(getattr(self._llm_client, "last_retry_count", 0) or 0),
+                        request_count=int(getattr(self._llm_client, "last_request_count", 0) or 0),
+                    )
+                ],
             ),
         )
         return enrich_plan_with_budget(plan, request)

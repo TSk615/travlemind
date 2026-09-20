@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from travelmind_api.services.llm import LlmEndpointConfig, OpenAICompatibleClient
+from travelmind_api.services.llm.client import LlmRequestBudgetExceeded, LlmRequestDeadlineExceeded
 
 
 class BrokenJsonStream(httpx.SyncByteStream):
@@ -330,6 +331,54 @@ def test_openai_compatible_client_retries_503_with_exponential_backoff():
     assert reply == "recovered"
     assert len(attempts) == 3
     assert sleeps == [1.0, 2.0]
+    assert llm_client.last_request_count == 3
+    assert llm_client.last_retry_count == 2
+
+
+def test_openai_compatible_client_enforces_per_invocation_request_budget():
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        attempts.append(1)
+        return httpx.Response(503, json={"error": "upstream busy"})
+
+    llm_client, http_client = _build_direct_client(handler)
+    llm_client.request_attempt_limit = 1
+    llm_client._sleep = lambda seconds: pytest.fail(f"unexpected retry sleep of {seconds}s")
+
+    try:
+        with pytest.raises(LlmRequestBudgetExceeded, match="after 1 attempt"):
+            llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert len(attempts) == 1
+    assert llm_client.last_request_count == 1
+    assert llm_client.last_retry_count == 0
+
+
+def test_openai_compatible_client_rejects_response_after_total_deadline():
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        attempts.append(1)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "too late"}}]})
+
+    llm_client, http_client = _build_direct_client(handler)
+    llm_client.request_deadline_seconds = 0.5
+    ticks = iter([100.0, 100.1, 100.2, 100.6])
+    llm_client._monotonic = lambda: next(ticks)
+
+    try:
+        with pytest.raises(LlmRequestDeadlineExceeded, match="deadline exhausted"):
+            llm_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+    finally:
+        http_client.close()
+
+    assert len(attempts) == 1
+    assert llm_client.last_request_count == 1
 
 
 def test_openai_compatible_client_prefers_retry_after_header_on_429():
@@ -499,6 +548,12 @@ def test_openai_compatible_client_logs_usage_tokens(caplog):
     assert reply == "ok"
     assert "prompt_tokens=12" in caplog.text
     assert "completion_tokens=34" in caplog.text
+    assert llm_client.last_usage == {
+        "prompt_tokens": 12,
+        "completion_tokens": 34,
+        "total_tokens": 46,
+    }
+    assert llm_client.last_retry_count == 0
 
 
 def test_llm_proxy_requires_saved_or_explicit_configuration(client):

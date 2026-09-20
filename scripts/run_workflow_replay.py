@@ -14,6 +14,7 @@ from travelmind_api.core.config import Settings
 from travelmind_api.services.llm import LlmConfig
 from travelmind_api.services.workflow_evaluation import (
     ReplayObservation,
+    estimate_trace_cost_usd,
     hard_constraint_violations,
     load_replay_cases,
 )
@@ -26,6 +27,16 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--allow-network", action="store_true")
+    parser.add_argument(
+        "--input-cost-per-million",
+        type=float,
+        default=(float(os.environ["TRAVELMIND_REPLAY_INPUT_COST_PER_MILLION"]) if os.getenv("TRAVELMIND_REPLAY_INPUT_COST_PER_MILLION") else None),
+    )
+    parser.add_argument(
+        "--output-cost-per-million",
+        type=float,
+        default=(float(os.environ["TRAVELMIND_REPLAY_OUTPUT_COST_PER_MILLION"]) if os.getenv("TRAVELMIND_REPLAY_OUTPUT_COST_PER_MILLION") else None),
+    )
     args = parser.parse_args()
     if not args.allow_network or os.getenv("TRAVELMIND_REPLAY_ALLOW_NETWORK") != "1":
         raise SystemExit("network replay requires --allow-network and TRAVELMIND_REPLAY_ALLOW_NETWORK=1")
@@ -65,6 +76,15 @@ def main() -> None:
             else:
                 result = orchestrator.plan_trip(case.request)
             violations = hard_constraint_violations(case, result, original_plan=original_plan)
+            cost_usd = (
+                estimate_trace_cost_usd(
+                    result.trace,
+                    input_cost_per_million=args.input_cost_per_million,
+                    output_cost_per_million=args.output_cost_per_million,
+                )
+                if args.input_cost_per_million is not None and args.output_cost_per_million is not None
+                else None
+            )
             observations.append(
                 ReplayObservation(
                     case_id=case.id,
@@ -73,7 +93,7 @@ def main() -> None:
                     hard_violations=violations,
                     quality_score=max(0.0, 1.0 - 0.2 * len(violations)),
                     latency_ms=(perf_counter() - started) * 1000,
-                    cost_usd=None,
+                    cost_usd=cost_usd,
                 )
             )
         except Exception as exc:

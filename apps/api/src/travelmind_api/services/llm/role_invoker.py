@@ -22,6 +22,7 @@ class RoleInvocation:
     temperature: float = 0.2
     max_tokens: int | None = None
     stream: bool = False
+    max_request_attempts: int = 2
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,9 @@ class RoleInvocationResult:
     # None means the endpoint did not return usage metadata. It must not be
     # converted to zero because that would under-report cost.
     usage: dict[str, Any] | None = None
+    retry_count: int = 0
+    cache_reused: bool = False
+    request_count: int = 0
 
     def checkpoint_metadata(self) -> dict[str, Any]:
         return {
@@ -52,6 +56,9 @@ class RoleInvocationResult:
             "latency_ms": self.latency_ms,
             "citations": list(self.citations),
             "usage": self.usage,
+            "retry_count": self.retry_count,
+            "cache_reused": self.cache_reused,
+            "request_count": self.request_count,
         }
 
 
@@ -72,6 +79,8 @@ class OpenAICompatibleRoleInvoker:
 
     def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
         client = self._client_factory(invocation.endpoint)
+        client.request_attempt_limit = max(int(invocation.max_request_attempts), 1)
+        client.request_deadline_seconds = float(invocation.endpoint.timeout_seconds)
         messages = [
             {"role": "system", "content": invocation.system_prompt},
             {
@@ -103,6 +112,11 @@ class OpenAICompatibleRoleInvoker:
             prompt_version=invocation.prompt_version,
             latency_ms=latency_ms,
             citations=list(dict.fromkeys(citations)),
-            usage=None,
+            usage=(
+                dict(getattr(client, "last_usage"))
+                if isinstance(getattr(client, "last_usage", None), dict)
+                else None
+            ),
+            retry_count=int(getattr(client, "last_retry_count", 0) or 0),
+            request_count=int(getattr(client, "last_request_count", 0) or 0),
         )
-

@@ -5,7 +5,7 @@ import pytest
 from PIL import Image
 
 from travelmind_api.agents.base import *
-from travelmind_api.agents.planning_core import DailyForecast, HotelCandidate, HotelRecommendation, PlanningCore, PoiGrounding, ResearchPoi, TransportGuidance, WeatherGuidance
+from travelmind_api.agents.planning_core import PlanningCore
 from travelmind_api.services.budgeting import enrich_plan_with_budget
 from travelmind_api.services.execution_validation import validate_timeline
 from travelmind_api.services.hotel_evidence import verify_hotel_pages
@@ -14,6 +14,15 @@ from travelmind_api.services.llm.parser import LlmPlanningPayload, parse_plannin
 from travelmind_api.services.llm.parser import LlmBookingInfo
 from travelmind_api.services.llm.localization import planning_payload_needs_language_repair
 from travelmind_api.services.planning_details import TransportLeg, TransportServiceCandidate
+from travelmind_api.services.planning.role_models import (
+    DailyForecast,
+    HotelCandidate,
+    HotelRecommendation,
+    PoiGrounding,
+    ResearchPoi,
+    TransportGuidance,
+    WeatherGuidance,
+)
 from travelmind_api.services.poi_operation_evidence import verify_poi_open_days
 from travelmind_api.services.search_connector import SearchServiceConfig
 from travelmind_api.services.transport_evidence import verify_transport_candidate_pages

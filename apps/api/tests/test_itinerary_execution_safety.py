@@ -5,8 +5,8 @@ import pytest
 from fastapi import HTTPException
 
 from travelmind_api.agents.base import PlanningRequest
-from travelmind_api.agents.planning_core import (
-    PlanningCore,
+from travelmind_api.agents.planning_core import PlanningCore
+from travelmind_api.services.planning.role_models import (
     TransportGuidance,
     WeatherGuidance,
 )

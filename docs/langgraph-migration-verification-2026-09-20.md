@@ -9,7 +9,14 @@
 
 - 生成与微调统一使用后端 LangGraph 工作流；浏览器编排器已删除。
 - 六角色生成图、微调图、一次修复、证据核验与结果装配已经接入中立业务核心。
+- 业务 Pydantic Schema 已从编排核心提取到 `services/planning/role_models.py`，API 探针、
+  脚本与测试均改用中立模块。
 - `WorkflowRun`、SQLite/PostgreSQL checkpointer、恢复指纹、取消、重试预算、版本冲突与幂等提交已经落地。
+- HTTP 请求总数和跨重试/协议回退的总截止时间在角色级硬限制；多 worker 使用 Redis
+  共享端点/凭据限流，inline 模式在进程内共享。取消在模型请求前再次检查。
+- trace 持久化角色请求标识、端点、协议、耗时、usage、实际重试/请求次数与缓存复用；
+  恢复时按稳定 request ID 标记复用节点。回放脚本可按显式 token 单价计算已知费用，
+  缺少 usage 时保持未知。
 - provider 灰度按 Job ID 稳定分桶，任务首次执行后固定 provider；回滚使用 `standard` 或保留部署版本。
 - 30 组受控时钟回放、协议矩阵和质量/延迟/费用门禁已经实现。
 - `hello-agents` 包、旧 orchestrator/LLM adapter、旧 prompt 模块、浏览器 planner 与旧专用脚本已经删除。
@@ -23,10 +30,11 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `276 passed, 1 skipped` |
+| API 全量测试 | `284 passed, 1 skipped` |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
-| LangGraph、rollout、迁移和 orchestrator 定向测试 | `71 passed, 1 skipped` |
+| 请求预算/截止时间、共享限流、恢复与 LangGraph 定向测试 | `61 passed` |
 | 前端单元测试 | `10 passed` |
+| 前端生成/微调与鉴权 E2E（Chromium） | `4 passed` |
 | 前端生产构建（`vue-tsc` + Vite） | 通过 |
 | API 源码与测试 `compileall` | 通过 |
 | API/worker `uv lock` 与 `uv sync --locked` | 通过 |
