@@ -1,6 +1,9 @@
 # TravelMind AI：LangChain / LangGraph 迁移评估与计划
 
-评估日期：2026-09-20。状态：方案，尚未实施迁移。
+评估日期：2026-09-20。实施状态：`codex/langchain-migration` 已完成 P0–P5 代码迁移与本地
+质量门禁；PostgreSQL、真实模型端点及生产灰度仍须按
+[`langgraph-migration-verification-2026-09-20.md`](./langgraph-migration-verification-2026-09-20.md)
+完成外部验收。下文的“当前项目”和基线测试描述保留迁移前快照语义，用于解释方案来源。
 
 本文将“更改 LangChain 框架”理解为：把当前 HelloAgents 与自定义 AI 编排逐步迁移到 LangChain 生态。分析依据为当前工作区代码、一次相关测试运行和当日官方文档；当前未提交的 POI 营业日校验等变更也包含在评估范围内。
 

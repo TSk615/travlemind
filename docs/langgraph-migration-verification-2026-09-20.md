@@ -44,7 +44,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 | --- | --- |
 | API 全量测试 | `298 passed, 2 skipped`（本机无 PostgreSQL） |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
-| 请求预算/截止时间、共享限流、恢复与 LangGraph 定向测试 | `61 passed` |
+| LangGraph、共享限流、恢复、存储与灰度定向测试 | `38 passed` |
 | 前端单元测试 | `10 passed` |
 | 前端生成/微调与鉴权 E2E（Chromium） | `4 passed` |
 | 前端生产构建（`vue-tsc` + Vite） | 通过 |
