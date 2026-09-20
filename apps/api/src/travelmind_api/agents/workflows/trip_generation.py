@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph import END, START, StateGraph
+
+from travelmind_api.agents.base import PlanningRequest
+from travelmind_api.agents.runtime import WorkflowRuntime
+from travelmind_api.agents.workflows.state import (
+    TRIP_GENERATION_GRAPH_VERSION,
+    TRIP_GENERATION_STATE_SCHEMA_VERSION,
+    TripGenerationState,
+    build_input_fingerprint,
+    non_sensitive_model_identity,
+)
+from travelmind_api.prompts.roles.trip import build_brief_parser_prompt
+from travelmind_api.services.llm.config import LlmEndpointConfig
+from travelmind_api.services.llm.localization import build_output_language_instruction, infer_output_locale
+from travelmind_api.services.llm.role_invoker import RoleInvocation, RoleInvoker
+from travelmind_api.services.planning.payloads import build_trip_request_payload
+from travelmind_api.services.planning.role_models import PlanningBrief, parse_structured_response
+
+
+@dataclass(frozen=True)
+class TripGenerationDependencies:
+    role_invoker: RoleInvoker
+    brief_endpoint: LlmEndpointConfig
+    runtime: WorkflowRuntime
+
+
+def build_initial_state(
+    request: PlanningRequest,
+    *,
+    run_id: str,
+    brief_endpoint: LlmEndpointConfig,
+) -> TripGenerationState:
+    prompt = build_brief_parser_prompt()
+    trip_payload = build_trip_request_payload(request)
+    output_locale = infer_output_locale(request)
+    return {
+        "run_id": run_id,
+        "graph_version": TRIP_GENERATION_GRAPH_VERSION,
+        "schema_version": TRIP_GENERATION_STATE_SCHEMA_VERSION,
+        "input_fingerprint": build_input_fingerprint(
+            trip_request=trip_payload,
+            output_locale=output_locale,
+            prompt_versions={"brief_parser": prompt.version},
+            model_identities={"brief_parser": non_sensitive_model_identity(brief_endpoint)},
+        ),
+        "output_locale": output_locale,
+        "trip_request": trip_payload,
+        "role_results": {},
+    }
+
+
+def build_brief_probe_graph(
+    dependencies: TripGenerationDependencies,
+    *,
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
+):
+    def parse_brief(state: TripGenerationState) -> dict[str, Any]:
+        dependencies.runtime.emit_progress(
+            "brief_parser",
+            "Brief parser",
+            "Compresses the trip input into a compact planning brief.",
+            24,
+        )
+        prompt = build_brief_parser_prompt()
+        output_locale = state.get("output_locale", "zh-CN")
+        result = dependencies.role_invoker.invoke(
+            RoleInvocation(
+                role_name="brief_parser",
+                prompt_version=prompt.version,
+                system_prompt=(
+                    f"{prompt.system_prompt} "
+                    f"{build_output_language_instruction(output_locale)}"
+                    f" Target output locale: {output_locale}."
+                ),
+                input_payload={"trip_request": state["trip_request"]},
+                endpoint=dependencies.brief_endpoint,
+            )
+        )
+        dependencies.runtime.check_cancelled()
+        brief = parse_structured_response(result.content, PlanningBrief)
+        role_results = dict(state.get("role_results", {}))
+        role_results["brief_parser"] = result.checkpoint_metadata()
+        return {
+            "planning_brief": brief.model_dump(mode="json"),
+            "role_results": role_results,
+        }
+
+    builder = StateGraph(TripGenerationState)
+    builder.add_node("brief_parser", parse_brief)
+    builder.add_edge(START, "brief_parser")
+    builder.add_edge("brief_parser", END)
+    return builder.compile(checkpointer=checkpointer)
+
+
+def run_brief_probe(
+    request: PlanningRequest,
+    *,
+    dependencies: TripGenerationDependencies,
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
+) -> TripGenerationState:
+    graph = build_brief_probe_graph(dependencies, checkpointer=checkpointer)
+    initial_state = build_initial_state(
+        request,
+        run_id=dependencies.runtime.run_id,
+        brief_endpoint=dependencies.brief_endpoint,
+    )
+    config = {"configurable": {"thread_id": dependencies.runtime.run_id}}
+    return graph.invoke(initial_state, config=config)
+

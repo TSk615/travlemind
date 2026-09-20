@@ -5,7 +5,6 @@ import json
 import re
 import time
 from datetime import date, timedelta
-from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
@@ -36,6 +35,7 @@ from travelmind_api.agents.base import (
     VisitRequirements,
 )
 from travelmind_api.agents.stub import StubOrchestrator
+from travelmind_api.agents.runtime import RoleProgressCallback
 from travelmind_api.agents.helloagents_llm import (
     HelloAgentsCompatibleLLM as _HelloAgentsCompatibleLLM,
     HelloAgentsInvokeResult,
@@ -50,6 +50,8 @@ from travelmind_api.services.poi_operation_evidence import verify_poi_open_days
 from travelmind_api.services.transport_evidence import verify_transport_candidate_pages
 from travelmind_api.services.weather_evidence import has_unsupported_weather_condition, verify_daily_forecast_pages
 from travelmind_api.services.planning_details import BookingDetails, HotelEvidence, TransportLeg, TransportServiceCandidate
+from travelmind_api.services.planning.payloads import build_trip_request_payload
+from travelmind_api.services.planning.role_models import HelloAgentsBrief
 from travelmind_api.services.llm import LlmConfig, LlmEndpointConfig, LlmPlanningPayload, OpenAICompatibleClient, build_planning_messages, parse_planning_response
 from travelmind_api.services.llm.localization import build_output_language_instruction, infer_output_locale, is_chinese_output, planning_payload_needs_language_repair
 from travelmind_api.prompts.roles.helloagents import (
@@ -103,37 +105,6 @@ _TOOL_RESULT_URL_METADATA_KEYS = {
     "source_url",
     "source_urls",
 }
-
-RoleProgressCallback = Callable[[str, str, str, int], None]
-
-
-class HelloAgentsBrief(BaseModel):
-    destination: str = Field(min_length=1)
-    trip_days: int = Field(ge=1)
-    budget_band: str = Field(default="")
-    budget_is_hard_constraint: bool = True
-    budget_priority: str = Field(default="")
-    allow_budget_flex: bool = False
-    pace: str = Field(default="")
-    must_have: list[str] = Field(default_factory=list)
-    avoid: list[str] = Field(default_factory=list)
-    transport: str = Field(default="")
-    accommodation: str = Field(default="")
-    interests: list[str] = Field(default_factory=list)
-    planning_constraints: list[str] = Field(default_factory=list)
-
-    @field_validator("budget_is_hard_constraint", "allow_budget_flex", mode="before")
-    @classmethod
-    def _coerce_bool(cls, value: Any) -> bool:
-        if isinstance(value, bool):
-            return value
-        normalized = str(value or "").strip().lower()
-        if normalized in {"1", "true", "yes", "y", "required"}:
-            return True
-        if normalized in {"0", "false", "no", "n", "not_required"}:
-            return False
-        return False
-
 
 class HelloAgentsResearchPoi(BaseModel):
     name: str = Field(min_length=1)
@@ -1473,34 +1444,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return final_payload, pipeline_notes, agent_runs, poi_grounding, weather, weather_citations, weather_tool_results, grounding_documents, hotel, transport
 
     def _build_trip_payload(self, request: PlanningRequest) -> dict[str, Any]:
-        payload = {
-            "trip_id": request.trip_id,
-            "title": request.title,
-            "origin": request.origin,
-            "destination": request.destination,
-            "start_date": request.start_date.isoformat(),
-            "end_date": request.end_date.isoformat(),
-            "trip_days": max(1, (request.end_date - request.start_date).days + 1),
-            "budget": request.budget,
-            "travelers": request.travelers,
-            "interests": request.interests,
-            "accommodation_preference": request.accommodation_preference,
-            "pace": request.pace,
-            "transport_mode": request.transport_mode,
-        }
-        generated_at = request.planning_generated_at
-        if generated_at is not None:
-            local_generated_at = generated_at.astimezone() if generated_at.tzinfo is not None else generated_at
-            earliest = local_generated_at.replace(second=0, microsecond=0) + timedelta(minutes=30)
-            payload.update(
-                {
-                    "planning_generated_at": local_generated_at.isoformat(timespec="minutes"),
-                    "current_local_date": local_generated_at.date().isoformat(),
-                    "current_local_time": local_generated_at.strftime("%H:%M"),
-                    "same_day_earliest_start_time": earliest.strftime("%H:%M") if request.start_date == local_generated_at.date() else None,
-                }
-            )
-        return payload
+        return build_trip_request_payload(request)
 
     def _build_role_llm_configs(self) -> dict[str, LlmEndpointConfig]:
         assert self._llm_config is not None

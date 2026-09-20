@@ -4,8 +4,12 @@ import json
 from typing import Any
 
 from travelmind_api.prompts.types import RolePromptSpec
+from travelmind_api.prompts.roles.trip import (
+    BRIEF_OUTPUT_SCHEMA,
+    BRIEF_PARSER_PROMPT_VERSION,
+    build_brief_parser_prompt,
+)
 
-BRIEF_PARSER_PROMPT_VERSION = "helloagents.brief_parser.v2"
 POI_SPECIALIST_PROMPT_VERSION = "helloagents.poi_specialist.v15"
 ATTRACTION_SPECIALIST_PROMPT_VERSION = "helloagents.attraction_specialist.v3"
 FOOD_SPECIALIST_PROMPT_VERSION = "helloagents.food_specialist.v1"
@@ -16,22 +20,6 @@ ITINERARY_PLANNER_PROMPT_VERSION = "helloagents.itinerary_planner.v17"
 IMAGE_CURATOR_PROMPT_VERSION = "helloagents.image_curator.v1"
 IMAGE_QUERY_PLANNER_PROMPT_VERSION = "helloagents.image_query_planner.v1"
 IMAGE_REVIEWER_PROMPT_VERSION = "helloagents.image_reviewer.v1"
-BRIEF_OUTPUT_SCHEMA: dict[str, Any] = {
-    "destination": "Kyoto",
-    "trip_days": 2,
-    "budget_band": "midrange",
-    "budget_is_hard_constraint": True,
-    "budget_priority": "balance tickets and transport before adding optional upgrades",
-    "allow_budget_flex": False,
-    "pace": "balanced",
-    "must_have": ["temples", "coffee"],
-    "avoid": ["overpacked long-distance transfers"],
-    "transport": "rail",
-    "accommodation": "quiet boutique hotel",
-    "interests": ["temples", "coffee"],
-    "planning_constraints": ["keep sequencing realistic", "respect budget and pace"],
-}
-
 ATTRACTION_OUTPUT_SCHEMA: dict[str, Any] = {
     "candidate_areas": ["Higashiyama", "Downtown Kyoto"],
     "featured_pois": [
@@ -316,21 +304,6 @@ POI_LIGHTWEIGHT_OUTPUT_SCHEMA: dict[str, Any] = {
         }
     ],
 }
-
-
-# 中文注释：
-# - 角色：brief parser
-# - 目标：把用户原始 trip request 压缩成结构化 planning brief。
-# - 禁止：不要直接开始写最终 itinerary。
-def build_brief_parser_prompt() -> RolePromptSpec:
-    system_prompt = (
-        "你是 TravelMind 需求解析专家。只返回一个紧凑的 planning brief JSON 对象。"
-        "不要输出 markdown，不要解释，不要开始编排行程。"
-        "必须明确预算规则：预算是否是硬约束、主要成本优先级是什么、是否允许小幅超预算。"
-        "字段名必须保持英文，字段值按目标语言输出。"
-        f"Use this schema shape: {json.dumps(BRIEF_OUTPUT_SCHEMA, ensure_ascii=False)}"
-    )
-    return RolePromptSpec(version=BRIEF_PARSER_PROMPT_VERSION, system_prompt=system_prompt)
 
 
 # 中文注释：

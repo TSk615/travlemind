@@ -22,6 +22,12 @@ from travelmind_api.services.llm.prompts import (
     build_planning_prompt_bundle,
     build_refinement_prompt_bundle,
 )
+from travelmind_api.services.llm.role_invoker import (
+    OpenAICompatibleRoleInvoker,
+    RoleInvocation,
+    RoleInvocationResult,
+    RoleInvoker,
+)
 
 __all__ = [
     "OpenAICompatibleClient",
@@ -42,4 +48,8 @@ __all__ = [
     "build_planning_prompt_bundle",
     "build_refinement_prompt_bundle",
     "build_planning_messages",
+    "RoleInvoker",
+    "RoleInvocation",
+    "RoleInvocationResult",
+    "OpenAICompatibleRoleInvoker",
 ]

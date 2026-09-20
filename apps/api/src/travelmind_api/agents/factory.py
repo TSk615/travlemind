@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from travelmind_api.agents.base import AgentOrchestrator
-from travelmind_api.agents.helloagents import HelloAgentsOrchestrator, RoleProgressCallback
+from travelmind_api.agents.helloagents import HelloAgentsOrchestrator
+from travelmind_api.agents.runtime import RoleProgressCallback
 from travelmind_api.agents.openai_compatible import OpenAICompatibleOrchestrator
 from travelmind_api.agents.provider import AGENT_PROVIDER_HELLOAGENTS, normalize_agent_provider
 from travelmind_api.agents.stub import StubOrchestrator
