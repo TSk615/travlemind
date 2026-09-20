@@ -27,6 +27,7 @@ from travelmind_api.agents.workflows.trip_generation import (
     build_brief_probe_graph,
     build_initial_state,
 )
+from travelmind_api.agents.workflows.trip_refinement import validate_refinement_target
 from travelmind_api.prompts.roles.planning import build_brief_parser_prompt as build_legacy_brief_prompt
 from travelmind_api.prompts.roles.trip import build_brief_parser_prompt
 from travelmind_api.core.config import Settings
@@ -313,6 +314,23 @@ def test_runtime_checks_cancellation_before_progress_callback():
     with pytest.raises(WorkflowCancelled):
         runtime.emit_progress("brief_parser", "Brief parser", "Cancelled", 24)
     assert called == []
+
+
+@pytest.mark.parametrize(
+    ("scope", "day_index", "message"),
+    [
+        ("day_plan", None, "day_index is required"),
+        ("budget", 1, "day_index is only allowed"),
+        ("unknown", None, "Unsupported refinement scope"),
+        ("day_plan", 0, "greater than or equal to 1"),
+    ],
+)
+def test_refinement_target_invariant_is_enforced_below_the_http_layer(scope, day_index, message):
+    with pytest.raises(ValueError, match=message):
+        validate_refinement_target(scope, day_index)
+
+    assert validate_refinement_target("day_plan", 2) == ("day_plan", 2)
+    assert validate_refinement_target("trip", None) == ("trip", None)
 
 
 def test_langgraph_provider_normalizes_and_factory_builds_new_orchestrator():

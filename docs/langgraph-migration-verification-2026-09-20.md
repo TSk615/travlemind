@@ -25,6 +25,8 @@
   token 单价计算已知费用，缺少 usage 时保持未知。
 - 首次生成/微调时间固定写入 Job payload，ARQ 自动重试和手动生成恢复复用相同时间，避免
   时间漂移改变 input fingerprint；用户主动创建的新 Job 则重新获取证据。
+- 微调 scope/day_index 组合在 HTTP 路由与工作流入口双层校验，旧任务载荷或内部调用无法
+  绕过范围约束后再触发模型请求。
 - 恢复绑定会同时校验用户、行程和执行记录关联；跨用户复用已知 `run_id` 会被拒绝。
 - provider 灰度按 Job ID 稳定分桶，任务首次执行后固定 provider；回滚使用 `standard` 或保留部署版本。
 - 30 组受控时钟回放、协议矩阵和质量/延迟/费用门禁已经实现。
@@ -39,7 +41,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `292 passed, 2 skipped`（本机无 PostgreSQL） |
+| API 全量测试 | `296 passed, 2 skipped`（本机无 PostgreSQL） |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | 请求预算/截止时间、共享限流、恢复与 LangGraph 定向测试 | `61 passed` |
 | 前端单元测试 | `10 passed` |

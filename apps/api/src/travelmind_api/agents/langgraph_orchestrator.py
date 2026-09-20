@@ -34,6 +34,7 @@ from travelmind_api.agents.workflows.trip_generation import build_initial_state,
 from travelmind_api.agents.workflows.trip_refinement import (
     build_refinement_initial_state,
     build_trip_refinement_graph,
+    validate_refinement_target,
 )
 from travelmind_api.core.security import generate_identifier
 from travelmind_api.services.hotel_evidence import verify_hotel_pages
@@ -227,6 +228,7 @@ class LangGraphOrchestrator(PlanningCore):
     ) -> PlanningResult:
         if self._llm_config is None:
             raise RuntimeError("LangGraph refinement requires configured LLM settings")
+        scope, day_index = validate_refinement_target(scope, day_index)
         if day_index is not None:
             self._require_day(current_plan, day_index)
 

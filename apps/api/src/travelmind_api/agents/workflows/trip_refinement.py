@@ -18,6 +18,35 @@ from travelmind_api.services.llm.config import LlmEndpointConfig
 from travelmind_api.services.planning.payloads import build_trip_request_payload
 
 
+REFINEMENT_SCOPES = frozenset(
+    {
+        "trip",
+        "trip_plan",
+        "full_trip",
+        "day_plan",
+        "budget",
+        "travel_flow",
+        "photo_spots",
+        "depth",
+    }
+)
+
+
+def validate_refinement_target(scope: str, day_index: int | None) -> tuple[str, int | None]:
+    normalized_scope = str(scope or "").strip()
+    if normalized_scope not in REFINEMENT_SCOPES:
+        raise ValueError(f"Unsupported refinement scope: {normalized_scope or '<empty>'}")
+    if day_index is not None and (isinstance(day_index, bool) or not isinstance(day_index, int)):
+        raise ValueError("day_index must be an integer")
+    if normalized_scope == "day_plan" and day_index is None:
+        raise ValueError("day_index is required for day_plan refinement")
+    if normalized_scope != "day_plan" and day_index is not None:
+        raise ValueError("day_index is only allowed for day_plan refinement")
+    if day_index is not None and day_index < 1:
+        raise ValueError("day_index must be greater than or equal to 1")
+    return normalized_scope, day_index
+
+
 class TripRefinementOperations(Protocol):
     def check_cancelled(self) -> None:
         ...
@@ -81,6 +110,7 @@ def build_refinement_initial_state(
     prompt_version: str,
     endpoint: LlmEndpointConfig,
 ) -> TripRefinementState:
+    scope, day_index = validate_refinement_target(scope, day_index)
     trip_request = build_trip_request_payload(request)
     current_payload = current_plan.model_dump(mode="json")
     context_payload = context.model_dump(mode="json")
