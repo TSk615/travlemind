@@ -218,6 +218,31 @@ def refine_trip_endpoint(
     current_user: User = Depends(get_current_user),
 ):
     trip = get_trip_or_404(db, current_user, trip_id)
+    if payload.scope == "day_plan" and payload.day_index is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "refine_day_index_required", "message": "day_index is required for day_plan."},
+        )
+    if payload.scope != "day_plan" and payload.day_index is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "refine_day_index_not_allowed", "message": "day_index is only allowed for day_plan."},
+        )
+    if payload.day_index is not None and isinstance(trip.itinerary_json, dict):
+        days = trip.itinerary_json.get("days") if isinstance(trip.itinerary_json.get("days"), list) else []
+        available_days = {
+            int(day.get("day_index"))
+            for day in days
+            if isinstance(day, dict) and str(day.get("day_index") or "").isdigit()
+        }
+        if payload.day_index not in available_days:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "invalid_refine_day_index",
+                    "message": f"day_index {payload.day_index} is outside the current itinerary.",
+                },
+            )
     job = create_job(
         db,
         job_type="trip.refine",

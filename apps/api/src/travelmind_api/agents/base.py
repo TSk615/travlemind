@@ -262,6 +262,12 @@ class ExportDraft(BaseModel):
     sections: list[str]
 
 
+class RefinementContext(BaseModel):
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    uploaded_guides: list[dict[str, Any]] = Field(default_factory=list)
+    community_sources: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class AgentOrchestrator(Protocol):
     def set_execution_context(
         self,
@@ -285,6 +291,7 @@ class AgentOrchestrator(Protocol):
         instruction: str,
         scope: str,
         day_index: int | None,
+        context: RefinementContext | None = None,
     ) -> PlanningResult:
         ...
 

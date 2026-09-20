@@ -8,6 +8,8 @@ from travelmind_api.services.llm.config import LlmEndpointConfig
 
 TRIP_GENERATION_GRAPH_VERSION = "trip-generation.v1"
 TRIP_GENERATION_STATE_SCHEMA_VERSION = 1
+TRIP_REFINEMENT_GRAPH_VERSION = "trip-refinement.v1"
+TRIP_REFINEMENT_STATE_SCHEMA_VERSION = 1
 
 
 def merge_state_mappings(
@@ -44,6 +46,26 @@ class TripGenerationState(TypedDict, total=False):
     weather_citations: list[str]
     weather_tool_results: dict[str, Any]
     grounding_documents: list[dict[str, Any]]
+    planning_result: dict[str, Any]
+
+
+class TripRefinementState(TypedDict, total=False):
+    run_id: str
+    graph_version: str
+    schema_version: int
+    input_fingerprint: str
+    trip_request: dict[str, Any]
+    current_plan: dict[str, Any]
+    refinement_context: dict[str, Any]
+    instruction: str
+    scope: str
+    day_index: int | None
+    affected_evidence: list[str]
+    refiner_payload: dict[str, Any]
+    final_payload: dict[str, Any]
+    validation_errors: list[str]
+    repair_count: int
+    role_results: Annotated[dict[str, dict[str, Any]], merge_state_mappings]
     planning_result: dict[str, Any]
 
 

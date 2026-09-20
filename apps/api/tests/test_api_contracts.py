@@ -649,6 +649,32 @@ def test_refine_endpoint_updates_trip_and_trace(client: TestClient):
     assert any(note == "Refine scope: day_plan." for note in detail_payload["latest_agent_trace"]["notes"])
 
 
+def test_refine_endpoint_enforces_scope_and_day_index_contract(client: TestClient):
+    _register(client)
+    trip = _create_trip(client).json()["data"]
+
+    missing_day = client.post(
+        f"/api/v1/trips/{trip['id']}/refine",
+        json={"instruction": "Make one day slower.", "scope": "day_plan"},
+    )
+    assert missing_day.status_code == 422
+
+    unexpected_day = client.post(
+        f"/api/v1/trips/{trip['id']}/refine",
+        json={"instruction": "Reduce the full-trip budget.", "scope": "budget", "day_index": 1},
+    )
+    assert unexpected_day.status_code == 422
+
+    generate = client.post(f"/api/v1/trips/{trip['id']}/generate")
+    _wait_for_terminal_job(client, generate.json()["data"]["job_id"])
+    outside_range = client.post(
+        f"/api/v1/trips/{trip['id']}/refine",
+        json={"instruction": "Make day 99 slower.", "scope": "day_plan", "day_index": 99},
+    )
+    assert outside_range.status_code == 422
+    assert outside_range.json()["error"]["code"] == "invalid_refine_day_index"
+
+
 def test_image_enrich_endpoint_queues_followup_job(client: TestClient):
     _register(client)
     trip = _create_trip(client).json()["data"]

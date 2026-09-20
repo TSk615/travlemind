@@ -29,7 +29,6 @@ import TmAnchorNav from "@/components/ui/TmAnchorNav.vue"
 import { api, getErrorMessage, type JobRecord } from "@/lib/api"
 import { isJobActive, isJobTerminal } from "@/lib/jobStatus"
 import { enrichGeneratedItineraryWithBudget } from "@/lib/budgeting"
-import { generateTripInBrowser, refineTripInBrowser } from "@/lib/browserPlanner"
 import { formatCurrency, formatDateRange, formatDateTime } from "@/lib/format"
 import { useI18n } from "@/lib/useI18n"
 import { useJobGuardStore } from "@/stores/jobGuard"
@@ -138,18 +137,18 @@ const enCopy = {
   notAvailable: "N/A",
   currentJob: "Current job",
   noActiveJob: "No active job yet.",
-  noActiveJobMessage: "Generation and refinement call the third-party model directly from the browser. PDF export still uses your backend job pipeline.",
-  browserGenerateMessage: "Calling the third-party model directly from this browser.",
-  browserRefineMessage: "Calling the third-party model directly from this browser with the current itinerary and refine instruction.",
+  noActiveJobMessage: "Generation, refinement, image enrichment, and export run as backend jobs and continue after this page closes.",
+  browserGenerateMessage: "Generating through the backend planning workflow.",
+  browserRefineMessage: "Refining through the backend workflow with server-side trip context.",
   browserSaved: "Saved back to backend",
   browserSavedMessage: "The generated itinerary has been persisted to your Trip record.",
   resumeGenerationActionLabel: "Continue from failed node",
   resumeGenerationRunningLabel: "Continuing...",
   resumeGenerationFailedTitle: "Failed to continue generation",
-  directModeTitle: "Browser-direct third-party model mode",
-  directModeMessage: "Trip generation no longer depends on your backend model API. The browser now calls the third-party model endpoint directly.",
+  directModeTitle: "Durable backend planning",
+  directModeMessage: "Generation and refinement run as durable backend jobs, so closing this page does not discard progress.",
   quickRefineTitle: "Quick refine",
-  quickRefineSubtitle: "Use browser-side refinement against the third-party model.",
+  quickRefineSubtitle: "Run a durable backend refinement with saved conversation and guide context.",
   customRefineLabel: "Custom refine instruction",
   customRefinePlaceholder: "Example: make day 2 slower and move the photo-heavy stops earlier.",
   customRefineSubmit: "Submit refine",
@@ -243,8 +242,8 @@ const enCopy = {
     failed: "Failed"
   } as Record<string, string>,
   jobTypes: {
-    "trip.generate": "Browser generation",
-    "trip.refine": "Browser refine",
+    "trip.generate": "Backend generation",
+    "trip.refine": "Backend refinement",
     "trip.image_enrich": "Image enrichment",
     "export.pdf": "Guide export"
   } as Record<string, string>,
@@ -260,18 +259,18 @@ const zhCopy = {
   notAvailable: "暂无",
   currentJob: "当前任务",
   noActiveJob: "当前还没有活动任务。",
-  noActiveJobMessage: "生成与 refine 会直接由浏览器调用第三方模型，PDF 导出仍然走后端任务链路。",
-  browserGenerateMessage: "正在由当前浏览器直接调用第三方模型。",
-  browserRefineMessage: "正在由当前浏览器结合当前行程和 refine 指令直接调用第三方模型。",
+  noActiveJobMessage: "生成、微调、景点补图与导出均作为后端任务运行，关闭页面也不会丢失进度。",
+  browserGenerateMessage: "正在通过后端规划工作流生成行程。",
+  browserRefineMessage: "正在通过后端工作流结合服务端行程上下文进行微调。",
   browserSaved: "已回写到后端",
   browserSavedMessage: "生成后的行程已经写回当前 Trip 记录。",
   resumeGenerationActionLabel: "从失败节点继续",
   resumeGenerationRunningLabel: "继续生成中...",
   resumeGenerationFailedTitle: "继续生成失败",
-  directModeTitle: "浏览器直连第三方模型模式",
-  directModeMessage: "Trip 生成已不再依赖后端模型 API。当前浏览器会直接调用第三方模型端点。",
+  directModeTitle: "后端持久规划",
+  directModeMessage: "生成与微调均作为可持久恢复的后端任务运行，关闭页面也不会丢失进度。",
   quickRefineTitle: "快速微调",
-  quickRefineSubtitle: "使用浏览器侧 refine 能力，直接调整当前行程。",
+  quickRefineSubtitle: "使用已保存的对话、攻略与社区来源运行后端微调任务。",
   customRefineLabel: "自定义微调指令",
   customRefinePlaceholder: "例如：让第 2 天更轻松，并把更适合拍照的点位提前。",
   customRefineSubmit: "提交微调",
@@ -352,8 +351,8 @@ const zhCopy = {
     failed: "失败"
   } as Record<string, string>,
   jobTypes: {
-    "trip.generate": "浏览器生成",
-    "trip.refine": "浏览器微调",
+    "trip.generate": "后端生成",
+    "trip.refine": "后端微调",
     "trip.image_enrich": "景点补图",
     "export.pdf": "PDF 导出"
   } as Record<string, string>,
@@ -390,7 +389,6 @@ const canResumeGeneration = computed(() =>
   Boolean(activeJob.value?.status === "failed" && activeJob.value?.type === "trip.generate" && activeJob.value?.can_resume && !resumeGeneratePending.value && !isJobRunning.value)
 )
 const usesHelloAgents = computed(() => settingsStore.usesHelloAgents)
-const usesBackendGeneration = computed(() => settingsStore.usesBackendGeneration)
 const communityPublication = computed(() => trip.value?.community_post ?? null)
 const communityActionLocked = computed(() => actionLocked.value || communityPending.value)
 const communityPreviewImage = computed(() => {
@@ -1373,79 +1371,6 @@ function estimateTripDays(start?: string, end?: string): number {
   return Math.max(1, Math.round((endDate.getTime() - startDate.getTime()) / 86400000) + 1)
 }
 
-function createBrowserJob(type: JobRecord["type"], stage: string, stageMessage: string, progressPercent: number): JobRecord {
-  const now = new Date().toISOString()
-  return {
-    job_id: `browser:${type}:${Date.now()}`,
-    status: "running",
-    type,
-    trip_id: tripId.value,
-    created_at: now,
-    updated_at: now,
-    stage,
-    stage_message: stageMessage,
-    progress_percent: progressPercent,
-    timeline_json: [
-      {
-        recorded_at: now,
-        status: "running",
-        stage,
-        stage_message: stageMessage,
-        progress_percent: progressPercent
-      }
-    ],
-    result: null,
-    error_message: null
-  }
-}
-
-function updateBrowserJob(update: {
-  status?: JobRecord["status"]
-  stage?: string
-  stage_message?: string
-  progress_percent?: number
-  result?: Record<string, unknown> | null
-  error_message?: string | null
-}) {
-  if (!activeJob.value) {
-    return
-  }
-
-  const now = new Date().toISOString()
-  const nextStatus = update.status ?? activeJob.value.status
-  const nextStage = update.stage ?? activeJob.value.stage ?? null
-  const nextStageMessage = update.stage_message ?? activeJob.value.stage_message ?? null
-  const nextProgress = typeof update.progress_percent === "number" ? update.progress_percent : activeJob.value.progress_percent ?? null
-
-  activeJob.value = {
-    ...activeJob.value,
-    ...update,
-    status: nextStatus,
-    stage: nextStage,
-    stage_message: nextStageMessage,
-    progress_percent: nextProgress,
-    updated_at: now,
-    timeline_json: [
-      ...activeJob.value.timeline_json,
-      {
-        recorded_at: now,
-        status: nextStatus,
-        stage: nextStage,
-        stage_message: nextStageMessage,
-        progress_percent: nextProgress
-      }
-    ]
-  }
-}
-
-function ensureBrowserLlmConfig() {
-  const config = settingsStore.resolvedConfig
-  if (!config || !settingsStore.isConfigured) {
-    throw new Error(locale.value === "zh-CN" ? "请先配置 base URL、API Key、model 和接口格式。" : "Configure base URL, API key, model, and API format first.")
-  }
-  return config
-}
-
 function clampProgress(value?: number | null, status?: string): number {
   if (typeof value === "number") {
     return Math.max(0, Math.min(100, Math.round(value)))
@@ -1950,7 +1875,7 @@ function handleBeforeUnload(event: BeforeUnloadEvent) {
   event.returnValue = ""
 }
 
-async function pollJob(jobId: string, kind: "generate" | "export" | "image_enrich") {
+async function pollJob(jobId: string, kind: "generate" | "refine" | "export" | "image_enrich") {
   stopPolling()
 
   try {
@@ -1959,7 +1884,7 @@ async function pollJob(jobId: string, kind: "generate" | "export" | "image_enric
       return
     }
     if (isTerminalJobStatus(activeJob.value.status)) {
-      if (kind === "generate" && activeJob.value.status === "completed") {
+      if ((kind === "generate" || kind === "refine") && activeJob.value.status === "completed") {
         const followupJobId = String(activeJob.value.result?.followup_job_id ?? "").trim()
         if (followupJobId) {
           await pollJob(followupJobId, "image_enrich")
@@ -1977,6 +1902,8 @@ async function pollJob(jobId: string, kind: "generate" | "export" | "image_enric
               : t("tripDetail.exportFailedTitle"))
         if (kind === "generate") {
           generateError.value = message
+        } else if (kind === "refine") {
+          refineError.value = message
         } else if (kind === "image_enrich") {
           imageEnrichError.value = message
         } else if (kind === "export") {
@@ -2002,6 +1929,8 @@ async function pollJob(jobId: string, kind: "generate" | "export" | "image_enric
     )
     if (kind === "generate") {
       generateError.value = message
+    } else if (kind === "refine") {
+      refineError.value = message
     } else if (kind === "image_enrich") {
       imageEnrichError.value = message
     } else {
@@ -2053,31 +1982,12 @@ async function generate() {
   try {
     await settingsStore.fetch(true)
 
-    if (usesBackendGeneration.value) {
-      const job = await api.generateTrip(tripId.value)
-      activeJob.value = job
-      await pollJob(job.job_id, "generate")
-      return
-    }
-
-    const config = ensureBrowserLlmConfig()
-    activeJob.value = createBrowserJob("trip.generate", "brief_parsing", copy.value.browserGenerateMessage, 12)
-    const groundedDocs = await collectGroundingDocs()
-    updateBrowserJob({ stage: "source_search", stage_message: copy.value.searchPanelMessage, progress_percent: 32 })
-    updateBrowserJob({ stage: "route_planning", stage_message: copy.value.browserGenerateMessage, progress_percent: 76 })
-    const result = await generateTripInBrowser(config, trip.value, groundedDocs)
-    updateBrowserJob({ stage: "export_ready", stage_message: copy.value.browserSavedMessage, progress_percent: 92 })
-    trip.value = await api.saveTripItinerary(tripId.value, {
-      itinerary: result.itinerary,
-      latest_agent_trace: result.trace
-    })
-    updateBrowserJob({ status: "completed", stage: "export_ready", stage_message: copy.value.browserSaved, progress_percent: 100, result: { summary: result.itinerary.summary } })
+    const job = await api.generateTrip(tripId.value)
+    activeJob.value = job
+    await pollJob(job.job_id, "generate")
   } catch (value) {
     const message = getErrorMessage(value, t("tripDetail.generationFailedTitle"))
     generateError.value = message
-    if (activeJob.value?.type === "trip.generate" && activeJob.value.job_id.startsWith("browser:")) {
-      updateBrowserJob({ status: "failed", error_message: message, stage_message: message })
-    }
   } finally {
     generatePending.value = false
   }
@@ -2137,34 +2047,13 @@ async function submitRefine(payload: TripRefineInput) {
 
   try {
     await settingsStore.fetch(true)
-    const config = ensureBrowserLlmConfig()
-    activeJob.value = createBrowserJob("trip.refine", "brief_parsing", copy.value.browserRefineMessage, 12)
-    const sessionForPrompt = await ensureRefineSessionLoaded()
-    const groundedDocs = hasSearched.value ? searchResults.value : await collectGroundingDocs()
-    updateBrowserJob({ stage: "source_search", stage_message: copy.value.searchPanelMessage, progress_percent: 32 })
-    updateBrowserJob({ stage: "route_planning", stage_message: copy.value.browserRefineMessage, progress_percent: 76 })
-    const result = await refineTripInBrowser(config, trip.value, groundedDocs, payload, { session: sessionForPrompt })
-    updateBrowserJob({ stage: "export_ready", stage_message: copy.value.browserSavedMessage, progress_percent: 92 })
-    trip.value = await api.saveTripItinerary(tripId.value, {
-      itinerary: result.itinerary,
-      latest_agent_trace: result.trace
-    })
-    try {
-      refineSession.value = await api.appendRefineMessage(tripId.value, { role: "user", text: payload.instruction })
-      refineSession.value = await api.appendRefineMessage(tripId.value, {
-        role: "assistant",
-        text: `${refineWorkbenchCopy.value.assistantSummaryPrefix}: ${result.itinerary.summary}`
-      })
-    } catch (historyError) {
-      refineError.value = getErrorMessage(historyError, "Saved itinerary, but failed to update refine memory.")
-    }
-    updateBrowserJob({ status: "completed", stage: "export_ready", stage_message: copy.value.browserSaved, progress_percent: 100, result: { summary: result.itinerary.summary } })
+    const job = await api.refineTrip(tripId.value, payload)
+    activeJob.value = job
+    await pollJob(job.job_id, "refine")
+    await loadRefineContext()
   } catch (value) {
     const message = getErrorMessage(value, t("tripDetail.asyncFailedTitle"))
     refineError.value = message
-    if (activeJob.value?.type === "trip.refine") {
-      updateBrowserJob({ status: "failed", error_message: message, stage_message: message })
-    }
   } finally {
     refinePending.value = false
   }

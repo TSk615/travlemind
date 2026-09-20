@@ -11,6 +11,7 @@ from travelmind_api.agents.base import (
     PlannedRouteReference,
     PlanningRequest,
     PlanningResult,
+    RefinementContext,
     TransportBookingSummary,
     VisitRequirements,
 )
@@ -68,6 +69,7 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
         instruction: str,
         scope: str,
         day_index: int | None,
+        context: RefinementContext | None = None,
     ) -> PlanningResult:
         target_locale = infer_output_locale(request)
         try:
@@ -79,6 +81,7 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
                 instruction=instruction,
                 scope=scope,
                 day_index=day_index,
+                context=context,
             )
             content = self._llm_client.create_chat_completion(messages=prompt_bundle.as_messages())
             payload = parse_planning_response(content)
@@ -95,7 +98,14 @@ class OpenAICompatibleOrchestrator(StubOrchestrator):
                 )
             return result
         except Exception as exc:
-            fallback = super().refine_trip(request, current_plan, instruction=instruction, scope=scope, day_index=day_index)
+            fallback = super().refine_trip(
+                request,
+                current_plan,
+                instruction=instruction,
+                scope=scope,
+                day_index=day_index,
+                context=context,
+            )
             reason = str(exc).strip() or exc.__class__.__name__
             if target_locale == "zh-CN":
                 fallback.trace.notes.append(f"OpenAI-compatible refine fallback triggered: {reason}")

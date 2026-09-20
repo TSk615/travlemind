@@ -107,6 +107,8 @@ def bind_workflow_run(
     job: JobRecord,
     trip: Trip,
     provider: str,
+    graph_version: str = TRIP_GENERATION_GRAPH_VERSION,
+    state_schema_version: int = TRIP_GENERATION_STATE_SCHEMA_VERSION,
 ) -> WorkflowRun | None:
     """Create or bind a stable run to the currently executing Job."""
 
@@ -129,8 +131,8 @@ def bind_workflow_run(
             original_job_id=job.id,
             current_job_id=job.id,
             provider=provider,
-            graph_version=TRIP_GENERATION_GRAPH_VERSION,
-            state_schema_version=TRIP_GENERATION_STATE_SCHEMA_VERSION,
+            graph_version=graph_version,
+            state_schema_version=state_schema_version,
             expected_trip_updated_at=trip.updated_at,
             status="running",
             created_at=now,
@@ -144,8 +146,8 @@ def bind_workflow_run(
         if run.provider != provider:
             raise WorkflowRunVersionError("Workflow provider changed; start a new generation")
         if (
-            run.graph_version != TRIP_GENERATION_GRAPH_VERSION
-            or run.state_schema_version != TRIP_GENERATION_STATE_SCHEMA_VERSION
+            run.graph_version != graph_version
+            or run.state_schema_version != state_schema_version
         ):
             raise WorkflowRunVersionError("Workflow graph or state schema changed; start a new generation")
         run.current_job_id = job.id

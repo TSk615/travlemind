@@ -7,7 +7,14 @@ from types import SimpleNamespace
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from travelmind_api.agents.base import PlanningRequest
+from travelmind_api.agents.base import (
+    AgentTrace,
+    PlannedDay,
+    PlannedItem,
+    PlanningRequest,
+    PlanningResult,
+    RefinementContext,
+)
 from travelmind_api.agents.helloagents import HelloAgentsBrief, HelloAgentsOrchestrator
 from travelmind_api.agents.factory import build_orchestrator
 from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator
@@ -365,3 +372,143 @@ def test_langgraph_orchestrator_repairs_one_invalid_draft(monkeypatch):
     assert checkpoint["repair_count"] == 1
     assert checkpoint["validation_errors"] == []
     assert any("required one deterministic-validation repair" in note for note in result.trace.notes)
+
+
+def test_langgraph_day_refinement_preserves_other_days_and_uses_server_context():
+    current = StubMapsPoiProvider()
+
+    request = _request().model_copy(update={"locale": "en-US"})
+    current_plan = PlanningResult(
+        summary="Existing two-day itinerary.",
+        total_budget_estimate=2000,
+        risks=[],
+        days=[
+            PlannedDay(
+                day_index=1,
+                title="Original day 1",
+                summary="Keep this day unchanged.",
+                total_cost=1000,
+                items=[
+                    PlannedItem(
+                        id="item-original-day-1",
+                        type="sight",
+                        name="Original Temple",
+                        start_time="09:00",
+                        end_time="11:00",
+                        location="Kyoto",
+                        score=0.9,
+                        note="Original note.",
+                    )
+                ],
+            ),
+            PlannedDay(
+                day_index=2,
+                title="Original day 2",
+                summary="This day may change.",
+                total_cost=1000,
+                items=[
+                    PlannedItem(
+                        id="item-original-day-2",
+                        type="sight",
+                        name="Original Garden",
+                        start_time="09:00",
+                        end_time="11:00",
+                        location="Kyoto",
+                        score=0.8,
+                        note="Original second-day note.",
+                    )
+                ],
+            ),
+        ],
+        trace=AgentTrace(provider="fixture", workflow_id="fixture", notes=[]),
+    )
+    invocations: list[RoleInvocation] = []
+
+    class RefineInvoker:
+        def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
+            invocations.append(invocation)
+            payload = {
+                "summary": "Refined only the selected day.",
+                "total_budget_estimate": 4500,
+                "risks": [],
+                "days": [
+                    {
+                        "title": "MUST NOT REPLACE DAY 1",
+                        "summary": "The model attempted to replace an unaffected day.",
+                        "total_cost": 1000,
+                        "items": [
+                            {
+                                "type": "sight",
+                                "name": "Wrong day one stop",
+                                "start_time": "09:00",
+                                "end_time": "11:00",
+                                "location": "Kyoto",
+                                "score": 0.5,
+                                "note": "Must be discarded.",
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Refined day 2",
+                        "summary": "A slower second day.",
+                        "total_cost": 900,
+                        "items": [
+                            {
+                                "type": "sight",
+                                "name": "Kyoto Garden",
+                                "start_time": "10:00",
+                                "end_time": "12:00",
+                                "location": "Kyoto",
+                                "score": 0.9,
+                                "note": "A slower replacement.",
+                            }
+                        ],
+                    },
+                ],
+            }
+            return RoleInvocationResult(
+                request_id="llmreq-refine",
+                role_name=invocation.role_name,
+                content=json.dumps(payload),
+                model=invocation.endpoint.model,
+                provider_protocol=invocation.endpoint.provider_protocol,
+                wire_api=invocation.endpoint.wire_api,
+                endpoint_host="llm.example.test",
+                prompt_version=invocation.prompt_version,
+                latency_ms=1,
+                citations=["https://guide.example.test/kyoto"],
+                usage=None,
+            )
+
+    orchestrator = LangGraphOrchestrator(
+        LlmConfig(
+            base_url="https://llm.example.test/v1",
+            api_key="test-key",
+            model="test-model",
+            wire_api="responses",
+        ),
+        maps_provider=current,
+        role_invoker=RefineInvoker(),
+    )
+    orchestrator.set_execution_context(run_id="run-refine-day-2")
+    refined = orchestrator.refine_trip(
+        request,
+        current_plan,
+        instruction="Make day 2 slower.",
+        scope="day_plan",
+        day_index=2,
+        context=RefinementContext(
+            messages=[{"role": "user", "text": "Prefer gardens."}],
+            uploaded_guides=[{"title": "My Kyoto guide", "content": "Use quiet gardens."}],
+            community_sources=[{"title": "Kyoto slow trip", "itinerary_summary": "Avoid rushing."}],
+        ),
+    )
+
+    assert refined.days[0].model_dump(mode="json") == current_plan.days[0].model_dump(mode="json")
+    assert refined.days[1].title == "Refined day 2"
+    assert refined.trace.provider == "langgraph"
+    assert any(note == "Refined day 2." for note in refined.trace.notes)
+    assert len(invocations) == 1
+    serialized_input = json.dumps(dict(invocations[0].input_payload), ensure_ascii=False)
+    assert "My Kyoto guide" in serialized_input
+    assert "Kyoto slow trip" in serialized_input

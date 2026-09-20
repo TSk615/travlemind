@@ -10,7 +10,7 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
-from travelmind_api.agents.base import AgentRunStep, PlanningRequest, PlanningResult
+from travelmind_api.agents.base import AgentRunStep, PlanningRequest, PlanningResult, RefinementContext
 from travelmind_api.agents.helloagents import (
     HelloAgentsBrief,
     HelloAgentsHotelRecommendation,
@@ -24,16 +24,24 @@ from travelmind_api.agents.runtime import RoleProgressCallback, WorkflowRuntime
 from travelmind_api.agents.workflows.state import (
     TRIP_GENERATION_GRAPH_VERSION,
     TRIP_GENERATION_STATE_SCHEMA_VERSION,
+    TRIP_REFINEMENT_GRAPH_VERSION,
+    TRIP_REFINEMENT_STATE_SCHEMA_VERSION,
     TripGenerationState,
+    TripRefinementState,
     build_input_fingerprint,
     non_sensitive_model_identity,
 )
 from travelmind_api.agents.workflows.trip_generation import build_initial_state, build_trip_generation_graph
+from travelmind_api.agents.workflows.trip_refinement import (
+    build_refinement_initial_state,
+    build_trip_refinement_graph,
+)
 from travelmind_api.core.security import generate_identifier
 from travelmind_api.services.hotel_evidence import verify_hotel_pages
 from travelmind_api.services.llm import LlmConfig, LlmEndpointConfig, LlmPlanningPayload, parse_planning_response
 from travelmind_api.services.llm.localization import planning_payload_needs_language_repair
 from travelmind_api.services.llm.prompts import PLANNING_OUTPUT_SCHEMA
+from travelmind_api.services.llm.prompts import REFINEMENT_PROMPT_VERSION, build_refinement_prompt_bundle
 from travelmind_api.services.llm.role_invoker import (
     OpenAICompatibleRoleInvoker,
     RoleInvocation,
@@ -46,6 +54,7 @@ from travelmind_api.services.poi_operation_evidence import verify_poi_open_days
 from travelmind_api.services.search_connector import SearchServiceConfig
 from travelmind_api.services.transport_evidence import verify_transport_candidate_pages
 from travelmind_api.services.weather_evidence import verify_daily_forecast_pages
+from travelmind_api.services.execution_validation import validate_timeline
 
 
 _ROLE_SEQUENCE = (
@@ -201,6 +210,96 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
             self._current_user_id = None
             self._current_search_service = None
 
+    def refine_trip(
+        self,
+        request: PlanningRequest,
+        current_plan: PlanningResult,
+        *,
+        instruction: str,
+        scope: str,
+        day_index: int | None,
+        context: RefinementContext | None = None,
+    ) -> PlanningResult:
+        if self._llm_config is None:
+            raise RuntimeError("LangGraph refinement requires configured LLM settings")
+        if day_index is not None:
+            self._require_day(current_plan, day_index)
+
+        self._role_search_gateway_cache = {}
+        self._native_role_citations = {}
+        self._current_xhs_source_enabled = bool(request.xhs_source_enabled)
+        self._current_user_id = request.user_id
+        self._current_search_service = request.search_service or SearchServiceConfig.from_env()
+        run_id = self._execution_run_id or generate_identifier("run")
+        self._workflow_runtime = WorkflowRuntime(
+            run_id=run_id,
+            job_id=self._execution_job_id,
+            owner_user_id=request.user_id,
+            progress_callback=self._progress_callback,
+            cancellation_check=self._execution_cancellation_check,
+        )
+        self._workflow_request = request
+        self._workflow_role_configs = self._build_role_configs(request)
+        self._workflow_llm_configs = self._build_role_llm_configs()
+        self._workflow_role_locks = {}
+        self._last_graph_state = None
+        self._last_failed_node = None
+        refinement_context = context or RefinementContext()
+
+        try:
+            endpoint = self._workflow_llm_configs["itinerary_planner"]
+            initial_state = build_refinement_initial_state(
+                request,
+                current_plan,
+                context=refinement_context,
+                instruction=instruction,
+                scope=scope,
+                day_index=day_index,
+                run_id=run_id,
+                prompt_version=REFINEMENT_PROMPT_VERSION,
+                endpoint=endpoint,
+            )
+            input_fingerprint = initial_state["input_fingerprint"]
+            self._last_input_fingerprint = input_fingerprint
+            if (
+                self._execution_expected_input_fingerprint
+                and self._execution_expected_input_fingerprint != input_fingerprint
+            ):
+                raise RuntimeError(
+                    "Workflow input, prompts, or model configuration changed; start a new refinement"
+                )
+            graph = build_trip_refinement_graph(self, checkpointer=self._graph_checkpointer)
+            config = {"configurable": {"thread_id": run_id}}
+            if self._execution_resume:
+                snapshot = graph.get_state(config)
+                persisted = dict(snapshot.values) if snapshot.values else {}
+                self._last_graph_state = persisted or None
+                if persisted:
+                    if persisted.get("graph_version") != TRIP_REFINEMENT_GRAPH_VERSION:
+                        raise RuntimeError("Persisted refinement graph version changed; start a new refinement")
+                    if persisted.get("schema_version") != TRIP_REFINEMENT_STATE_SCHEMA_VERSION:
+                        raise RuntimeError("Persisted refinement state schema changed; start a new refinement")
+                    if persisted.get("input_fingerprint") != input_fingerprint:
+                        raise RuntimeError("Persisted refinement input changed; start a new refinement")
+            try:
+                final_state = graph.invoke(None if self._execution_resume else initial_state, config=config)
+            except Exception:
+                snapshot = graph.get_state(config)
+                self._last_graph_state = dict(snapshot.values) if snapshot.values else None
+                self._last_failed_node = ",".join(snapshot.next) or None
+                raise
+            self._last_graph_state = final_state
+            return PlanningResult.model_validate(final_state["planning_result"])
+        finally:
+            self._workflow_runtime = None
+            self._workflow_request = None
+            self._workflow_role_configs = {}
+            self._workflow_llm_configs = {}
+            self._workflow_role_locks = {}
+            self._current_xhs_source_enabled = False
+            self._current_user_id = None
+            self._current_search_service = None
+
     def get_graph_state(self) -> TripGenerationState | None:
         return dict(self._last_graph_state) if self._last_graph_state is not None else None
 
@@ -209,6 +308,196 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
 
     def get_failed_node(self) -> str | None:
         return self._last_failed_node
+
+    def assess_refinement(self, state: TripRefinementState) -> dict[str, Any]:
+        mapping = {
+            "budget": ["budget", "hotel", "transport"],
+            "travel_flow": ["transport"],
+            "photo_spots": ["poi"],
+            "depth": ["poi"],
+            "day_plan": ["poi", "transport"],
+            "trip": ["poi", "hotel", "transport"],
+            "trip_plan": ["poi", "hotel", "transport"],
+            "full_trip": ["poi", "hotel", "transport"],
+        }
+        return {"affected_evidence": mapping.get(state["scope"], [])}
+
+    def _invoke_refiner(
+        self,
+        state: TripRefinementState,
+        *,
+        repair: bool,
+    ) -> RoleInvocationResult:
+        request = self._request()
+        current_plan = PlanningResult.model_validate(state["current_plan"])
+        context = RefinementContext.model_validate(state.get("refinement_context", {}))
+        prompt = build_refinement_prompt_bundle(
+            request,
+            current_plan,
+            instruction=state["instruction"],
+            scope=state["scope"],
+            day_index=state.get("day_index"),
+            context=context,
+        )
+        input_payload: dict[str, Any] = {
+            "refinement_prompt": prompt.user_prompt,
+            "affected_evidence": state.get("affected_evidence", []),
+        }
+        if repair:
+            input_payload.update(
+                {
+                    "previous_itinerary": state["final_payload"],
+                    "validation_errors": state.get("validation_errors", []),
+                    "repair_instruction": (
+                        "Repair only the listed deterministic validation errors and return the full itinerary JSON. "
+                        "Do not alter unaffected days when day_index is present."
+                    ),
+                }
+            )
+        endpoint = self._workflow_llm_configs["itinerary_planner"]
+        self._runtime().emit_progress(
+            "itinerary_refiner",
+            "Itinerary refiner",
+            "Applies the requested scope while preserving unaffected itinerary context.",
+            72 if not repair else 82,
+        )
+        return self._role_invoker.invoke(
+            RoleInvocation(
+                role_name="itinerary_refiner",
+                prompt_version=prompt.version,
+                system_prompt=prompt.system_prompt,
+                input_payload=input_payload,
+                endpoint=endpoint,
+            )
+        )
+
+    def refine_itinerary(self, state: TripRefinementState) -> dict[str, Any]:
+        result = self._invoke_refiner(state, repair=False)
+        payload = parse_planning_response(result.content)
+        return {
+            "refiner_payload": {"affected_evidence": state.get("affected_evidence", [])},
+            "final_payload": payload.model_dump(mode="json"),
+            "validation_errors": [],
+            "repair_count": 0,
+            "role_results": {"itinerary_refiner": result.checkpoint_metadata()},
+        }
+
+    def validate_refinement(self, state: TripRefinementState) -> dict[str, Any]:
+        payload = LlmPlanningPayload.model_validate(state["final_payload"])
+        request = self._request()
+        errors: list[str] = []
+        expected_days = max(1, (request.end_date - request.start_date).days + 1)
+        if len(payload.days) != expected_days:
+            errors.append(f"Expected {expected_days} day entries but received {len(payload.days)}")
+        if state["scope"] == "day_plan" and state.get("day_index") is None:
+            errors.append("day_index is required for day_plan refinement")
+        errors.extend(validate_timeline(payload, request, HelloAgentsTransportGuidance()))
+        if errors and int(state.get("repair_count", 0)) >= 1:
+            raise ValueError("Refined itinerary failed deterministic validation: " + "; ".join(errors))
+        return {
+            "final_payload": payload.model_dump(mode="json"),
+            "validation_errors": errors,
+        }
+
+    def repair_refinement(self, state: TripRefinementState) -> dict[str, Any]:
+        result = self._invoke_refiner(state, repair=True)
+        payload = parse_planning_response(result.content)
+        return {
+            "final_payload": payload.model_dump(mode="json"),
+            "validation_errors": [],
+            "repair_count": int(state.get("repair_count", 0)) + 1,
+            "role_results": {"itinerary_refiner": result.checkpoint_metadata()},
+        }
+
+    def assemble_refinement(self, state: TripRefinementState) -> dict[str, Any]:
+        request = self._request()
+        payload = LlmPlanningPayload.model_validate(state["final_payload"])
+        metadata = state.get("role_results", {}).get("itinerary_refiner", {})
+        endpoint = self._workflow_llm_configs["itinerary_planner"]
+        agent_run = AgentRunStep(
+            key="itinerary_refiner",
+            title="Itinerary refiner",
+            description="Refines only the requested itinerary scope.",
+            prompt_focus=state["instruction"],
+            output_summary=payload.summary,
+            prompt_version=str(metadata.get("prompt_version") or REFINEMENT_PROMPT_VERSION),
+            model=endpoint.model,
+            notes=[
+                f"Affected evidence domains: {', '.join(state.get('affected_evidence', [])) or 'none'}.",
+                "Server assembled conversation, uploaded-guide, and community-source context.",
+            ],
+            citations=list(metadata.get("citations") or []),
+        )
+        result = self._build_result_from_payload(
+            payload,
+            request,
+            [
+                "Refined the itinerary with the LangGraph backend workflow.",
+                f"Refine scope: {state['scope']}.",
+                f"Instruction: {state['instruction']}",
+            ],
+            [agent_run],
+        )
+        current_plan = PlanningResult.model_validate(state["current_plan"])
+        result = self._preserve_refinement_context(
+            current_plan,
+            result,
+            day_index=state.get("day_index"),
+        )
+        result.trace.provider = "langgraph"
+        result.trace.workflow_id = self._runtime().run_id
+        result.trace.license_notice = None
+        if state.get("day_index") is not None:
+            result.trace.notes.append(f"Refined day {state['day_index']}.")
+        if int(state.get("repair_count", 0)):
+            result.trace.notes.append("The refinement required one deterministic-validation repair.")
+        return {"planning_result": result.model_dump(mode="json")}
+
+    @staticmethod
+    def _preserve_refinement_context(
+        current: PlanningResult,
+        candidate: PlanningResult,
+        *,
+        day_index: int | None,
+    ) -> PlanningResult:
+        merged = candidate.model_copy(deep=True)
+        current_days = {day.day_index: day for day in current.days}
+        if day_index is not None:
+            candidate_days = {day.day_index: day for day in candidate.days}
+            merged.days = [
+                candidate_days[day.day_index].model_copy(deep=True)
+                if day.day_index == day_index and day.day_index in candidate_days
+                else day.model_copy(deep=True)
+                for day in current.days
+            ]
+        for day in merged.days:
+            previous = current_days.get(day.day_index)
+            if previous is None:
+                continue
+            previous_items = {item.name.strip().casefold(): item for item in previous.items}
+            for item in day.items:
+                old = previous_items.get(item.name.strip().casefold())
+                if old is None:
+                    continue
+                item.id = old.id
+                item.image_urls = list(old.image_urls)
+                item.image_source_urls = list(old.image_source_urls)
+                item.image_status = old.image_status
+                item.image_priority_tier = old.image_priority_tier
+                item.image_priority_reason = old.image_priority_reason
+                item.image_failure_reason = old.image_failure_reason
+                item.location_ref = old.location_ref.model_copy(deep=True) if old.location_ref else None
+                item.booking_info = old.booking_info.model_copy(deep=True) if old.booking_info else item.booking_info
+                item.visit_requirements = (
+                    old.visit_requirements.model_copy(deep=True)
+                    if old.visit_requirements
+                    else item.visit_requirements
+                )
+        if current.stay_recommendation is not None:
+            merged.stay_recommendation = current.stay_recommendation.model_copy(deep=True)
+        if current.transport_booking_summary is not None and merged.transport_booking_summary is None:
+            merged.transport_booking_summary = current.transport_booking_summary.model_copy(deep=True)
+        return merged
 
     def _request(self) -> PlanningRequest:
         if self._workflow_request is None:

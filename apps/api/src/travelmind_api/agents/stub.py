@@ -12,6 +12,7 @@ from travelmind_api.agents.base import (
     PlannedRouteReference,
     PlanningRequest,
     PlanningResult,
+    RefinementContext,
     SourceSummary,
 )
 from travelmind_api.core.security import generate_identifier, generate_workflow_id
@@ -206,6 +207,7 @@ class StubOrchestrator:
         instruction: str,
         scope: str,
         day_index: int | None,
+        context: RefinementContext | None = None,
     ) -> PlanningResult:
         refined = current_plan.model_copy(deep=True)
         refined.trace.notes.append("Applied stub refine flow on top of the existing itinerary context.")
@@ -214,6 +216,13 @@ class StubOrchestrator:
             self._require_day(refined, day_index)
             refined.trace.notes.append(f"Refined day {day_index}.")
         refined.trace.notes.append(f"Instruction: {instruction}")
+        if context is not None:
+            refined.trace.notes.append(
+                "Server refinement context: "
+                f"{len(context.messages)} messages, "
+                f"{len(context.uploaded_guides)} uploaded guides, "
+                f"{len(context.community_sources)} community sources."
+            )
 
         if day_index is not None:
             for day in refined.days:

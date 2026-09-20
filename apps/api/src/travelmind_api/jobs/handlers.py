@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException, status
 
-from travelmind_api.agents.base import PlanningRequest, PlanningResult
+from travelmind_api.agents.base import PlanningRequest, PlanningResult, RefinementContext
 from travelmind_api.agents.factory import build_orchestrator
 from travelmind_api.agents.provider import AGENT_PROVIDER_LANGGRAPH, normalize_agent_provider
 from travelmind_api.agents.runtime import WorkflowCancelled
@@ -18,7 +18,8 @@ from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import session_scope
 from travelmind_api.core.logging_utils import job_log_path, log_job_event, reset_current_job_id, set_current_job_id
 from travelmind_api.core.upstream_urls import normalize_upstream_base_url
-from travelmind_api.db.models import ImageGeneration, JobRecord, Trip, User, WorkflowRun
+from travelmind_api.db.models import ImageGeneration, JobRecord, Trip, TripRefineSession, User, WorkflowRun
+from travelmind_api.core.security import generate_identifier
 from travelmind_api.services.image_prompt_service import ImagePromptComposePayload, compose_image_prompt
 from travelmind_api.services.image_storage import persist_bytes
 from travelmind_api.services.images import ImageModelConfig, ImageProviderRequest, build_image_provider
@@ -36,6 +37,10 @@ from travelmind_api.services.workflow_store import (
     record_workflow_state,
     trip_version_matches,
     workflow_checkpointer,
+)
+from travelmind_api.agents.workflows.state import (
+    TRIP_REFINEMENT_GRAPH_VERSION,
+    TRIP_REFINEMENT_STATE_SCHEMA_VERSION,
 )
 
 
@@ -453,6 +458,16 @@ def _read_local_asset_bytes(path_value: str) -> bytes:
     return settings.resolved_image_root.joinpath(path_value).read_bytes()
 
 
+def _build_refinement_context(record: TripRefineSession | None) -> RefinementContext:
+    if record is None:
+        return RefinementContext()
+    return RefinementContext(
+        messages=list(record.messages_json or [])[-20:],
+        uploaded_guides=list(record.uploaded_guides_json or [])[-12:],
+        community_sources=list(record.community_sources_json or [])[-12:],
+    )
+
+
 def _record_langgraph_terminal_state(
     *,
     run_id: str,
@@ -494,6 +509,8 @@ def _commit_langgraph_trip_result(
     run_id: str,
     result: PlanningResult,
     graph_state: dict[str, Any] | None,
+    response_extra: dict[str, Any] | None = None,
+    refinement_instruction: str | None = None,
 ) -> dict[str, Any]:
     with session_scope() as session:
         run = (
@@ -550,7 +567,47 @@ def _commit_langgraph_trip_result(
             "image_enrichment_targets": _image_enrichment_targets(result),
             "followup_job_id": followup_job.id,
             "workflow_run_id": run.id,
+            **(response_extra or {}),
         }
+        if refinement_instruction:
+            refine_session = (
+                session.query(TripRefineSession)
+                .filter(
+                    TripRefineSession.trip_id == trip.id,
+                    TripRefineSession.user_id == trip.user_id,
+                )
+                .one_or_none()
+            )
+            if refine_session is None:
+                refine_session = TripRefineSession(
+                    id=generate_identifier("trs"),
+                    trip_id=trip.id,
+                    user_id=trip.user_id,
+                    messages_json=[],
+                    uploaded_guides_json=[],
+                    community_sources_json=[],
+                )
+            messages = list(refine_session.messages_json or [])
+            now = _utcnow().isoformat()
+            messages.extend(
+                [
+                    {
+                        "id": generate_identifier("msg"),
+                        "role": "user",
+                        "text": refinement_instruction,
+                        "created_at": now,
+                    },
+                    {
+                        "id": generate_identifier("msg"),
+                        "role": "assistant",
+                        "text": result.summary,
+                        "created_at": now,
+                    },
+                ]
+            )
+            refine_session.messages_json = messages[-40:]
+            refine_session.updated_at = _utcnow()
+            session.add(refine_session)
         record_workflow_state(session, run, graph_state, status="completed")
         run.committed_job_id = job_id
         run.committed_at = _utcnow()
@@ -733,45 +790,162 @@ def _process_trip_refine(job: JobExecution) -> dict:
         )
 
     _transition_job(job.id, stage="brief_parsing", stage_message="Parsing refine instruction.", progress_percent=8)
+    workflow_run_id: str | None = None
+    workflow_input_fingerprint: str | None = None
     with session_scope() as session:
         trip = session.query(Trip).filter(Trip.id == job.trip_id).one_or_none()
         if not trip:
             raise HTTPException(status_code=404, detail="Trip not found for job")
         user = session.query(User).filter(User.id == trip.user_id).one_or_none()
+        job_record = session.get(JobRecord, job.id)
+        if job_record is None:
+            raise HTTPException(status_code=404, detail="Job not found for refinement")
+        requested_run_id = str(
+            job_record.workflow_run_id
+            or (job_record.payload_json or {}).get("workflow_run_id")
+            or ""
+        ).strip()
+        existing_run = session.get(WorkflowRun, requested_run_id) if requested_run_id else None
+        provider = existing_run.provider if existing_run is not None else _resolve_agent_provider(user)
         request = _build_request(trip, user)
         validate_trip_dates_for_generation(
             request.start_date,
             request.end_date,
             now=request.planning_generated_at,
         )
+        base_plan = _load_plan_from_trip(trip)
+        if provider == AGENT_PROVIDER_LANGGRAPH and base_plan is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "trip_itinerary_required",
+                    "message": "Generate an itinerary before running LangGraph refinement.",
+                },
+            )
+        refine_session = (
+            session.query(TripRefineSession)
+            .filter(
+                TripRefineSession.trip_id == trip.id,
+                TripRefineSession.user_id == trip.user_id,
+            )
+            .one_or_none()
+        )
+        refinement_context = _build_refinement_context(refine_session)
+        llm_config = _resolve_llm_config(user, job.payload)
+        expected_trip_updated_at = trip.updated_at
+        workflow_run = bind_workflow_run(
+            session,
+            job=job_record,
+            trip=trip,
+            provider=provider,
+            graph_version=TRIP_REFINEMENT_GRAPH_VERSION,
+            state_schema_version=TRIP_REFINEMENT_STATE_SCHEMA_VERSION,
+        )
+        if workflow_run is not None:
+            workflow_run_id = workflow_run.id
+            workflow_input_fingerprint = workflow_run.input_fingerprint
+
+    checkpointer_context = workflow_checkpointer(settings) if provider == AGENT_PROVIDER_LANGGRAPH else nullcontext(None)
+    with checkpointer_context as checkpointer:
+        resume_graph = bool(
+            workflow_run_id
+            and checkpointer is not None
+            and checkpoint_exists(checkpointer, workflow_run_id)
+        )
         orchestrator = build_orchestrator(
             settings,
-            llm_config=_resolve_llm_config(user, job.payload),
-            agent_provider=_resolve_agent_provider(user),
+            llm_config=llm_config,
+            agent_provider=provider,
             enable_helloagents=False,
+            progress_callback=lambda role_key, role_title, role_description, progress_percent: _emit_agent_progress(
+                job.id,
+                role_key,
+                role_title,
+                role_description,
+                progress_percent,
+            ),
+            checkpointer=checkpointer,
         )
-        orchestrator.set_execution_context(job_id=job.id)
+        orchestrator.set_execution_context(
+            job_id=job.id,
+            run_id=workflow_run_id,
+            resume=resume_graph,
+            cancellation_check=lambda: _job_status(job.id) == "cancelled",
+            expected_input_fingerprint=workflow_input_fingerprint,
+        )
 
         _transition_job(job.id, stage="source_search", stage_message="Collecting context for refinement.", progress_percent=24)
         _transition_job(job.id, stage="source_scoring", stage_message="Scoring refinement context.", progress_percent=42)
-        base_plan = _load_plan_from_trip(trip)
         if base_plan is None:
             _transition_job(job.id, stage="route_planning", stage_message="Generating a base itinerary before refinement.", progress_percent=64)
             base_plan = orchestrator.plan_trip(request)
         else:
             _transition_job(job.id, stage="route_planning", stage_message="Reworking the selected itinerary scope with the current itinerary as context.", progress_percent=64)
-        refined_plan = orchestrator.refine_trip(
-            request,
-            base_plan,
-            instruction=instruction,
-            scope=scope,
-            day_index=day_index,
+        try:
+            refined_plan = orchestrator.refine_trip(
+                request,
+                base_plan,
+                instruction=instruction,
+                scope=scope,
+                day_index=day_index,
+                context=refinement_context,
+            )
+        except (JobCancelledError, WorkflowCancelled) as exc:
+            if workflow_run_id:
+                _record_langgraph_terminal_state(
+                    run_id=workflow_run_id,
+                    job_id=job.id,
+                    state=getattr(orchestrator, "get_graph_state", lambda: None)(),
+                    status_value="cancelled",
+                    failure_message=str(exc),
+                    failed_node=getattr(orchestrator, "get_failed_node", lambda: None)(),
+                )
+            raise JobCancelledError(str(exc)) from exc
+        except Exception as exc:
+            if workflow_run_id:
+                state = getattr(orchestrator, "get_graph_state", lambda: None)()
+                if state is None:
+                    fingerprint = getattr(orchestrator, "get_input_fingerprint", lambda: None)()
+                    state = {"input_fingerprint": fingerprint} if fingerprint else None
+                _record_langgraph_terminal_state(
+                    run_id=workflow_run_id,
+                    job_id=job.id,
+                    state=state,
+                    status_value="failed",
+                    failure_message=_extract_error_message(exc),
+                    failed_node=getattr(orchestrator, "get_failed_node", lambda: None)(),
+                )
+            raise
+        graph_state = getattr(orchestrator, "get_graph_state", lambda: None)()
+
+    _raise_if_cancelled(job.id)
+    _transition_job(job.id, stage="hotel_matching", stage_message="Rebalancing stay placeholders after refinement.", progress_percent=86)
+    _transition_job(job.id, stage="export_ready", stage_message="Finalizing refined itinerary payload.", progress_percent=96)
+    refined_plan = prepare_plan_images_for_async_enrichment(refined_plan)
+    _raise_if_cancelled(job.id)
+    response_extra = {
+        "instruction": instruction,
+        "scope": scope,
+        "day_index": day_index,
+    }
+    if workflow_run_id:
+        return _commit_langgraph_trip_result(
+            job_id=job.id,
+            run_id=workflow_run_id,
+            result=refined_plan,
+            graph_state=graph_state,
+            response_extra=response_extra,
+            refinement_instruction=instruction,
         )
-        _raise_if_cancelled(job.id)
-        _transition_job(job.id, stage="hotel_matching", stage_message="Rebalancing stay placeholders after refinement.", progress_percent=86)
-        _transition_job(job.id, stage="export_ready", stage_message="Finalizing refined itinerary payload.", progress_percent=96)
-        refined_plan = prepare_plan_images_for_async_enrichment(refined_plan)
-        _raise_if_cancelled(job.id)
+
+    with session_scope() as session:
+        trip = session.get(Trip, job.trip_id)
+        if trip is None:
+            raise HTTPException(status_code=404, detail="Trip not found for refinement commit")
+        if trip.updated_at != expected_trip_updated_at:
+            raise WorkflowCommitConflict(
+                "The trip was edited while refinement was running; the older result was not saved"
+            )
         agent_trace = _persist_trip_plan(trip, refined_plan)
         session.add(trip)
         session.flush()
@@ -781,6 +955,7 @@ def _process_trip_refine(job: JobExecution) -> dict:
             owner_user_id=trip.user_id,
             trip_id=trip.id,
             payload={"trip_id": trip.id},
+            commit=False,
         )
         return {
             "trip_id": trip.id,

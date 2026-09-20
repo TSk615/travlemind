@@ -2,7 +2,7 @@ from __future__ import annotations
 from travelmind_api.services.planning_details import BookingDetails, TransportLeg, TransportServiceCandidate, HotelEvidence, BudgetCompleteness
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -327,7 +327,7 @@ class TripIntakeChatResponse(BaseModel):
 
 class TripRefineRequest(BaseModel):
     instruction: str = Field(min_length=3, max_length=1000)
-    scope: str = Field(min_length=2, max_length=64)
+    scope: Literal["trip", "trip_plan", "full_trip", "day_plan", "budget", "travel_flow", "photo_spots", "depth"]
     day_index: int | None = Field(default=None, ge=1)
 
     @field_validator("instruction", "scope")
@@ -337,7 +337,6 @@ class TripRefineRequest(BaseModel):
         if not normalized:
             raise ValueError("value cannot be empty")
         return normalized
-
 
 class TripItinerarySaveRequest(BaseModel):
     itinerary: dict[str, Any]

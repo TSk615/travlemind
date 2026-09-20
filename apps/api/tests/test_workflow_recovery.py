@@ -351,3 +351,97 @@ def test_stale_workflow_cannot_overwrite_newer_trip_edit(client):
         assert trip.title == "Newer manual title"
         assert run.status == "conflicted"
         assert run.committed_at is None
+
+
+def test_langgraph_refine_job_assembles_server_context_and_records_history(client, monkeypatch):
+    from travelmind_api.agents.base import AgentTrace
+    from travelmind_api.core.database import SessionLocal
+    from travelmind_api.db.models import JobRecord, Trip, TripRefineSession, User, WorkflowRun
+    import travelmind_api.jobs.handlers as handlers
+
+    user_id, trip_id = _register_and_create_trip(client)
+    with SessionLocal() as session:
+        trip = session.get(Trip, trip_id)
+        request = _request(trip_id=trip_id).model_copy(
+            update={
+                "start_date": trip.start_date,
+                "end_date": trip.end_date,
+                "title": trip.title,
+                "origin": trip.origin,
+                "destination": trip.destination,
+            }
+        )
+        base_plan = StubOrchestrator().plan_trip(request)
+        trip.itinerary_json = base_plan.model_dump(mode="json", exclude={"trace"})
+        trip.latest_agent_trace_json = base_plan.trace.model_dump(mode="json")
+        user = session.get(User, user_id)
+        user.llm_base_url = "https://llm.example.test/v1"
+        user.llm_api_key = "test-key"
+        user.llm_model = "test-model"
+        user.llm_wire_api = "responses"
+        user.llm_agent_provider = "langgraph"
+        session.commit()
+
+    message = client.post(
+        f"/api/v1/trips/{trip_id}/refine-session/messages",
+        json={"role": "user", "text": "Keep the quiet morning."},
+    )
+    assert message.status_code == 200, message.text
+    guide = client.post(
+        f"/api/v1/trips/{trip_id}/refine-session/uploaded-guides",
+        json={"title": "Personal Kyoto notes", "content": "Use the north garden after 10:00."},
+    )
+    assert guide.status_code == 200, guide.text
+
+    captured: dict[str, object] = {}
+
+    class FakeLangGraphRefiner:
+        def set_execution_context(self, **kwargs):
+            captured["execution"] = kwargs
+
+        def refine_trip(self, request, current_plan, **kwargs):
+            captured["context"] = kwargs["context"]
+            result = current_plan.model_copy(deep=True)
+            result.summary = "Server-context refinement completed."
+            result.trace = AgentTrace(
+                provider="langgraph",
+                workflow_id=str(captured["execution"]["run_id"]),
+                notes=[f"Refine scope: {kwargs['scope']}."],
+            )
+            return result
+
+        def get_graph_state(self):
+            return {"input_fingerprint": "d" * 64}
+
+        def get_input_fingerprint(self):
+            return "d" * 64
+
+        def get_failed_node(self):
+            return None
+
+    monkeypatch.setattr(handlers, "build_orchestrator", lambda *args, **kwargs: FakeLangGraphRefiner())
+    response = client.post(
+        f"/api/v1/trips/{trip_id}/refine",
+        json={"instruction": "Make the whole trip calmer.", "scope": "full_trip"},
+    )
+    assert response.status_code == 200, response.text
+    job_id = response.json()["data"]["job_id"]
+    detail = client.get(f"/api/v1/jobs/{job_id}").json()["data"]
+    assert detail["status"] == "completed"
+
+    context = captured["context"]
+    assert any(item["text"] == "Keep the quiet morning." for item in context.messages)
+    assert any(item["title"] == "Personal Kyoto notes" for item in context.uploaded_guides)
+    with SessionLocal() as session:
+        job = session.get(JobRecord, job_id)
+        run = session.get(WorkflowRun, job.workflow_run_id)
+        refine_session = (
+            session.query(TripRefineSession)
+            .filter(TripRefineSession.trip_id == trip_id, TripRefineSession.user_id == user_id)
+            .one()
+        )
+        assert run.graph_version == "trip-refinement.v1"
+        assert run.status == "completed"
+        assert run.input_fingerprint == "d" * 64
+        assert [item["role"] for item in refine_session.messages_json[-2:]] == ["user", "assistant"]
+        assert refine_session.messages_json[-2]["text"] == "Make the whole trip calmer."
