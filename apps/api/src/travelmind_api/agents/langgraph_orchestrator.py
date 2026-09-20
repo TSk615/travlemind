@@ -90,6 +90,8 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
         self._workflow_llm_configs: dict[str, LlmEndpointConfig] = {}
         self._workflow_role_locks: dict[tuple[str, str, str], Lock] = {}
         self._last_graph_state: TripGenerationState | None = None
+        self._last_input_fingerprint: str | None = None
+        self._last_failed_node: str | None = None
 
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:
         if self._llm_config is None:
@@ -100,18 +102,20 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
         self._current_xhs_source_enabled = bool(request.xhs_source_enabled)
         self._current_user_id = request.user_id
         self._current_search_service = request.search_service or SearchServiceConfig.from_env()
-        run_id = generate_identifier("run")
+        run_id = self._execution_run_id or generate_identifier("run")
         self._workflow_runtime = WorkflowRuntime(
             run_id=run_id,
             job_id=self._execution_job_id,
             owner_user_id=request.user_id,
             progress_callback=self._progress_callback,
+            cancellation_check=self._execution_cancellation_check,
         )
         self._workflow_request = request
         self._workflow_role_configs = self._build_role_configs(request)
         self._workflow_llm_configs = self._build_role_llm_configs()
         self._workflow_role_locks = {}
         self._last_graph_state = None
+        self._last_failed_node = None
 
         try:
             self._log_event(
@@ -126,32 +130,56 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
                 run_id=run_id,
                 brief_endpoint=self._workflow_llm_configs["brief_parser"],
             )
+            input_fingerprint = build_input_fingerprint(
+                trip_request=initial_state["trip_request"],
+                output_locale=initial_state["output_locale"],
+                prompt_versions={
+                    name: config.prompt_version
+                    for name, config in self._workflow_role_configs.items()
+                },
+                model_identities={
+                    name: non_sensitive_model_identity(config)
+                    for name, config in self._workflow_llm_configs.items()
+                },
+            )
+            self._last_input_fingerprint = input_fingerprint
+            if (
+                self._execution_expected_input_fingerprint
+                and self._execution_expected_input_fingerprint != input_fingerprint
+            ):
+                raise RuntimeError(
+                    "Workflow input, prompts, or model configuration changed; start a new generation"
+                )
             initial_state.update(
                 {
                     "graph_version": TRIP_GENERATION_GRAPH_VERSION,
                     "schema_version": TRIP_GENERATION_STATE_SCHEMA_VERSION,
-                    "input_fingerprint": build_input_fingerprint(
-                        trip_request=initial_state["trip_request"],
-                        output_locale=initial_state["output_locale"],
-                        prompt_versions={
-                            name: config.prompt_version
-                            for name, config in self._workflow_role_configs.items()
-                        },
-                        model_identities={
-                            name: non_sensitive_model_identity(config)
-                            for name, config in self._workflow_llm_configs.items()
-                        },
-                    ),
+                    "input_fingerprint": input_fingerprint,
                     "repair_count": 0,
                     "validation_errors": [],
                 }
             )
             config = {"configurable": {"thread_id": run_id}}
+            if self._execution_resume:
+                persisted_snapshot = graph.get_state(config)
+                persisted_state = dict(persisted_snapshot.values) if persisted_snapshot.values else {}
+                self._last_graph_state = persisted_state or None
+                if persisted_state:
+                    if persisted_state.get("graph_version") != TRIP_GENERATION_GRAPH_VERSION:
+                        raise RuntimeError("Persisted workflow graph version changed; start a new generation")
+                    if persisted_state.get("schema_version") != TRIP_GENERATION_STATE_SCHEMA_VERSION:
+                        raise RuntimeError("Persisted workflow state schema changed; start a new generation")
+                    persisted_fingerprint = str(persisted_state.get("input_fingerprint") or "").strip()
+                    if persisted_fingerprint and persisted_fingerprint != input_fingerprint:
+                        raise RuntimeError(
+                            "Persisted workflow input, prompts, or model configuration changed; start a new generation"
+                        )
             try:
-                final_state = graph.invoke(initial_state, config=config)
+                final_state = graph.invoke(None if self._execution_resume else initial_state, config=config)
             except Exception:
                 snapshot = graph.get_state(config)
                 self._last_graph_state = dict(snapshot.values) if snapshot.values else None
+                self._last_failed_node = ",".join(snapshot.next) or None
                 raise
             self._last_graph_state = final_state
             result = PlanningResult.model_validate(final_state["planning_result"])
@@ -176,6 +204,12 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
     def get_graph_state(self) -> TripGenerationState | None:
         return dict(self._last_graph_state) if self._last_graph_state is not None else None
 
+    def get_input_fingerprint(self) -> str | None:
+        return self._last_input_fingerprint
+
+    def get_failed_node(self) -> str | None:
+        return self._last_failed_node
+
     def _request(self) -> PlanningRequest:
         if self._workflow_request is None:
             raise RuntimeError("LangGraph workflow request is unavailable")
@@ -185,6 +219,9 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
         if self._workflow_runtime is None:
             raise RuntimeError("LangGraph workflow runtime is unavailable")
         return self._workflow_runtime
+
+    def check_cancelled(self) -> None:
+        self._runtime().check_cancelled()
 
     def _invoke_workflow_role(
         self,

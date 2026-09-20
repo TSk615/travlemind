@@ -27,11 +27,13 @@ def test_alembic_upgrades_an_empty_database(tmp_path: Path):
         "trip_refine_sessions",
         "community_posts",
         "job_records",
+        "workflow_runs",
         "image_generations",
         "admin_audit_logs",
     }.issubset(set(inspector.get_table_names()))
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0003_trip_budget_numeric"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005_workflow_runs"
+    assert "workflow_run_id" in {column["name"] for column in inspector.get_columns("job_records")}
 
 
 def test_alembic_absorbs_a_legacy_database(tmp_path: Path):
@@ -54,8 +56,27 @@ def test_alembic_absorbs_a_legacy_database(tmp_path: Path):
     assert {"idempotency_key", "attempt_count", "max_attempts", "heartbeat_at"}.issubset(
         {column["name"] for column in inspector.get_columns("job_records")}
     )
+    assert "workflow_run_id" in {column["name"] for column in inspector.get_columns("job_records")}
+    assert "workflow_runs" in inspector.get_table_names()
     assert {"llm_api_key", "search_service_api_key", "disabled_at"}.issubset(
         {column["name"] for column in inspector.get_columns("users")}
     )
     assert "trip_refine_sessions" in inspector.get_table_names()
     assert "admin_audit_logs" in inspector.get_table_names()
+
+
+def test_workflow_run_migration_can_downgrade_and_reapply(tmp_path: Path):
+    database_url = _sqlite_url(tmp_path / "workflow-migration.db")
+    config = alembic_config(database_url)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0004_search_role_models")
+
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    assert "workflow_runs" not in inspector.get_table_names()
+    assert "workflow_run_id" not in {column["name"] for column in inspector.get_columns("job_records")}
+
+    command.upgrade(config, "head")
+    inspector = inspect(engine)
+    assert "workflow_runs" in inspector.get_table_names()
+    assert "workflow_run_id" in {column["name"] for column in inspector.get_columns("job_records")}

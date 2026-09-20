@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "development"
     api_prefix: str = "/api/v1"
     database_url: str = "sqlite:///./storage/travelmind.db"
+    workflow_checkpoint_url: str | None = None
     jwt_secret: str = DEFAULT_JWT_SECRET
     credential_encryption_key: str = DEFAULT_CREDENTIAL_ENCRYPTION_KEY
     jwt_algorithm: str = "HS256"
@@ -144,6 +145,25 @@ class Settings(BaseSettings):
             path = self.project_root / "logs"
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    @property
+    def resolved_workflow_checkpoint_url(self) -> str:
+        """Return the dedicated LangGraph checkpoint store location.
+
+        Local and test deployments use an independent SQLite file. Production
+        already requires PostgreSQL, so the application database URL is reused
+        there while LangGraph keeps its own checkpoint tables.
+        """
+
+        configured = str(self.workflow_checkpoint_url or "").strip()
+        if configured:
+            return configured
+        database_url = self.database_url.strip()
+        if database_url.lower().startswith(("postgres://", "postgresql://", "postgresql+psycopg://")):
+            return database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+        path = self.project_root / "storage" / "langgraph-checkpoints.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return str(path)
 
     @property
     def normalized_admin_emails(self) -> set[str]:

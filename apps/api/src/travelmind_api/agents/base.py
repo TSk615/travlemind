@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections.abc import Callable
 from travelmind_api.services.planning_details import BookingDetails, TransportLeg, TransportServiceCandidate, HotelEvidence, BudgetCompleteness
 
 from datetime import date, datetime
@@ -262,7 +263,15 @@ class ExportDraft(BaseModel):
 
 
 class AgentOrchestrator(Protocol):
-    def set_execution_context(self, *, job_id: str | None = None) -> None:
+    def set_execution_context(
+        self,
+        *,
+        job_id: str | None = None,
+        run_id: str | None = None,
+        resume: bool = False,
+        cancellation_check: Callable[[], bool] | None = None,
+        expected_input_fingerprint: str | None = None,
+    ) -> None:
         ...
 
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:

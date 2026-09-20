@@ -66,6 +66,9 @@ class TripGenerationOperations(Protocol):
     def assemble_result(self, state: TripGenerationState) -> dict[str, Any]:
         ...
 
+    def check_cancelled(self) -> None:
+        ...
+
 
 def build_initial_state(
     request: PlanningRequest,
@@ -162,18 +165,27 @@ def build_trip_generation_graph(
     both finish before their downstream join runs.
     """
 
+    def guarded(operation):
+        def run(state: TripGenerationState) -> dict[str, Any]:
+            operations.check_cancelled()
+            result = operation(state)
+            operations.check_cancelled()
+            return result
+
+        return run
+
     builder = StateGraph(TripGenerationState)
-    builder.add_node("brief_parser", operations.parse_brief)
-    builder.add_node("poi_specialist", operations.research_pois)
-    builder.add_node("weather_specialist", operations.research_weather)
-    builder.add_node("initial_research_join", operations.join_initial_research)
-    builder.add_node("hotel_specialist", operations.research_hotels)
-    builder.add_node("transport_specialist", operations.research_transport)
-    builder.add_node("evidence_join", operations.verify_evidence)
-    builder.add_node("itinerary_planner", operations.draft_itinerary)
-    builder.add_node("execution_validation", operations.validate_itinerary)
-    builder.add_node("itinerary_repair", operations.repair_itinerary)
-    builder.add_node("result_assembly", operations.assemble_result)
+    builder.add_node("brief_parser", guarded(operations.parse_brief))
+    builder.add_node("poi_specialist", guarded(operations.research_pois))
+    builder.add_node("weather_specialist", guarded(operations.research_weather))
+    builder.add_node("initial_research_join", guarded(operations.join_initial_research))
+    builder.add_node("hotel_specialist", guarded(operations.research_hotels))
+    builder.add_node("transport_specialist", guarded(operations.research_transport))
+    builder.add_node("evidence_join", guarded(operations.verify_evidence))
+    builder.add_node("itinerary_planner", guarded(operations.draft_itinerary))
+    builder.add_node("execution_validation", guarded(operations.validate_itinerary))
+    builder.add_node("itinerary_repair", guarded(operations.repair_itinerary))
+    builder.add_node("result_assembly", guarded(operations.assemble_result))
 
     builder.add_edge(START, "brief_parser")
     builder.add_edge("brief_parser", "poi_specialist")

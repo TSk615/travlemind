@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,12 +12,13 @@ from fastapi import HTTPException, status
 
 from travelmind_api.agents.base import PlanningRequest, PlanningResult
 from travelmind_api.agents.factory import build_orchestrator
-from travelmind_api.agents.provider import normalize_agent_provider
+from travelmind_api.agents.provider import AGENT_PROVIDER_LANGGRAPH, normalize_agent_provider
+from travelmind_api.agents.runtime import WorkflowCancelled
 from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import session_scope
 from travelmind_api.core.logging_utils import job_log_path, log_job_event, reset_current_job_id, set_current_job_id
 from travelmind_api.core.upstream_urls import normalize_upstream_base_url
-from travelmind_api.db.models import ImageGeneration, JobRecord, Trip, User
+from travelmind_api.db.models import ImageGeneration, JobRecord, Trip, User, WorkflowRun
 from travelmind_api.services.image_prompt_service import ImagePromptComposePayload, compose_image_prompt
 from travelmind_api.services.image_storage import persist_bytes
 from travelmind_api.services.images import ImageModelConfig, ImageProviderRequest, build_image_provider
@@ -27,6 +29,14 @@ from travelmind_api.services.llm.user_config import build_user_poi_role_override
 from travelmind_api.services.search_connector import resolve_search_service_config
 from travelmind_api.services.trip_image_enrichment import enrich_plan_images, prepare_plan_images_for_async_enrichment
 from travelmind_api.services.trip_service import validate_trip_dates_for_generation
+from travelmind_api.services.workflow_store import (
+    WorkflowCommitConflict,
+    bind_workflow_run,
+    checkpoint_exists,
+    record_workflow_state,
+    trip_version_matches,
+    workflow_checkpointer,
+)
 
 
 settings = get_settings()
@@ -443,16 +453,136 @@ def _read_local_asset_bytes(path_value: str) -> bytes:
     return settings.resolved_image_root.joinpath(path_value).read_bytes()
 
 
+def _record_langgraph_terminal_state(
+    *,
+    run_id: str,
+    job_id: str,
+    state: dict[str, Any] | None,
+    status_value: str,
+    failure_message: str | None,
+    failed_node: str | None = None,
+) -> None:
+    with session_scope() as session:
+        run = session.get(WorkflowRun, run_id)
+        job = session.get(JobRecord, job_id)
+        if run is None:
+            return
+        record_workflow_state(
+            session,
+            run,
+            state,
+            status=status_value,
+            failure_message=failure_message,
+        )
+        run.failed_node = failed_node
+        session.add(run)
+        if job is not None and status_value == "failed":
+            completed_roles = sorted((state or {}).get("role_results", {}).keys())
+            job.result_json = {
+                "resume_available": True,
+                "workflow_run_id": run.id,
+                "resume_failed_role": run.failed_node,
+                "resume_completed_roles": completed_roles,
+                "resume_reason": failure_message,
+            }
+            session.add(job)
+
+
+def _commit_langgraph_trip_result(
+    *,
+    job_id: str,
+    run_id: str,
+    result: PlanningResult,
+    graph_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        run = (
+            session.query(WorkflowRun)
+            .filter(WorkflowRun.id == run_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if run is None:
+            raise RuntimeError("Workflow run disappeared before result commit")
+        if run.committed_at is not None:
+            if not isinstance(run.result_json, dict):
+                raise RuntimeError("Committed workflow run is missing its result metadata")
+            return dict(run.result_json)
+
+        job = session.get(JobRecord, job_id)
+        if job is None or job.status == "cancelled":
+            run.status = "cancelled"
+            run.updated_at = _utcnow()
+            session.add(run)
+            session.commit()
+            raise JobCancelledError(f"Job {job_id} was cancelled before result commit.")
+        trip = session.get(Trip, run.trip_id)
+        if trip is None:
+            raise HTTPException(status_code=404, detail="Trip not found for workflow commit")
+        if not trip_version_matches(run, trip):
+            run.status = "conflicted"
+            run.failure_message = "Trip changed after workflow execution started"
+            run.updated_at = _utcnow()
+            session.add(run)
+            session.commit()
+            raise WorkflowCommitConflict(
+                "The trip was edited while generation was running; the older result was not saved"
+            )
+
+        agent_trace = _persist_trip_plan(trip, result)
+        session.add(trip)
+        session.flush()
+        followup_job = create_job(
+            session,
+            job_type="trip.image_enrich",
+            owner_user_id=trip.user_id,
+            trip_id=trip.id,
+            payload={"trip_id": trip.id, "workflow_run_id": run.id},
+            idempotency_key=f"workflow:{run.id}:images",
+            commit=False,
+        )
+        response = {
+            "trip_id": trip.id,
+            "summary": result.summary,
+            "agent_trace": agent_trace,
+            "image_enrichment_summary": _image_enrichment_summary(result),
+            "image_enrichment_debug": _image_enrichment_debug_summary(result),
+            "image_enrichment_targets": _image_enrichment_targets(result),
+            "followup_job_id": followup_job.id,
+            "workflow_run_id": run.id,
+        }
+        record_workflow_state(session, run, graph_state, status="completed")
+        run.committed_job_id = job_id
+        run.committed_at = _utcnow()
+        run.result_json = response
+        session.add(run)
+        return response
+
+
 
 def _process_trip_generation(job: JobExecution) -> dict:
     log_job_event("trip_generate_started", job_id=job.id, logger_name=__name__, message="Starting trip generation job.")
     _transition_job(job.id, stage="brief_parsing", stage_message="Parsing trip brief.", progress_percent=10)
+
+    workflow_run_id: str | None = None
+    workflow_input_fingerprint: str | None = None
+    provider: str
     with session_scope() as session:
         trip = session.query(Trip).filter(Trip.id == job.trip_id).one_or_none()
         if not trip:
             raise HTTPException(status_code=404, detail="Trip not found for job")
         user = session.query(User).filter(User.id == trip.user_id).one_or_none()
-        if _resolve_agent_provider(user) in {"helloagents", "langgraph"}:
+        job_record = session.get(JobRecord, job.id)
+        if job_record is None:
+            raise HTTPException(status_code=404, detail="Job not found for generation")
+        requested_run_id = str(
+            job_record.workflow_run_id
+            or (job_record.payload_json or {}).get("workflow_run_id")
+            or ""
+        ).strip()
+        existing_run = session.get(WorkflowRun, requested_run_id) if requested_run_id else None
+        provider = existing_run.provider if existing_run is not None else _resolve_agent_provider(user)
+        if provider in {"helloagents", "langgraph"}:
             missing_poi_fields = user_poi_role_override_missing_fields(user)
             if missing_poi_fields:
                 raise HTTPException(
@@ -469,10 +599,28 @@ def _process_trip_generation(job: JobExecution) -> dict:
             request.end_date,
             now=request.planning_generated_at,
         )
+        llm_config = _resolve_llm_config(user, job.payload)
+        workflow_run = bind_workflow_run(
+            session,
+            job=job_record,
+            trip=trip,
+            provider=provider,
+        )
+        if workflow_run is not None:
+            workflow_run_id = workflow_run.id
+            workflow_input_fingerprint = workflow_run.input_fingerprint
+
+    checkpointer_context = workflow_checkpointer(settings) if provider == AGENT_PROVIDER_LANGGRAPH else nullcontext(None)
+    with checkpointer_context as checkpointer:
+        resume_graph = bool(
+            workflow_run_id
+            and checkpointer is not None
+            and checkpoint_exists(checkpointer, workflow_run_id)
+        )
         orchestrator = build_orchestrator(
             settings,
-            llm_config=_resolve_llm_config(user, job.payload),
-            agent_provider=_resolve_agent_provider(user),
+            llm_config=llm_config,
+            agent_provider=provider,
             enable_helloagents=True,
             progress_callback=lambda role_key, role_title, role_description, progress_percent: _emit_agent_progress(
                 job.id,
@@ -481,11 +629,18 @@ def _process_trip_generation(job: JobExecution) -> dict:
                 role_description,
                 progress_percent,
             ),
+            checkpointer=checkpointer,
         )
-        orchestrator.set_execution_context(job_id=job.id)
+        orchestrator.set_execution_context(
+            job_id=job.id,
+            run_id=workflow_run_id,
+            resume=resume_graph,
+            cancellation_check=lambda: _job_status(job.id) == "cancelled",
+            expected_input_fingerprint=workflow_input_fingerprint,
+        )
         resume_checkpoint = job.payload.get("resume_checkpoint")
         set_resume_checkpoint = getattr(orchestrator, "set_resume_checkpoint", None)
-        if callable(set_resume_checkpoint) and isinstance(resume_checkpoint, dict):
+        if provider != AGENT_PROVIDER_LANGGRAPH and callable(set_resume_checkpoint) and isinstance(resume_checkpoint, dict):
             set_resume_checkpoint(resume_checkpoint)
 
         _transition_job(job.id, stage="source_search", stage_message="Collecting grounded source inputs.", progress_percent=25)
@@ -493,18 +648,55 @@ def _process_trip_generation(job: JobExecution) -> dict:
         _transition_job(job.id, stage="route_planning", stage_message="Drafting the itinerary route.", progress_percent=72)
         try:
             result = orchestrator.plan_trip(request)
-        except JobCancelledError:
-            raise
+        except (JobCancelledError, WorkflowCancelled) as exc:
+            if workflow_run_id:
+                _record_langgraph_terminal_state(
+                    run_id=workflow_run_id,
+                    job_id=job.id,
+                    state=getattr(orchestrator, "get_graph_state", lambda: None)(),
+                    status_value="cancelled",
+                    failure_message=str(exc),
+                    failed_node=getattr(orchestrator, "get_failed_node", lambda: None)(),
+                )
+            raise JobCancelledError(str(exc)) from exc
         except Exception as exc:
-            get_resume_checkpoint = getattr(orchestrator, "get_resume_checkpoint", None)
-            checkpoint = get_resume_checkpoint() if callable(get_resume_checkpoint) else None
-            _record_trip_generation_resume_checkpoint(job.id, checkpoint, exc)
+            if workflow_run_id:
+                state = getattr(orchestrator, "get_graph_state", lambda: None)()
+                if state is None:
+                    fingerprint = getattr(orchestrator, "get_input_fingerprint", lambda: None)()
+                    state = {"input_fingerprint": fingerprint} if fingerprint else None
+                _record_langgraph_terminal_state(
+                    run_id=workflow_run_id,
+                    job_id=job.id,
+                    state=state,
+                    status_value="failed",
+                    failure_message=_extract_error_message(exc),
+                    failed_node=getattr(orchestrator, "get_failed_node", lambda: None)(),
+                )
+            else:
+                get_resume_checkpoint = getattr(orchestrator, "get_resume_checkpoint", None)
+                checkpoint = get_resume_checkpoint() if callable(get_resume_checkpoint) else None
+                _record_trip_generation_resume_checkpoint(job.id, checkpoint, exc)
             raise
-        _raise_if_cancelled(job.id)
-        _transition_job(job.id, stage="hotel_matching", stage_message="Filling accommodation placeholders.", progress_percent=88)
-        _transition_job(job.id, stage="export_ready", stage_message="Finalizing itinerary payload.", progress_percent=96)
-        result = prepare_plan_images_for_async_enrichment(result)
-        _raise_if_cancelled(job.id)
+        graph_state = getattr(orchestrator, "get_graph_state", lambda: None)()
+
+    _raise_if_cancelled(job.id)
+    _transition_job(job.id, stage="hotel_matching", stage_message="Filling accommodation placeholders.", progress_percent=88)
+    _transition_job(job.id, stage="export_ready", stage_message="Finalizing itinerary payload.", progress_percent=96)
+    result = prepare_plan_images_for_async_enrichment(result)
+    _raise_if_cancelled(job.id)
+    if workflow_run_id:
+        return _commit_langgraph_trip_result(
+            job_id=job.id,
+            run_id=workflow_run_id,
+            result=result,
+            graph_state=graph_state,
+        )
+
+    with session_scope() as session:
+        trip = session.query(Trip).filter(Trip.id == job.trip_id).one_or_none()
+        if not trip:
+            raise HTTPException(status_code=404, detail="Trip not found for job")
         agent_trace = _persist_trip_plan(trip, result)
         session.add(trip)
         session.flush()

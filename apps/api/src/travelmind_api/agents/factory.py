@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
+
 from travelmind_api.agents.base import AgentOrchestrator
 from travelmind_api.agents.helloagents import HelloAgentsOrchestrator
 from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator
@@ -26,6 +28,7 @@ def build_orchestrator(
     agent_provider: str | None = None,
     enable_helloagents: bool = True,
     progress_callback: RoleProgressCallback | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
 ) -> AgentOrchestrator:
     maps_provider = build_maps_provider()
     resolved_provider = normalize_agent_provider(agent_provider, default=normalize_agent_provider(settings.agent_provider))
@@ -35,7 +38,12 @@ def build_orchestrator(
         return HelloAgentsOrchestrator(resolved_llm_config, maps_provider=maps_provider, progress_callback=progress_callback)
 
     if resolved_provider == AGENT_PROVIDER_LANGGRAPH:
-        return LangGraphOrchestrator(resolved_llm_config, maps_provider=maps_provider, progress_callback=progress_callback)
+        return LangGraphOrchestrator(
+            resolved_llm_config,
+            maps_provider=maps_provider,
+            progress_callback=progress_callback,
+            checkpointer=checkpointer,
+        )
 
     if resolved_llm_config is not None:
         return OpenAICompatibleOrchestrator(resolved_llm_config, maps_provider=maps_provider)

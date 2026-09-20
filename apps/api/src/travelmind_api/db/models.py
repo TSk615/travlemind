@@ -156,6 +156,9 @@ class JobRecord(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     owner_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     trip_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("trips.id"), nullable=True, index=True)
+    workflow_run_id: Mapped[str | None] = mapped_column(
+        String(40), ForeignKey("workflow_runs.id"), nullable=True, index=True
+    )
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -173,6 +176,33 @@ class JobRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkflowRun(Base):
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index("ix_workflow_runs_owner_trip", "owner_user_id", "trip_id"),
+        Index("ix_workflow_runs_status", "status", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id"), nullable=False)
+    trip_id: Mapped[str] = mapped_column(String(32), ForeignKey("trips.id"), nullable=False)
+    original_job_id: Mapped[str] = mapped_column(String(40), nullable=False)
+    current_job_id: Mapped[str] = mapped_column(String(40), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    graph_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    state_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expected_trip_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failed_node: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    committed_job_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class ImageGeneration(Base):

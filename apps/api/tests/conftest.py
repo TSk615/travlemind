@@ -75,6 +75,7 @@ def client(monkeypatch):
     export_root = case_root / "exports"
     export_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("TRAVELMIND_DATABASE_URL", f"sqlite:///{(case_root / 'travelmind.db').as_posix()}")
+    monkeypatch.setenv("TRAVELMIND_WORKFLOW_CHECKPOINT_URL", str(case_root / "langgraph-checkpoints.db"))
     monkeypatch.setenv("TRAVELMIND_ENVIRONMENT", "test")
     monkeypatch.setenv("TRAVELMIND_CSRF_ENABLED", "false")
     monkeypatch.setenv("TRAVELMIND_RATE_LIMIT_ENABLED", "false")

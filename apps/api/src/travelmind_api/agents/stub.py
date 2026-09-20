@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 
 from travelmind_api.agents.base import (
@@ -23,9 +24,25 @@ class StubOrchestrator:
     def __init__(self, maps_provider: MapsPoiProvider | None = None) -> None:
         self._maps_provider = maps_provider or build_maps_provider("stub")
         self._execution_job_id: str | None = None
+        self._execution_run_id: str | None = None
+        self._execution_resume = False
+        self._execution_cancellation_check: Callable[[], bool] | None = None
+        self._execution_expected_input_fingerprint: str | None = None
 
-    def set_execution_context(self, *, job_id: str | None = None) -> None:
+    def set_execution_context(
+        self,
+        *,
+        job_id: str | None = None,
+        run_id: str | None = None,
+        resume: bool = False,
+        cancellation_check: Callable[[], bool] | None = None,
+        expected_input_fingerprint: str | None = None,
+    ) -> None:
         self._execution_job_id = job_id
+        self._execution_run_id = run_id
+        self._execution_resume = resume
+        self._execution_cancellation_check = cancellation_check
+        self._execution_expected_input_fingerprint = expected_input_fingerprint
 
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:
         zh_output = is_chinese_output(request)

@@ -11,8 +11,8 @@ from travelmind_api.api.schemas.common import success_response
 from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import SessionLocal, get_db
 from travelmind_api.core.deps import get_current_user
-from travelmind_api.db.models import User
-from travelmind_api.services.job_service import TERMINAL_JOB_STATUSES, cancel_job, create_job, dispatch_job, extract_resume_checkpoint, get_job, serialize_job
+from travelmind_api.db.models import User, WorkflowRun
+from travelmind_api.services.job_service import TERMINAL_JOB_STATUSES, cancel_job, create_job, dispatch_job, extract_resume_checkpoint, extract_workflow_run_id, get_job, serialize_job
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -52,7 +52,13 @@ def retry_failed_job_endpoint(
             detail={"code": "job_not_failed", "message": "Only failed jobs can be retried from the last failed node."},
         )
     checkpoint = extract_resume_checkpoint(job)
-    if checkpoint is None:
+    workflow_run_id = extract_workflow_run_id(job)
+    workflow_run = db.get(WorkflowRun, workflow_run_id) if workflow_run_id else None
+    if workflow_run is not None and (
+        workflow_run.owner_user_id != current_user.id or workflow_run.trip_id != job.trip_id
+    ):
+        workflow_run = None
+    if checkpoint is None and workflow_run is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "job_resume_checkpoint_missing", "message": "This failed job does not have a resume checkpoint. Start a new generation instead."},
@@ -69,13 +75,18 @@ def retry_failed_job_endpoint(
         for key, value in source_payload.items()
         if key not in {"resume_checkpoint", "resume_from_job_id"}
     }
-    retry_payload.update(
-        {
-            "trip_id": job.trip_id,
-            "resume_from_job_id": job.id,
-            "resume_checkpoint": checkpoint,
-        }
-    )
+    retry_payload.update({"trip_id": job.trip_id, "resume_from_job_id": job.id})
+    if workflow_run is not None:
+        retry_payload.update(
+            {
+                "workflow_run_id": workflow_run.id,
+                "workflow_provider": workflow_run.provider,
+                "workflow_graph_version": workflow_run.graph_version,
+                "workflow_state_schema_version": workflow_run.state_schema_version,
+            }
+        )
+    elif checkpoint is not None:
+        retry_payload["resume_checkpoint"] = checkpoint
     retry_job = create_job(
         db,
         job_type="trip.generate",
@@ -83,7 +94,15 @@ def retry_failed_job_endpoint(
         trip_id=job.trip_id,
         payload=retry_payload,
         idempotency_key=idempotency_key,
+        commit=False,
     )
+    if workflow_run is not None:
+        retry_job.workflow_run_id = workflow_run.id
+        workflow_run.current_job_id = retry_job.id
+        db.add(retry_job)
+        db.add(workflow_run)
+    db.commit()
+    db.refresh(retry_job)
     dispatch_job(retry_job.id, settings, background_tasks)
     return success_response(serialize_job(retry_job).model_dump(mode="json"))
 

@@ -54,14 +54,29 @@ def extract_resume_checkpoint(job: JobRecord) -> dict[str, Any] | None:
     return checkpoint if isinstance(checkpoint, dict) else None
 
 
+def extract_workflow_run_id(job: JobRecord) -> str | None:
+    payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    return str(job.workflow_run_id or payload.get("workflow_run_id") or "").strip() or None
+
+
 def _resume_metadata(job: JobRecord) -> dict[str, Any]:
     checkpoint = extract_resume_checkpoint(job)
+    workflow_run_id = extract_workflow_run_id(job)
     payload = job.payload_json if isinstance(job.payload_json, dict) else {}
+    result = job.result_json if isinstance(job.result_json, dict) else {}
     return {
-        "can_resume": bool(job.status == "failed" and job.type == "trip.generate" and checkpoint),
+        "can_resume": bool(
+            job.status == "failed"
+            and job.type == "trip.generate"
+            and (checkpoint or workflow_run_id)
+        ),
         "resume_from_job_id": str(payload.get("resume_from_job_id") or "").strip() or None,
-        "resume_failed_role": str((checkpoint or {}).get("failed_role") or "").strip() or None,
-        "resume_reason": str((checkpoint or {}).get("failure_message") or "").strip() or None,
+        "resume_failed_role": str(
+            (checkpoint or {}).get("failed_role") or result.get("resume_failed_role") or ""
+        ).strip() or None,
+        "resume_reason": str(
+            (checkpoint or {}).get("failure_message") or result.get("resume_reason") or ""
+        ).strip() or None,
     }
 
 
@@ -101,6 +116,7 @@ def create_job(
     payload: dict,
     idempotency_key: str | None = None,
     max_attempts: int | None = None,
+    commit: bool = True,
 ) -> JobRecord:
     normalized_idempotency_key = str(idempotency_key or "").strip()[:128] or None
     if normalized_idempotency_key:
@@ -137,6 +153,9 @@ def create_job(
     )
     _append_timeline_entry(job, now)
     session.add(job)
+    if not commit:
+        session.flush()
+        return job
     try:
         session.commit()
     except IntegrityError:
