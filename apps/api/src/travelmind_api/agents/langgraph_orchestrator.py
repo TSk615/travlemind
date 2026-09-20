@@ -46,6 +46,7 @@ from travelmind_api.services.llm.role_invoker import (
     RoleInvocation,
     RoleInvocationResult,
     RoleInvoker,
+    get_role_invocation_failure_metadata,
 )
 from travelmind_api.services.llm.concurrency import (
     EndpointConcurrencyLimiter,
@@ -379,16 +380,62 @@ class LangGraphOrchestrator(PlanningCore):
         if remaining_seconds <= 0:
             raise TimeoutError("LangGraph refinement exhausted its total deadline before the model request")
         endpoint = endpoint.model_copy(update={"timeout_seconds": remaining_seconds})
-        return self._role_invoker.invoke(
-            RoleInvocation(
-                role_name="itinerary_refiner",
-                prompt_version=prompt.version,
-                system_prompt=prompt.system_prompt,
-                input_payload=input_payload,
-                endpoint=endpoint,
-                max_request_attempts=max(int(role_config.max_request_attempts), 1),
-            )
+        self._log_event(
+            "langgraph_role_started",
+            message="Role itinerary_refiner started.",
+            run_id=self._runtime().run_id,
+            role="itinerary_refiner",
+            endpoint=self._describe_endpoint(endpoint),
+            model=endpoint.model,
+            payload_keys=sorted(input_payload.keys()),
         )
+        try:
+            result = self._role_invoker.invoke(
+                RoleInvocation(
+                    role_name="itinerary_refiner",
+                    prompt_version=prompt.version,
+                    system_prompt=prompt.system_prompt,
+                    input_payload=input_payload,
+                    endpoint=endpoint,
+                    max_request_attempts=max(int(role_config.max_request_attempts), 1),
+                )
+            )
+            if not result.content.strip():
+                raise RuntimeError("LangGraph role 'itinerary_refiner' returned an empty response")
+        except Exception as exc:
+            failure = get_role_invocation_failure_metadata(exc)
+            self._log_event(
+                "langgraph_role_failed",
+                message="Role itinerary_refiner failed.",
+                level="ERROR",
+                run_id=self._runtime().run_id,
+                role="itinerary_refiner",
+                endpoint=str(failure.get("endpoint_host") or self._describe_endpoint(endpoint)),
+                model=str(failure.get("model") or endpoint.model),
+                elapsed_seconds=round(max(time.perf_counter() - started, 0.0), 3),
+                latency_ms=failure.get("latency_ms"),
+                request_id=failure.get("request_id"),
+                retry_count=int(failure.get("retry_count") or 0),
+                request_count=int(failure.get("request_count") or 0),
+                usage=failure.get("usage"),
+                reason=str(exc).strip() or exc.__class__.__name__,
+            )
+            raise
+        self._log_event(
+            "langgraph_role_completed",
+            message="Role itinerary_refiner completed.",
+            run_id=self._runtime().run_id,
+            role="itinerary_refiner",
+            endpoint=result.endpoint_host,
+            model=result.model,
+            elapsed_seconds=round(max(time.perf_counter() - started, 0.0), 3),
+            response_chars=len(result.content),
+            retry_count=result.retry_count,
+            request_count=result.request_count,
+            cache_reused=result.cache_reused,
+            usage=result.usage,
+        )
+        return result
 
     def refine_itinerary(self, state: TripRefinementState) -> dict[str, Any]:
         result = self._invoke_refiner(state, repair=False)
@@ -626,22 +673,28 @@ class LangGraphOrchestrator(PlanningCore):
                     raise TimeoutError(f"LangGraph role '{role_name}' exhausted its total deadline before the model request")
                 bounded_endpoint = effective_endpoint.model_copy(update={"timeout_seconds": remaining_seconds})
                 result = self._role_invoker.invoke(replace(invocation, endpoint=bounded_endpoint))
+                if not result.content.strip():
+                    raise RuntimeError(f"LangGraph role '{role_name}' returned an empty response")
         except Exception as exc:
+            failure = get_role_invocation_failure_metadata(exc)
             self._log_event(
                 "langgraph_role_failed",
                 message=f"Role {role_name} failed.",
                 level="ERROR",
                 run_id=runtime.run_id,
                 role=role_name,
-                endpoint=self._describe_endpoint(effective_endpoint),
-                model=effective_endpoint.model,
+                endpoint=str(failure.get("endpoint_host") or self._describe_endpoint(effective_endpoint)),
+                model=str(failure.get("model") or effective_endpoint.model),
                 elapsed_seconds=round(max(time.perf_counter() - started, 0.0), 3),
+                latency_ms=failure.get("latency_ms"),
+                request_id=failure.get("request_id"),
+                retry_count=int(failure.get("retry_count") or 0),
+                request_count=int(failure.get("request_count") or 0),
+                usage=failure.get("usage"),
                 reason=str(exc).strip() or exc.__class__.__name__,
             )
             raise
         runtime.check_cancelled()
-        if not result.content.strip():
-            raise RuntimeError(f"LangGraph role '{role_name}' returned an empty response")
         self._native_role_citations[role_name] = list(result.citations)
         self._log_event(
             "langgraph_role_completed",

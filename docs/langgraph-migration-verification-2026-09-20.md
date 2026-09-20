@@ -19,8 +19,9 @@
   checkpoint schema migration；Compose 显式给 API/worker 注入同一个 PostgreSQL checkpoint URL，
   生产配置拒绝 SQLite 等进程本地 checkpoint 存储。
 - trace 持久化角色请求标识、端点、协议、耗时、usage、实际重试/请求次数与缓存复用；
-  恢复时按稳定 request ID 标记复用节点。回放脚本可按显式 token 单价计算已知费用，
-  缺少 usage 时保持未知。
+  恢复时按稳定 request ID 标记复用节点。失败调用保留原始异常类型供任务重试分类，并把
+  脱敏 request ID、耗时、usage、实际重试/请求次数写入角色失败日志。回放脚本可按显式
+  token 单价计算已知费用，缺少 usage 时保持未知。
 - 首次生成/微调时间固定写入 Job payload，ARQ 自动重试和手动生成恢复复用相同时间，避免
   时间漂移改变 input fingerprint；用户主动创建的新 Job 则重新获取证据。
 - 恢复绑定会同时校验用户、行程和执行记录关联；跨用户复用已知 `run_id` 会被拒绝。
@@ -37,7 +38,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `290 passed, 2 skipped`（本机无 PostgreSQL） |
+| API 全量测试 | `292 passed, 2 skipped`（本机无 PostgreSQL） |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | 请求预算/截止时间、共享限流、恢复与 LangGraph 定向测试 | `61 passed` |
 | 前端单元测试 | `10 passed` |

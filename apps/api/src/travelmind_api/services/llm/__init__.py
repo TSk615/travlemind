@@ -27,6 +27,7 @@ from travelmind_api.services.llm.role_invoker import (
     RoleInvocation,
     RoleInvocationResult,
     RoleInvoker,
+    get_role_invocation_failure_metadata,
 )
 
 __all__ = [
@@ -52,4 +53,5 @@ __all__ = [
     "RoleInvocation",
     "RoleInvocationResult",
     "OpenAICompatibleRoleInvoker",
+    "get_role_invocation_failure_metadata",
 ]

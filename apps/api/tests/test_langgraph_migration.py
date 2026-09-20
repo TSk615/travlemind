@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import date
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -35,6 +36,7 @@ from travelmind_api.services.llm.role_invoker import (
     OpenAICompatibleRoleInvoker,
     RoleInvocation,
     RoleInvocationResult,
+    get_role_invocation_failure_metadata,
 )
 from travelmind_api.services.planning.payloads import build_trip_request_payload
 from travelmind_api.services.planning.role_models import PlanningBrief
@@ -179,6 +181,74 @@ def test_openai_compatible_role_invoker_preserves_known_usage_and_retries():
     assert result.retry_count == 1
     assert result.request_count == 2
     assert result.checkpoint_metadata()["usage"]["total_tokens"] == 20
+
+
+def test_role_invocation_failure_keeps_original_exception_and_sanitized_telemetry():
+    class FailingClient:
+        def __init__(self, _config):
+            self.last_citations = ["https://example.test/partial"]
+            self.last_usage = None
+            self.last_retry_count = 1
+            self.last_request_count = 2
+
+        def create_chat_completion(self, **_kwargs):
+            raise httpx.ReadTimeout("upstream timed out")
+
+    invoker = OpenAICompatibleRoleInvoker(client_factory=FailingClient)
+    with pytest.raises(httpx.ReadTimeout) as caught:
+        invoker.invoke(
+            RoleInvocation(
+                role_name="brief_parser",
+                prompt_version="trip.brief_parser.test",
+                system_prompt="Return JSON.",
+                input_payload={"trip_request": {"destination": "京都"}},
+                endpoint=_endpoint(api_key="must-not-be-logged"),
+            )
+        )
+
+    metadata = get_role_invocation_failure_metadata(caught.value)
+    assert metadata["request_id"].startswith("llmreq_")
+    assert metadata["endpoint_host"] == "llm.example.test"
+    assert metadata["retry_count"] == 1
+    assert metadata["request_count"] == 2
+    assert metadata["usage"] is None
+    assert "must-not-be-logged" not in json.dumps(metadata)
+
+
+def test_langgraph_failed_role_log_includes_invocation_telemetry_without_secrets():
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class FailingClient:
+        def __init__(self, _config):
+            self.last_citations = []
+            self.last_usage = {"prompt_tokens": 9}
+            self.last_retry_count = 1
+            self.last_request_count = 2
+
+        def create_chat_completion(self, **_kwargs):
+            raise httpx.ReadTimeout("upstream timed out")
+
+    orchestrator = LangGraphOrchestrator(
+        LlmConfig(
+            base_url="https://llm.example.test/v1",
+            api_key="must-not-be-logged",
+            model="test-model",
+            wire_api="responses",
+        ),
+        role_invoker=OpenAICompatibleRoleInvoker(client_factory=FailingClient),
+    )
+    orchestrator._log_event = lambda event, **payload: events.append((event, payload))
+
+    with pytest.raises(httpx.ReadTimeout):
+        orchestrator.plan_trip(_request())
+
+    failure = next(payload for event, payload in events if event == "langgraph_role_failed")
+    assert failure["role"] == "brief_parser"
+    assert failure["request_id"].startswith("llmreq_")
+    assert failure["retry_count"] == 1
+    assert failure["request_count"] == 2
+    assert failure["usage"] == {"prompt_tokens": 9}
+    assert "must-not-be-logged" not in json.dumps(failure)
 
 
 def test_brief_probe_runs_without_helloagents_and_checkpoint_state_excludes_credentials():

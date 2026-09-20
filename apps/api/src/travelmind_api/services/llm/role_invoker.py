@@ -62,6 +62,16 @@ class RoleInvocationResult:
         }
 
 
+_FAILURE_METADATA_ATTRIBUTE = "_travelmind_role_invocation_failure_metadata"
+
+
+def get_role_invocation_failure_metadata(exc: BaseException) -> dict[str, Any]:
+    """Return sanitized telemetry attached to an upstream invocation failure."""
+
+    value = getattr(exc, _FAILURE_METADATA_ATTRIBUTE, None)
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 class RoleInvoker(Protocol):
     def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
         ...
@@ -81,6 +91,7 @@ class OpenAICompatibleRoleInvoker:
         client = self._client_factory(invocation.endpoint)
         client.request_attempt_limit = max(int(invocation.max_request_attempts), 1)
         client.request_deadline_seconds = float(invocation.endpoint.timeout_seconds)
+        request_id = generate_identifier("llmreq")
         messages = [
             {"role": "system", "content": invocation.system_prompt},
             {
@@ -89,12 +100,44 @@ class OpenAICompatibleRoleInvoker:
             },
         ]
         started = time.perf_counter()
-        content = client.create_chat_completion(
-            messages=messages,
-            temperature=invocation.temperature,
-            max_tokens=invocation.max_tokens,
-            stream=invocation.stream,
-        )
+        try:
+            content = client.create_chat_completion(
+                messages=messages,
+                temperature=invocation.temperature,
+                max_tokens=invocation.max_tokens,
+                stream=invocation.stream,
+            )
+        except Exception as exc:
+            metadata = {
+                "request_id": request_id,
+                "role_name": invocation.role_name,
+                "model": invocation.endpoint.model,
+                "provider_protocol": invocation.endpoint.provider_protocol,
+                "wire_api": invocation.endpoint.wire_api,
+                "endpoint_host": urlparse(invocation.endpoint.base_url).netloc or invocation.endpoint.base_url,
+                "prompt_version": invocation.prompt_version,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "citations": [
+                    str(item).strip()
+                    for item in (getattr(client, "last_citations", []) or [])
+                    if str(item).strip()
+                ],
+                "usage": (
+                    dict(getattr(client, "last_usage"))
+                    if isinstance(getattr(client, "last_usage", None), dict)
+                    else None
+                ),
+                "retry_count": int(getattr(client, "last_retry_count", 0) or 0),
+                "request_count": int(getattr(client, "last_request_count", 0) or 0),
+                "cache_reused": False,
+            }
+            try:
+                setattr(exc, _FAILURE_METADATA_ATTRIBUTE, metadata)
+            except Exception:
+                # Preserve the original exception even for unusual immutable
+                # exception implementations; retry classification depends on it.
+                pass
+            raise
         latency_ms = int((time.perf_counter() - started) * 1000)
         citations = [
             str(item).strip()
@@ -102,7 +145,7 @@ class OpenAICompatibleRoleInvoker:
             if str(item).strip()
         ]
         return RoleInvocationResult(
-            request_id=generate_identifier("llmreq"),
+            request_id=request_id,
             role_name=invocation.role_name,
             content=content,
             model=invocation.endpoint.model,
