@@ -137,7 +137,7 @@ class OpenAICompatibleClient:
         protocol = normalize_provider_protocol(self._config.provider_protocol)
         if protocol not in {"openai", "newapi", "neiapi"}:
             raise ValueError(f"Tool calling is not implemented for {protocol} protocol")
-        # hello_agents Function Calling flow expects an OpenAI Chat Completions-style response
+        # Some OpenAI-compatible function-calling gateways expect a Chat Completions-style response.
         # with choices[0].message.tool_calls, so tool-enabled roles force the compatible path.
         chat_config = self._config.model_copy(update={"wire_api": "chat_completions"})
         payload = {

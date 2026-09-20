@@ -1,5 +1,5 @@
 from travelmind_api.prompts.roles.trip import BRIEF_OUTPUT_SCHEMA, build_brief_parser_prompt
-from travelmind_api.prompts.roles.helloagents import (
+from travelmind_api.prompts.roles.planning import (
     ATTRACTION_OUTPUT_SCHEMA,
     FOOD_OUTPUT_SCHEMA,
     HOTEL_OUTPUT_SCHEMA,

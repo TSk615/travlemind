@@ -11,10 +11,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 
 from travelmind_api.core.env import get_env
+from travelmind_api.services.tool_contract import Tool, ToolParameter, ToolResponse
 
 _LOGGER = logging.getLogger(__name__)
-from hello_agents.tools.base import Tool, ToolParameter
-from hello_agents.tools.response import ToolResponse
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
@@ -91,15 +92,42 @@ def client(monkeypatch):
         if variable.startswith("TRAVELMIND_LLM_ROLE_"):
             monkeypatch.delenv(variable, raising=False)
 
-    for name in list(sys.modules):
-        if name.startswith("travelmind_api"):
-            del sys.modules[name]
+    # Keep one coherent module graph for the whole pytest process. Removing
+    # travelmind_api from sys.modules left test modules holding stale function
+    # objects, so later monkeypatches targeted a different module instance.
+    # Rebind the process-wide settings and session factory instead; the client
+    # fixture is the only place that owns a test database lifecycle.
+    from travelmind_api.core.config import get_settings
+    from travelmind_api.core import database
 
-    from travelmind_api.main import create_app
+    get_settings.cache_clear()
+    test_settings = get_settings()
+    database.engine.dispose()
+    database.settings = test_settings
+    database.connect_args = (
+        {"check_same_thread": False, "timeout": 30}
+        if test_settings.database_url.startswith("sqlite")
+        else {}
+    )
+    database.engine = create_engine(
+        test_settings.database_url,
+        connect_args=database.connect_args,
+        future=True,
+        pool_pre_ping=True,
+    )
+    database.SessionLocal.configure(bind=database.engine)
 
-    app = create_app()
+    import travelmind_api.jobs.handlers as job_handlers
+    import travelmind_api.main as main_module
+
+    job_handlers.settings = test_settings
+    main_module.settings = test_settings
+
+    app = main_module.create_app()
     try:
         with TestClient(app) as test_client:
             yield test_client
     finally:
+        database.engine.dispose()
+        get_settings.cache_clear()
         shutil.rmtree(case_root, ignore_errors=True)

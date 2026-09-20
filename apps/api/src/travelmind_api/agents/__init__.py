@@ -1,5 +1,5 @@
 __all__ = [
-    "HelloAgentsOrchestrator",
+    "LangGraphOrchestrator",
     "OpenAICompatibleOrchestrator",
     "StubOrchestrator",
 ]

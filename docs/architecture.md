@@ -12,7 +12,7 @@
 
 - `AgentOrchestrator` is the internal contract for planning, source summarization, and export drafting.
 - `StubOrchestrator` is the baseline implementation for tests and local smoke runs.
-- `HelloAgentsOrchestrator` is a PoC adapter behind the internal contract. It can use configured LLM endpoints plus configured search grounding, but should not be treated as a production/commercial dependency without licensing review.
+- `LangGraphOrchestrator` is the durable multi-role implementation behind the internal contract. It uses configured LLM endpoints plus configured search grounding and persists resumable graph state outside request transactions.
 - Runtime LLM settings are stored per user and exposed through `/api/v1/settings/llm`. The current client layer supports OpenAI Responses, OpenAI-compatible Chat Completions, Gemini, Claude, NewAPI, and NeiAPI-style endpoints.
 
 ## Search

@@ -8,7 +8,7 @@
 
 - `TRAVELMIND_AGENT_PROVIDER=langgraph`：让新生成和微调任务进入灰度选择。
 - `TRAVELMIND_LANGGRAPH_ROLLOUT_PERCENT=0..100`：按 Job ID 的稳定哈希分桶。
-- `TRAVELMIND_LANGGRAPH_ROLLOUT_FALLBACK_PROVIDER=helloagents|standard`：未命中灰度桶时使用的迁移期后备实现。
+- `TRAVELMIND_LANGGRAPH_ROLLOUT_FALLBACK_PROVIDER=standard`：未命中灰度桶时使用后端单模型实现。旧实现移除后的应用级回滚使用保留部署版本。
 
 不要在同一个运行中修改 provider 或 graph version。切换配置只影响尚未执行且没有
 provider 快照的新 Job。
@@ -26,7 +26,7 @@ provider 快照的新 Job。
 
 ```powershell
 $env:TRAVELMIND_REPLAY_ALLOW_NETWORK = "1"
-uv run --project apps/api python scripts/run_workflow_replay.py --provider helloagents --output .tmp/replay/baseline.json --allow-network
+## 基线文件应由仍包含旧实现的保留部署版本生成并复制到 .tmp/replay/baseline.json
 uv run --project apps/api python scripts/run_workflow_replay.py --provider langgraph --output .tmp/replay/candidate.json --allow-network
 uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline .tmp/replay/baseline.json --candidate .tmp/replay/candidate.json
 ```
@@ -44,9 +44,8 @@ uv run --project apps/api pytest apps/api/tests/test_llm_proxy.py apps/api/tests
 ## 回滚演练
 
 把 `TRAVELMIND_LANGGRAPH_ROLLOUT_PERCENT` 设为 `0` 并重启 API/worker。验证一个新 Job
-使用 fallback provider，同时一个已存在的 LangGraph Job 仍从原 checkpoint 继续。
-不要把 LangGraph checkpoint 交给旧运行时。旧实现从当前代码移除后，应用回滚必须使用
-保留的上一部署版本。
+使用 `standard` fallback，同时一个已存在的 LangGraph Job 仍从原 checkpoint 继续。
+不要把 LangGraph checkpoint 交给旧运行时。应用级回滚必须使用保留的上一部署版本。
 
 ## 排空检查
 
@@ -56,8 +55,11 @@ uv run --project apps/api pytest apps/api/tests/test_llm_proxy.py apps/api/tests
 uv run --project apps/api python scripts/audit_workflow_rollout.py --require-drained
 ```
 
-命令为只读。退出码 0 表示没有活跃的 legacy/unknown-provider 生成或微调任务；退出码 2
-表示仍有阻塞任务。缺少 provider 快照的旧 Job 会被保守地视为阻塞。确认排空和回滚窗口结束后，才能删除旧包、旧 provider 和旧部署镜像。
+命令为只读。退出码 0 表示数据库已经包含 `0005_workflow_runs`，并且没有活跃的
+legacy/unknown-provider 生成或微调任务；退出码 2 表示仍有阻塞任务或 schema 尚未升级。
+输出中的 `schema_ready_for_langgraph` 必须为 `true`，`schema_blockers` 必须为空。缺少
+provider 快照的旧 Job 会被保守地视为阻塞。确认排空和回滚窗口结束后，才能部署已删除
+旧包与旧 provider 的版本；旧部署镜像继续保留到回滚窗口结束。
 
 ## 观察指标与门槛
 

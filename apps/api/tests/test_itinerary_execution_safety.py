@@ -5,10 +5,10 @@ import pytest
 from fastapi import HTTPException
 
 from travelmind_api.agents.base import PlanningRequest
-from travelmind_api.agents.helloagents import (
-    HelloAgentsOrchestrator,
-    HelloAgentsTransportGuidance,
-    HelloAgentsWeatherGuidance,
+from travelmind_api.agents.planning_core import (
+    PlanningCore,
+    TransportGuidance,
+    WeatherGuidance,
 )
 from travelmind_api.services.llm import LlmConfig
 from travelmind_api.services.llm.parser import parse_planning_response
@@ -16,8 +16,8 @@ from travelmind_api.services.maps import StubMapsPoiProvider
 from travelmind_api.services.trip_service import validate_trip_dates_for_generation
 
 
-def _orchestrator() -> HelloAgentsOrchestrator:
-    return HelloAgentsOrchestrator(
+def _orchestrator() -> PlanningCore:
+    return PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -83,7 +83,7 @@ def test_same_day_plan_rejects_items_before_the_generation_window():
         [{"title": "当天", "summary": "", "total_cost": 500, "items": [_item("小公园", "09:00", "11:00")]}]
     )
     with pytest.raises(ValueError, match="早于可执行时间 17:30"):
-        _orchestrator()._validate_execution_constraints(payload, request, HelloAgentsTransportGuidance())
+        _orchestrator()._validate_execution_constraints(payload, request, TransportGuidance())
 
 
 def test_cross_day_duplicate_poi_is_rejected():
@@ -95,7 +95,7 @@ def test_cross_day_duplicate_poi_is_rejected():
         ]
     )
     with pytest.raises(ValueError, match="重复"):
-        _orchestrator()._validate_execution_constraints(payload, request, HelloAgentsTransportGuidance())
+        _orchestrator()._validate_execution_constraints(payload, request, TransportGuidance())
 
 
 def test_cross_day_duplicate_poi_with_presentation_suffix_is_rejected():
@@ -107,7 +107,7 @@ def test_cross_day_duplicate_poi_with_presentation_suffix_is_rejected():
         ]
     )
     with pytest.raises(ValueError, match="重复"):
-        _orchestrator()._validate_execution_constraints(payload, request, HelloAgentsTransportGuidance())
+        _orchestrator()._validate_execution_constraints(payload, request, TransportGuidance())
 
 
 def test_departure_day_enforces_transfer_luggage_and_station_buffer():
@@ -125,7 +125,7 @@ def test_departure_day_enforces_transfer_luggage_and_station_buffer():
             }
         ]
     )
-    transport = HelloAgentsTransportGuidance(
+    transport = TransportGuidance(
         departure_transfer_minutes=50,
         station_buffer_minutes=45,
         luggage_buffer_minutes=30,
@@ -152,7 +152,7 @@ def test_departure_buffer_rejects_an_invalid_time_instead_of_skipping_validation
     )
     payload.days[0].items[1].start_time = "99:99"
     with pytest.raises(ValueError, match="返程缓冲无法校验"):
-        _orchestrator()._validate_execution_constraints(payload, request, HelloAgentsTransportGuidance())
+        _orchestrator()._validate_execution_constraints(payload, request, TransportGuidance())
 
 
 def test_unverified_train_time_is_marked_as_a_planning_window():
@@ -186,7 +186,7 @@ def test_unverified_train_time_is_marked_as_a_planning_window():
 def test_weather_requires_exact_trip_date_coverage_for_real_generation():
     now = datetime(2026, 9, 8, 17, 0, tzinfo=timezone(timedelta(hours=8)))
     request = _request(start_date=date(2026, 9, 9), end_date=date(2026, 9, 10), generated_at=now)
-    weather = HelloAgentsWeatherGuidance(
+    weather = WeatherGuidance(
         overall_outlook="天气参考",
         daily_forecasts=[{"date": "2026-09-09", "outlook": "有阵雨"}],
     )

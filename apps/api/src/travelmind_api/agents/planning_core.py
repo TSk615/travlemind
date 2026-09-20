@@ -1,14 +1,13 @@
-﻿from __future__ import annotations
+"""Framework-neutral schemas and deterministic travel-planning business rules."""
+from __future__ import annotations
 
 import logging
 import json
 import re
 import time
 from datetime import date, timedelta
-from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from importlib import import_module
 from typing import Any
 from urllib.parse import urlparse
 
@@ -36,10 +35,6 @@ from travelmind_api.agents.base import (
 )
 from travelmind_api.agents.stub import StubOrchestrator
 from travelmind_api.agents.runtime import RoleProgressCallback
-from travelmind_api.agents.helloagents_llm import (
-    HelloAgentsCompatibleLLM as _HelloAgentsCompatibleLLM,
-    HelloAgentsInvokeResult,
-)
 from travelmind_api.core.logging_utils import log_job_event
 from travelmind_api.core.security import generate_identifier, generate_workflow_id
 from travelmind_api.services.budgeting import enrich_plan_with_budget
@@ -51,10 +46,10 @@ from travelmind_api.services.transport_evidence import verify_transport_candidat
 from travelmind_api.services.weather_evidence import has_unsupported_weather_condition, verify_daily_forecast_pages
 from travelmind_api.services.planning_details import BookingDetails, HotelEvidence, TransportLeg, TransportServiceCandidate
 from travelmind_api.services.planning.payloads import build_trip_request_payload
-from travelmind_api.services.planning.role_models import HelloAgentsBrief
+from travelmind_api.services.planning.role_models import PlanningBrief
 from travelmind_api.services.llm import LlmConfig, LlmEndpointConfig, LlmPlanningPayload, OpenAICompatibleClient, build_planning_messages, parse_planning_response
 from travelmind_api.services.llm.localization import build_output_language_instruction, infer_output_locale, is_chinese_output, planning_payload_needs_language_repair
-from travelmind_api.prompts.roles.helloagents import (
+from travelmind_api.prompts.roles.planning import (
     build_brief_parser_prompt,
     build_hotel_specialist_prompt,
     build_itinerary_planner_prompt,
@@ -69,16 +64,9 @@ from travelmind_api.services.search_connector import ConfiguredSearchGateway, Se
 from travelmind_api.services.search_service import search_documents
 
 
-class HelloAgentsCompatibleLLM(_HelloAgentsCompatibleLLM):
-    """Keep the legacy module-level client injection seam after extraction."""
-
-    def __init__(self, config: LlmEndpointConfig, *args: Any, **kwargs: Any) -> None:
-        kwargs.setdefault("client_factory", OpenAICompatibleClient)
-        super().__init__(config, *args, **kwargs)
 
 _LOGGER = logging.getLogger(__name__)
 
-_LICENSE_NOTICE = "PoC adapter only. Do not ship a commercial release while this adapter remains in production."
 _ROLE_SEQUENCE = (
     "brief_parser",
     "poi_specialist",
@@ -87,8 +75,6 @@ _ROLE_SEQUENCE = (
     "transport_specialist",
     "itinerary_planner",
 )
-_CHECKPOINT_WORKFLOW = "helloagents_trip_generate"
-_CHECKPOINT_VERSION = 1
 _INITIAL_PARALLEL_ROLES = ("poi_specialist", "weather_specialist")
 _SECONDARY_PARALLEL_ROLES = ("hotel_specialist", "transport_specialist")
 _SPECIALIST_PARALLEL_ROLES = (*_INITIAL_PARALLEL_ROLES, *_SECONDARY_PARALLEL_ROLES)
@@ -106,7 +92,7 @@ _TOOL_RESULT_URL_METADATA_KEYS = {
     "source_urls",
 }
 
-class HelloAgentsResearchPoi(BaseModel):
+class ResearchPoi(BaseModel):
     name: str = Field(min_length=1)
     kind: str = Field(default="attraction")
     area: str = Field(default="")
@@ -132,7 +118,7 @@ class HelloAgentsResearchPoi(BaseModel):
     queue_hint: str = Field(default="")
 
 
-class HelloAgentsTopPoiItem(BaseModel):
+class TopPoiItem(BaseModel):
     rank: int | None = None
     name: str = Field(default="")
     name_cn: str = Field(default="")
@@ -153,23 +139,23 @@ class HelloAgentsTopPoiItem(BaseModel):
     evidence_notes: list[str] = Field(default_factory=list)
 
 
-class HelloAgentsAttractionGrounding(BaseModel):
+class AttractionGrounding(BaseModel):
     candidate_areas: list[str] = Field(default_factory=list)
-    featured_pois: list[HelloAgentsResearchPoi] = Field(default_factory=list)
+    featured_pois: list[ResearchPoi] = Field(default_factory=list)
     sequencing_hints: list[str] = Field(default_factory=list)
     crowd_notes: list[str] = Field(default_factory=list)
     attraction_risks: list[str] = Field(default_factory=list)
 
 
-class HelloAgentsPoiGrounding(BaseModel):
+class PoiGrounding(BaseModel):
     title: str = Field(default="")
     update: str = Field(default="")
     best_season: str = Field(default="")
     recommended_duration: str = Field(default="")
     general_tips: str = Field(default="")
-    top_pois: list[HelloAgentsTopPoiItem] = Field(default_factory=list)
+    top_pois: list[TopPoiItem] = Field(default_factory=list)
     candidate_areas: list[str] = Field(default_factory=list)
-    featured_pois: list[HelloAgentsResearchPoi] = Field(default_factory=list)
+    featured_pois: list[ResearchPoi] = Field(default_factory=list)
     sequencing_hints: list[str] = Field(default_factory=list)
     crowd_notes: list[str] = Field(default_factory=list)
     meal_strategy: list[str] = Field(default_factory=list)
@@ -238,8 +224,8 @@ class HelloAgentsPoiGrounding(BaseModel):
         return deduped[:20]
 
     @classmethod
-    def _dedupe_top_pois(cls, top_pois: list[HelloAgentsTopPoiItem]) -> list[HelloAgentsTopPoiItem]:
-        deduped: list[HelloAgentsTopPoiItem] = []
+    def _dedupe_top_pois(cls, top_pois: list[TopPoiItem]) -> list[TopPoiItem]:
+        deduped: list[TopPoiItem] = []
         seen: set[str] = set()
         for item in top_pois:
             key = cls._poi_name_key(item.name or item.name_cn or item.name_en)
@@ -250,8 +236,8 @@ class HelloAgentsPoiGrounding(BaseModel):
         return deduped[:20]
 
     @classmethod
-    def _dedupe_research_pois(cls, pois: list[HelloAgentsResearchPoi]) -> list[HelloAgentsResearchPoi]:
-        deduped: list[HelloAgentsResearchPoi] = []
+    def _dedupe_research_pois(cls, pois: list[ResearchPoi]) -> list[ResearchPoi]:
+        deduped: list[ResearchPoi] = []
         seen: set[str] = set()
         for poi in pois:
             key = cls._poi_name_key(poi.name)
@@ -302,7 +288,7 @@ class HelloAgentsPoiGrounding(BaseModel):
         return cleaned[:3]
 
     @classmethod
-    def _sanitize_top_poi_sources(cls, item: HelloAgentsTopPoiItem) -> HelloAgentsTopPoiItem:
+    def _sanitize_top_poi_sources(cls, item: TopPoiItem) -> TopPoiItem:
         candidates = [
             *([item.source_url] if str(item.source_url or "").strip() else []),
             *item.source_urls,
@@ -318,13 +304,13 @@ class HelloAgentsPoiGrounding(BaseModel):
         )
 
     @classmethod
-    def _sanitize_research_poi_sources(cls, item: HelloAgentsResearchPoi) -> HelloAgentsResearchPoi:
+    def _sanitize_research_poi_sources(cls, item: ResearchPoi) -> ResearchPoi:
         cleaned = cls._clean_poi_source_urls(item.source_urls)
         return item.model_copy(update={"source_urls": cleaned, "confidence": item.confidence if cleaned else "low"})
 
     @classmethod
-    def _map_top_pois_to_featured_pois(cls, top_pois: list[HelloAgentsTopPoiItem]) -> dict[str, Any]:
-        featured: list[HelloAgentsResearchPoi] = []
+    def _map_top_pois_to_featured_pois(cls, top_pois: list[TopPoiItem]) -> dict[str, Any]:
+        featured: list[ResearchPoi] = []
         candidate_areas: list[str] = []
         for item in top_pois:
             name = str(item.name or item.name_cn or item.name_en or "").strip()
@@ -350,9 +336,9 @@ class HelloAgentsPoiGrounding(BaseModel):
             confidence = confidence_value if confidence_value in {"high", "medium", "low"} else "high" if str(item.xhs_appeal or "").strip() in {"极高", "高", "high"} else "medium"
             if not source_urls:
                 confidence = "low"
-            kind = HelloAgentsPoiGrounding._infer_kind_from_top_poi(item)
+            kind = PoiGrounding._infer_kind_from_top_poi(item)
             featured.append(
-                HelloAgentsResearchPoi(
+                ResearchPoi(
                     name=name,
                     kind=kind,
                     category=category,
@@ -394,7 +380,7 @@ class HelloAgentsPoiGrounding(BaseModel):
         }
 
     @staticmethod
-    def _infer_kind_from_top_poi(item: HelloAgentsTopPoiItem) -> str:
+    def _infer_kind_from_top_poi(item: TopPoiItem) -> str:
         raw_kind = str(item.kind or "").strip().lower().replace("-", "_").replace(" ", "_")
         if raw_kind in {"food", "restaurant", "dining", "snack"}:
             return "food"
@@ -420,7 +406,7 @@ class HelloAgentsPoiGrounding(BaseModel):
         return "attraction"
 
 
-class HelloAgentsDailyForecast(BaseModel):
+class DailyForecast(BaseModel):
     date: date
     forecast_type: str = Field(default="unknown")
     condition: str = Field(default="")
@@ -489,18 +475,18 @@ class HelloAgentsDailyForecast(BaseModel):
         return self
 
 
-class HelloAgentsWeatherGuidance(BaseModel):
+class WeatherGuidance(BaseModel):
     overall_outlook: str = Field(min_length=1)
     source_urls: list[str] = Field(default_factory=list)
     daily_outlook: list[str] = Field(default_factory=list)
-    daily_forecasts: list[HelloAgentsDailyForecast] = Field(default_factory=list)
-    segments: list["HelloAgentsWeatherSegment"] = Field(default_factory=list)
+    daily_forecasts: list[DailyForecast] = Field(default_factory=list)
+    segments: list["WeatherSegment"] = Field(default_factory=list)
     packing_notes: list[str] = Field(default_factory=list)
     timing_guidance: list[str] = Field(default_factory=list)
     weather_risks: list[str] = Field(default_factory=list)
 
 
-class HelloAgentsWeatherSegment(BaseModel):
+class WeatherSegment(BaseModel):
     name: str = Field(default="")
     date_range: str = Field(default="")
     outlook: str = Field(default="")
@@ -510,7 +496,7 @@ class HelloAgentsWeatherSegment(BaseModel):
     risks: list[str] = Field(default_factory=list)
 
 
-class HelloAgentsFoodPoi(BaseModel):
+class FoodPoi(BaseModel):
     name: str = Field(min_length=1)
     area: str = Field(default="")
     cuisine_or_type: str = Field(default="")
@@ -530,19 +516,19 @@ class HelloAgentsFoodPoi(BaseModel):
     source_urls: list[str] = Field(default_factory=list)
 
 
-class HelloAgentsFoodRecommendation(BaseModel):
+class FoodRecommendation(BaseModel):
     candidate_areas: list[str] = Field(default_factory=list)
-    featured_pois: list[HelloAgentsFoodPoi] = Field(default_factory=list)
+    featured_pois: list[FoodPoi] = Field(default_factory=list)
     meal_strategy: list[str] = Field(default_factory=list)
     price_notes: list[str] = Field(default_factory=list)
     review_notes: list[str] = Field(default_factory=list)
     food_risks: list[str] = Field(default_factory=list)
 
 
-HelloAgentsWeatherGuidance.model_rebuild()
+WeatherGuidance.model_rebuild()
 
 
-class HelloAgentsHotelCandidate(HotelEvidence):
+class HotelCandidate(HotelEvidence):
     name: str = Field(min_length=1)
     city: str = Field(default="")
     area: str = Field(default="")
@@ -562,10 +548,10 @@ class HelloAgentsHotelCandidate(HotelEvidence):
     source_page_titles: list[str] = Field(default_factory=list)
 
 
-class HelloAgentsHotelRecommendation(BaseModel):
+class HotelRecommendation(BaseModel):
     recommended_areas: list[str] = Field(default_factory=list)
-    final_recommended_hotel: HelloAgentsHotelCandidate | None = None
-    hotel_candidates: list[HelloAgentsHotelCandidate] = Field(default_factory=list)
+    final_recommended_hotel: HotelCandidate | None = None
+    hotel_candidates: list[HotelCandidate] = Field(default_factory=list)
     stay_strategy: list[str] = Field(default_factory=list)
     budget_notes: list[str] = Field(default_factory=list)
     price_timeliness_notes: list[str] = Field(default_factory=list)
@@ -574,7 +560,7 @@ class HelloAgentsHotelRecommendation(BaseModel):
     hotel_risks: list[str] = Field(default_factory=list)
 
 
-class HelloAgentsTransportOption(BaseModel):
+class TransportOption(BaseModel):
     mode: str = Field(default="")
     route: str = Field(default="")
     duration_hint: str = Field(default="")
@@ -599,10 +585,10 @@ class HelloAgentsTransportOption(BaseModel):
         return False
 
 
-class HelloAgentsTransportGuidance(BaseModel):
+class TransportGuidance(BaseModel):
     legs: list[TransportLeg] = Field(default_factory=list)
     service_candidates: list[TransportServiceCandidate] = Field(default_factory=list)
-    intercity_options: list[HelloAgentsTransportOption] = Field(default_factory=list)
+    intercity_options: list[TransportOption] = Field(default_factory=list)
     arrival_strategy: list[str] = Field(default_factory=list)
     local_mobility_strategy: list[str] = Field(default_factory=list)
     pass_or_ticket_notes: list[str] = Field(default_factory=list)
@@ -695,12 +681,11 @@ class HelloAgentsTransportGuidance(BaseModel):
 
 
 @dataclass(frozen=True)
-class HelloAgentsRoleConfig:
+class PlanningRoleConfig:
     role_name: str
     title: str
     description: str
     prompt_focus: str
-    agent_class_name: str
     system_prompt: str
     prompt_version: str
     temperature: float = 0.2
@@ -712,7 +697,7 @@ class HelloAgentsRoleConfig:
     stream: bool = False
 
 
-class HelloAgentsOrchestrator(StubOrchestrator):
+class PlanningCore(StubOrchestrator):
     def __init__(
         self,
         llm_config: LlmConfig | None,
@@ -727,54 +712,17 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         self._current_xhs_source_enabled = False
         self._current_user_id: str | None = None
         self._current_search_service: SearchServiceConfig | None = None
-        self._resume_checkpoint: dict[str, Any] | None = None
-        self._last_checkpoint: dict[str, Any] | None = None
         self._native_role_citations: dict[str, list[str]] = {}
 
-    def set_resume_checkpoint(self, checkpoint: dict[str, Any] | None) -> None:
-        self._resume_checkpoint = deepcopy(checkpoint) if isinstance(checkpoint, dict) else None
-
-    def get_resume_checkpoint(self) -> dict[str, Any] | None:
-        return deepcopy(self._last_checkpoint) if isinstance(self._last_checkpoint, dict) else None
-
     def plan_trip(self, request: PlanningRequest) -> PlanningResult:
-        self._role_search_gateway_cache = {}
-        self._native_role_citations = {}
-        self._current_xhs_source_enabled = bool(getattr(request, "xhs_source_enabled", False))
-        self._current_user_id = getattr(request, "user_id", None)
-        self._current_search_service = getattr(request, "search_service", None) or SearchServiceConfig.from_env()
-        try:
-            self._log_event("helloagents_plan_trip_started", message="HelloAgents trip planning started.", destination=request.destination)
-            payload, pipeline_notes, agent_runs, poi_grounding, weather, weather_citations, weather_tool_results, grounding_documents, hotel, transport = self._run_helloagents_pipeline(request)
-            result = self._build_result_from_payload(
-                payload,
-                request,
-                pipeline_notes,
-                agent_runs,
-                poi_grounding=poi_grounding,
-                weather_guidance=weather,
-                weather_citations=weather_citations,
-                weather_tool_results=weather_tool_results,
-                grounding_documents=grounding_documents,
-                hotel_recommendation=hotel,
-                transport_guidance=transport,
-            )
-            result.trace.provider = "helloagents-poc"
-            result.trace.license_notice = _LICENSE_NOTICE
-            self._log_event("helloagents_plan_trip_completed", message="HelloAgents trip planning completed.", day_count=len(result.days), risk_count=len(result.risks))
-            return result
-        finally:
-            self._current_xhs_source_enabled = False
-            self._current_user_id = None
-            self._current_search_service = None
+        del request
+        raise RuntimeError("PlanningCore contains business rules only; execute planning through LangGraphOrchestrator")
 
     def summarize_sources(self, destination: str, findings: list[str]) -> SourceSummary:
         return super().summarize_sources(destination, findings)
 
     def draft_export_payload(self, request: PlanningRequest, plan: PlanningResult) -> ExportDraft:
-        draft = super().draft_export_payload(request, plan)
-        draft.sections.append("Agent provider: helloagents-poc")
-        return draft
+        return super().draft_export_payload(request, plan)
 
     def _log_event(self, event: str, *, message: str, level: str = "INFO", **payload: Any) -> None:
         log_job_event(
@@ -786,661 +734,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             **payload,
         )
 
-    def _start_resume_checkpoint(self, request: PlanningRequest, trip_payload: dict[str, Any]) -> None:
-        source = self._resume_checkpoint if isinstance(self._resume_checkpoint, dict) else {}
-        if source and (source.get("workflow") != _CHECKPOINT_WORKFLOW or source.get("trip_id") != request.trip_id):
-            source = {}
-        roles = source.get("roles") if isinstance(source.get("roles"), dict) else {}
-        self._last_checkpoint = {
-            "version": _CHECKPOINT_VERSION,
-            "workflow": _CHECKPOINT_WORKFLOW,
-            "trip_id": request.trip_id,
-            "job_id": self._execution_job_id,
-            "trip_request": trip_payload,
-            "roles": deepcopy(roles),
-            "completed_roles": [role for role in _ROLE_SEQUENCE if isinstance(roles.get(role), dict) and roles[role].get("status") == "completed"],
-            "resumed_from_checkpoint": bool(roles),
-        }
-        if source.get("source_job_id"):
-            self._last_checkpoint["source_job_id"] = source.get("source_job_id")
 
-    def _record_checkpoint_role(self, role_name: str, parsed_payload: BaseModel, **metadata: Any) -> None:
-        if self._last_checkpoint is None:
-            return
-        roles = self._last_checkpoint.setdefault("roles", {})
-        roles[role_name] = {
-            "status": "completed",
-            "parsed": parsed_payload.model_dump(mode="json"),
-            **{key: value for key, value in metadata.items() if value not in (None, "", [], {})},
-        }
-        self._last_checkpoint["completed_roles"] = [role for role in _ROLE_SEQUENCE if isinstance(roles.get(role), dict) and roles[role].get("status") == "completed"]
 
-    def _record_checkpoint_raw_role(self, role_name: str, raw_response: str, **metadata: Any) -> None:
-        if self._last_checkpoint is None or not raw_response:
-            return
-        roles = self._last_checkpoint.setdefault("roles", {})
-        roles[role_name] = {
-            "status": "raw_completed",
-            "raw_response": raw_response,
-            **{key: value for key, value in metadata.items() if value not in (None, "", [], {})},
-        }
 
-    def _load_checkpoint_raw_role(self, role_name: str, *, prompt_version: str, model_name: str) -> str:
-        roles = self._last_checkpoint.get("roles", {}) if isinstance(self._last_checkpoint, dict) else {}
-        entry = roles.get(role_name) if isinstance(roles, dict) else None
-        if not isinstance(entry, dict) or entry.get("status") != "raw_completed":
-            return ""
-        if entry.get("prompt_version") != prompt_version or entry.get("model") != model_name:
-            return ""
-        return str(entry.get("raw_response") or "")
 
-    def _record_checkpoint_failure(self, role_name: str, exc: Exception) -> None:
-        if self._last_checkpoint is None:
-            return
-        message = str(exc).strip() or exc.__class__.__name__
-        role_entry = self._last_checkpoint.get("roles", {}).get(role_name)
-        if (
-            isinstance(role_entry, dict)
-            and role_entry.get("status") == "raw_completed"
-            and message.startswith("行程可执行性校验失败：")
-        ):
-            # Preserve the raw response for audit, but do not replay a model
-            # draft that already failed deterministic execution/quality
-            # checks. A resumed job should rerun only the planner role.
-            role_entry["status"] = "validation_failed"
-            role_entry["validation_error"] = message
-        self._last_checkpoint["failed_role"] = role_name
-        self._last_checkpoint["failure_message"] = message
-        self._last_checkpoint["completed_roles"] = [
-            role
-            for role in _ROLE_SEQUENCE
-            if isinstance(self._last_checkpoint.get("roles", {}).get(role), dict)
-            and self._last_checkpoint["roles"][role].get("status") == "completed"
-        ]
 
-    def _load_checkpoint_model(
-        self,
-        role_name: str,
-        model_type: type[BaseModel],
-        *,
-        prompt_version: str | None = None,
-        model_name: str | None = None,
-    ) -> Any | None:
-        checkpoint = self._last_checkpoint if isinstance(self._last_checkpoint, dict) else None
-        roles = checkpoint.get("roles") if isinstance(checkpoint, dict) and isinstance(checkpoint.get("roles"), dict) else {}
-        entry = roles.get(role_name) if isinstance(roles, dict) else None
-        if isinstance(entry, dict) and (
-            (prompt_version and entry.get("prompt_version") != prompt_version)
-            or (model_name and entry.get("model") != model_name)
-        ):
-            self._log_event(
-                "helloagents_resume_checkpoint_skipped",
-                message="Stored role checkpoint does not match the active prompt or model and will be rerun.",
-                role=role_name,
-                stored_prompt_version=entry.get("prompt_version"),
-                active_prompt_version=prompt_version,
-                stored_model=entry.get("model"),
-                active_model=model_name,
-            )
-            roles.pop(role_name, None)
-            return None
-        if role_name == "poi_specialist" and isinstance(entry, dict) and entry.get("fallback_used"):
-            self._log_event(
-                "helloagents_resume_checkpoint_skipped",
-                message="Stored POI checkpoint came from deterministic fallback; role will be rerun.",
-                level="WARNING",
-                role=role_name,
-                reason=entry.get("fallback_reason"),
-            )
-            roles.pop(role_name, None)
-            checkpoint["completed_roles"] = [
-                role
-                for role in _ROLE_SEQUENCE
-                if isinstance(roles.get(role), dict) and roles[role].get("status") == "completed"
-            ]
-            return None
-        parsed = entry.get("parsed") if isinstance(entry, dict) and entry.get("status") == "completed" else None
-        if not isinstance(parsed, dict):
-            return None
-        try:
-            model = model_type.model_validate(parsed)
-        except ValidationError as exc:
-            self._log_event(
-                "helloagents_resume_checkpoint_invalid",
-                message="Stored role checkpoint could not be validated; role will be rerun.",
-                level="WARNING",
-                role=role_name,
-                error=str(exc),
-            )
-            return None
-        self._log_event(
-            "helloagents_role_resumed_from_checkpoint",
-            message="Reusing completed role output from failed job checkpoint.",
-            role=role_name,
-        )
-        return model
 
-    def _run_helloagents_pipeline(
-        self,
-        request: PlanningRequest,
-    ) -> tuple[
-        Any,
-        list[str],
-        list[AgentRunStep],
-        HelloAgentsPoiGrounding,
-        HelloAgentsWeatherGuidance,
-        list[str],
-        dict[str, Any],
-        list[dict[str, Any]],
-        HelloAgentsHotelRecommendation,
-        HelloAgentsTransportGuidance,
-    ]:
-        if self._llm_config is None:
-            raise RuntimeError("HelloAgents requires configured LLM settings")
-
-        module = import_module("hello_agents")
-        trip_payload = self._build_trip_payload(request)
-        role_configs = self._build_role_configs(request)
-        role_llm_configs = self._build_role_llm_configs()
-        agent_runs: list[AgentRunStep] = []
-        self._start_resume_checkpoint(request, trip_payload)
-
-        brief_role = role_configs["brief_parser"]
-        brief = self._load_checkpoint_model(
-            brief_role.role_name,
-            HelloAgentsBrief,
-            prompt_version=brief_role.prompt_version,
-            model_name=role_llm_configs[brief_role.role_name].model,
-        )
-        if brief is None:
-            self._emit_role_progress(brief_role)
-            try:
-                brief_response = self._run_role(
-                    module=module,
-                    role_config=brief_role,
-                    llm_config=role_llm_configs[brief_role.role_name],
-                    input_payload={"trip_request": trip_payload},
-                )
-                brief = self._parse_structured_response(brief_response, HelloAgentsBrief)
-                self._record_checkpoint_role(
-                    brief_role.role_name,
-                    brief,
-                    prompt_version=brief_role.prompt_version,
-                    model=role_llm_configs[brief_role.role_name].model,
-                )
-            except Exception as exc:
-                self._record_checkpoint_failure(brief_role.role_name, exc)
-                raise
-        agent_runs.append(self._build_agent_run(brief_role, role_llm_configs[brief_role.role_name], self._summarize_brief(brief)))
-
-        poi_payload = self._build_poi_research_payload(request, brief)
-        weather_payload = self._build_weather_research_payload(request, brief)
-
-        poi_role = role_configs["poi_specialist"]
-        weather_role = role_configs["weather_specialist"]
-
-        poi_fallback_reason: str | None = None
-        poi_grounding = self._load_checkpoint_model(
-            poi_role.role_name,
-            HelloAgentsPoiGrounding,
-            prompt_version=poi_role.prompt_version,
-            model_name=role_llm_configs[poi_role.role_name].model,
-        )
-        weather = self._load_checkpoint_model(
-            weather_role.role_name,
-            HelloAgentsWeatherGuidance,
-            prompt_version=weather_role.prompt_version,
-            model_name=role_llm_configs[weather_role.role_name].model,
-        )
-        initial_roles_to_run: dict[str, HelloAgentsRoleConfig] = {}
-        if poi_grounding is None:
-            initial_roles_to_run[poi_role.role_name] = poi_role
-        if weather is None:
-            initial_roles_to_run[weather_role.role_name] = weather_role
-
-        for role in initial_roles_to_run.values():
-            self._emit_role_progress(role)
-
-        if initial_roles_to_run:
-            initial_execution_mode = (
-                "sequential"
-                if self._should_serialize_role_batch_for_endpoint_limit(initial_roles_to_run, role_llm_configs)
-                else "parallel"
-            )
-            self._log_event(
-                "helloagents_initial_specialists_parallel_started",
-                message="Running missing POI discovery and weather roles.",
-                roles=list(initial_roles_to_run.keys()),
-                execution_mode=initial_execution_mode,
-            )
-            futures = self._run_role_batch(
-                module=module,
-                roles_to_run=initial_roles_to_run,
-                role_llm_configs=role_llm_configs,
-                payloads_by_role={
-                    poi_role.role_name: poi_payload,
-                    weather_role.role_name: weather_payload,
-                },
-                thread_name_prefix="helloagents-initial-specialists",
-            )
-
-            if poi_grounding is None:
-                try:
-                    poi_grounding = self._parse_structured_response(futures[poi_role.role_name].result(), HelloAgentsPoiGrounding)
-                    self._record_checkpoint_role(
-                        poi_role.role_name,
-                        poi_grounding,
-                        prompt_version=poi_role.prompt_version,
-                        model=role_llm_configs[poi_role.role_name].model,
-                    )
-                except Exception as exc:
-                    self._record_checkpoint_failure(poi_role.role_name, exc)
-                    self._log_event(
-                        "helloagents_poi_specialist_failed_no_fallback",
-                        message="POI specialist role failed; deterministic fallback is disabled to avoid low-quality itinerary generation.",
-                        level="ERROR",
-                        role=poi_role.role_name,
-                        reason=str(exc).strip() or exc.__class__.__name__,
-                    )
-                    raise
-            if weather is None:
-                try:
-                    weather = self._parse_structured_response(futures[weather_role.role_name].result(), HelloAgentsWeatherGuidance)
-                    weather.source_urls = list(dict.fromkeys([
-                        *[str(item).strip() for item in weather.source_urls if str(item).strip()],
-                        *self._native_role_citations.get(weather_role.role_name, []),
-                    ]))
-                    self._validate_weather_date_coverage(weather, request)
-                    self._record_checkpoint_role(
-                        weather_role.role_name,
-                        weather,
-                        prompt_version=weather_role.prompt_version,
-                        model=role_llm_configs[weather_role.role_name].model,
-                    )
-                except Exception as exc:
-                    self._record_checkpoint_failure(weather_role.role_name, exc)
-                    raise
-        self._validate_weather_date_coverage(weather, request)
-        self._log_event("helloagents_initial_specialists_parallel_completed", message="Initial specialist roles completed.")
-        weather_language_warning = self._weather_guidance_needs_language_repair(weather, request)
-        poi_tool_source = (
-            poi_payload.get("tool_results", {}).get("poi_source")
-            if isinstance(poi_payload.get("tool_results"), dict)
-            else None
-        )
-        self._log_event(
-            "helloagents_poi_specialist_output_snapshot",
-            message="POI specialist structured output snapshot parsed.",
-            role=poi_role.role_name,
-            poi_source=poi_tool_source,
-            fallback_used=bool(poi_fallback_reason),
-            fallback_reason=poi_fallback_reason,
-            featured_poi_count=len(poi_grounding.featured_pois),
-            candidate_area_count=len(poi_grounding.candidate_areas),
-            snapshot=self._build_poi_output_snapshot(poi_grounding),
-        )
-
-        poi_collection = self._build_poi_collection(poi_grounding)
-        hotel_payload = self._build_hotel_research_payload(request, brief, poi_collection=poi_collection)
-        transport_payload = self._build_transport_research_payload(request, brief, poi_collection=poi_collection)
-
-        hotel_role = role_configs["hotel_specialist"]
-        transport_role = role_configs["transport_specialist"]
-
-        hotel = self._load_checkpoint_model(
-            hotel_role.role_name,
-            HelloAgentsHotelRecommendation,
-            prompt_version=hotel_role.prompt_version,
-            model_name=role_llm_configs[hotel_role.role_name].model,
-        )
-        transport = self._load_checkpoint_model(
-            transport_role.role_name,
-            HelloAgentsTransportGuidance,
-            prompt_version=transport_role.prompt_version,
-            model_name=role_llm_configs[transport_role.role_name].model,
-        )
-        secondary_roles_to_run: dict[str, HelloAgentsRoleConfig] = {}
-        if hotel is None:
-            secondary_roles_to_run[hotel_role.role_name] = hotel_role
-        if transport is None:
-            secondary_roles_to_run[transport_role.role_name] = transport_role
-
-        for role in secondary_roles_to_run.values():
-            self._emit_role_progress(role)
-
-        if secondary_roles_to_run:
-            secondary_execution_mode = (
-                "sequential"
-                if self._should_serialize_role_batch_for_endpoint_limit(secondary_roles_to_run, role_llm_configs)
-                else "parallel"
-            )
-            self._log_event(
-                "helloagents_secondary_specialists_parallel_started",
-                message="Running missing stay and transport roles after POI collection.",
-                roles=list(secondary_roles_to_run.keys()),
-                poi_count=len(poi_collection.get("pois", [])),
-                area_count=len(poi_collection.get("areas", [])),
-                execution_mode=secondary_execution_mode,
-            )
-            futures = self._run_role_batch(
-                module=module,
-                roles_to_run=secondary_roles_to_run,
-                role_llm_configs=role_llm_configs,
-                payloads_by_role={
-                    hotel_role.role_name: hotel_payload,
-                    transport_role.role_name: transport_payload,
-                },
-                thread_name_prefix="helloagents-secondary-specialists",
-            )
-            if hotel is None:
-                try:
-                    hotel = self._parse_structured_response(futures[hotel_role.role_name].result(), HelloAgentsHotelRecommendation)
-                    self._record_checkpoint_role(
-                        hotel_role.role_name,
-                        hotel,
-                        prompt_version=hotel_role.prompt_version,
-                        model=role_llm_configs[hotel_role.role_name].model,
-                    )
-                except Exception as exc:
-                    self._record_checkpoint_failure(hotel_role.role_name, exc)
-                    raise
-            if transport is None:
-                try:
-                    transport = self._parse_structured_response(futures[transport_role.role_name].result(), HelloAgentsTransportGuidance)
-                    self._record_checkpoint_role(
-                        transport_role.role_name,
-                        transport,
-                        prompt_version=transport_role.prompt_version,
-                        model=role_llm_configs[transport_role.role_name].model,
-                    )
-                except Exception as exc:
-                    self._record_checkpoint_failure(transport_role.role_name, exc)
-                    raise
-        self._log_event("helloagents_secondary_specialists_parallel_completed", message="Secondary specialist roles completed.")
-        transport = self._sanitize_transport_service_candidates(transport, request)
-        from travelmind_api.services.trip_image_enrichment import _resolve_tavily_image_search_config
-        evidence_search_config = _resolve_tavily_image_search_config(request.search_service)
-        weather = verify_daily_forecast_pages(weather, evidence_search_config)
-        transport = verify_transport_candidate_pages(transport, evidence_search_config)
-        hotel = verify_hotel_pages(hotel, evidence_search_config)
-        poi_grounding = verify_poi_open_days(
-            poi_grounding,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            search_config=evidence_search_config,
-        )
-        # Rebuild after extraction so the planner sees explicit closed-day evidence.
-        poi_collection = self._build_poi_collection(poi_grounding)
-        hotel = self._sanitize_hotel_recommendation(
-            hotel,
-            destination=request.destination,
-            accommodation_preference=request.accommodation_preference,
-        )
-
-        poi_tool_results = poi_payload.get("tool_results") if isinstance(poi_payload.get("tool_results"), dict) else {}
-        weather_tool_results = weather_payload.get("tool_results") if isinstance(weather_payload.get("tool_results"), dict) else {}
-        hotel_tool_results = hotel_payload.get("tool_results") if isinstance(hotel_payload.get("tool_results"), dict) else {}
-        transport_tool_results = transport_payload.get("tool_results") if isinstance(transport_payload.get("tool_results"), dict) else {}
-        poi_citations = list(dict.fromkeys([
-            *self._extract_urls_from_search_result(poi_tool_results),
-            *self._native_role_citations.get(poi_role.role_name, []),
-        ]))
-        weather_citations = list(dict.fromkeys([
-            *[str(item).strip() for item in weather_tool_results.get("citations", []) if str(item).strip()],
-            *self._native_role_citations.get(weather_role.role_name, []),
-            *[str(item).strip() for item in (weather.source_urls if weather else []) if str(item).strip()],
-            *[
-                str(url).strip()
-                for forecast in (weather.daily_forecasts if weather else [])
-                for url in forecast.source_urls
-                if str(url).strip()
-            ],
-        ]))
-        hotel_citations = list(dict.fromkeys([
-            *self._extract_urls_from_search_result(hotel_tool_results),
-            *self._native_role_citations.get(hotel_role.role_name, []),
-        ]))
-        transport_citations = list(dict.fromkeys([
-            *[str(item).strip() for item in transport_tool_results.get("citations", []) if str(item).strip()],
-            *self._native_role_citations.get(transport_role.role_name, []),
-        ]))
-        if not transport_citations:
-            transport_citations = self._extract_urls_from_search_result(transport_tool_results)
-        grounding_documents = self._merge_grounding_documents(
-            poi_tool_results.get("grounding_docs"),
-            weather_tool_results.get("grounding_docs"),
-            hotel_tool_results.get("grounding_docs"),
-            transport_tool_results.get("grounding_docs"),
-        )
-
-        poi_extra_notes = self._build_poi_debug_notes(poi_payload, poi_grounding, poi_tool_results)
-        if poi_fallback_reason:
-            poi_extra_notes.insert(0, f"POI specialist fallback used after role failure: {poi_fallback_reason}")
-        agent_runs.append(
-            self._build_agent_run(
-                poi_role,
-                role_llm_configs[poi_role.role_name],
-                self._summarize_pois(poi_grounding),
-                extra_notes=poi_extra_notes,
-                extra_citations=poi_citations,
-            )
-        )
-        agent_runs.append(
-            self._build_agent_run(
-                weather_role,
-                role_llm_configs[weather_role.role_name],
-                self._summarize_weather(weather),
-                extra_citations=weather_citations,
-            )
-        )
-        agent_runs.append(
-            self._build_agent_run(
-                hotel_role,
-                role_llm_configs[hotel_role.role_name],
-                self._summarize_hotels(hotel, destination=request.destination),
-                extra_citations=hotel_citations,
-            )
-        )
-        agent_runs.append(
-            self._build_agent_run(
-                transport_role,
-                role_llm_configs[transport_role.role_name],
-                self._summarize_transport(transport),
-                extra_citations=transport_citations,
-            )
-        )
-        planner_role = role_configs["itinerary_planner"]
-        final_payload = self._load_checkpoint_model(
-            planner_role.role_name,
-            LlmPlanningPayload,
-            prompt_version=planner_role.prompt_version,
-            model_name=role_llm_configs[planner_role.role_name].model,
-        )
-        planner_response = ""
-        if final_payload is None:
-            self._emit_role_progress(planner_role)
-            planner_poi_collection = self._build_planner_poi_collection_payload(poi_collection)
-            planner_weather = self._build_planner_weather_payload(weather, expected_days=max(1, (request.end_date - request.start_date).days + 1))
-            planner_hotels = self._build_planner_hotels_payload(
-                hotel,
-                destination=request.destination,
-                accommodation_preference=request.accommodation_preference,
-            )
-            planner_transport = self._build_planner_transport_payload(transport)
-            planner_payload = {
-                "trip_request": trip_payload,
-                "planning_brief": brief.model_dump(mode="json"),
-                "poi_collection": planner_poi_collection,
-                "poi_scheduling_policy": {
-                    "closed_dates_are_date_specific": True,
-                    "open_dates_remain_eligible": True,
-                    "selection_remains_planner_discretion": True,
-                    "do_not_treat_one_closed_date_as_global_exclusion": True,
-                },
-                "weather": planner_weather,
-                "hotels": planner_hotels,
-                "transport": planner_transport,
-                "output_schema": PLANNING_OUTPUT_SCHEMA,
-            }
-            self._log_event(
-                "helloagents_planner_payload_ready",
-                message="Planner payload assembled.",
-                payload_keys=["trip_request", "planning_brief", "poi_collection", "weather", "hotels", "transport", "output_schema"],
-                planner_payload_bytes=len(json.dumps(planner_payload, ensure_ascii=False)),
-            )
-            try:
-                planner_response = self._load_checkpoint_raw_role(
-                    planner_role.role_name,
-                    prompt_version=planner_role.prompt_version,
-                    model_name=role_llm_configs[planner_role.role_name].model,
-                )
-                if not planner_response:
-                    planner_response = self._run_role(
-                        module=module,
-                        role_config=planner_role,
-                        llm_config=role_llm_configs[planner_role.role_name],
-                        input_payload=planner_payload,
-                    )
-                self._log_event("helloagents_planner_response_received", message="Planner response received.", response_chars=len(planner_response))
-                final_payload = parse_planning_response(planner_response)
-                final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request, transport)
-                final_payload = self._normalize_departure_waiting_blocks(final_payload, transport)
-                try:
-                    self._validate_execution_constraints(
-                        final_payload,
-                        request,
-                        transport,
-                        available_poi_count=len(poi_collection.get("pois", [])),
-                        poi_grounding=poi_grounding,
-                    )
-                except ValueError as validation_exc:
-                    if not str(validation_exc).startswith("行程可执行性校验失败："):
-                        raise
-                    repair_payload = {
-                        **planner_payload,
-                        "previous_itinerary": final_payload.model_dump(mode="json"),
-                        "validation_errors": [
-                            value.strip()
-                            for value in str(validation_exc).removeprefix("行程可执行性校验失败：").split("；")
-                            if value.strip()
-                        ],
-                        "repair_instruction": (
-                            "上一个完整行程未通过后端硬校验。只修正 validation_errors 指出的冲突，"
-                            "保持已核验班次、住宿和无冲突日程不变，并重新输出一份完整 JSON 行程。"
-                            "如果冲突是某个 POI 在特定日期闭馆，只禁止该 POI 出现在这个日期；"
-                            "其他开放日期仍按路线、兴趣、节奏和优先级正常参与选择，不得把单日闭馆解释为全程排除。"
-                        ),
-                    }
-                    self._log_event(
-                        "helloagents_planner_validation_repair_started",
-                        message="Planner draft failed deterministic checks; requesting one bounded repair.",
-                        validation_error=str(validation_exc),
-                    )
-                    planner_response = self._run_role(
-                        module=module,
-                        role_config=planner_role,
-                        llm_config=role_llm_configs[planner_role.role_name],
-                        input_payload=repair_payload,
-                    )
-                    final_payload = parse_planning_response(planner_response)
-                    final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request, transport)
-                    final_payload = self._normalize_departure_waiting_blocks(final_payload, transport)
-                    self._validate_execution_constraints(
-                        final_payload,
-                        request,
-                        transport,
-                        available_poi_count=len(poi_collection.get("pois", [])),
-                        poi_grounding=poi_grounding,
-                    )
-                self._record_checkpoint_raw_role(
-                    planner_role.role_name,
-                    planner_response,
-                    prompt_version=planner_role.prompt_version,
-                    model=role_llm_configs[planner_role.role_name].model,
-                )
-                self._record_checkpoint_role(
-                    planner_role.role_name,
-                    final_payload,
-                    prompt_version=planner_role.prompt_version,
-                    model=role_llm_configs[planner_role.role_name].model,
-                )
-            except Exception as exc:
-                self._record_checkpoint_failure(planner_role.role_name, exc)
-                raise
-        final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request, transport)
-        final_payload = self._normalize_departure_waiting_blocks(final_payload, transport)
-        self._validate_execution_constraints(
-            final_payload,
-            request,
-            transport,
-            available_poi_count=len(poi_collection.get("pois", [])),
-            poi_grounding=poi_grounding,
-        )
-        self._log_event("helloagents_planner_response_parsed", message="Planner response parsed into structured payload.", day_count=len(final_payload.days))
-        repair_needed = planning_payload_needs_language_repair(final_payload, request)
-        agent_runs.append(self._build_agent_run(planner_role, role_llm_configs[planner_role.role_name], self._summarize_itinerary(final_payload.summary, final_payload.days, final_payload.risks)))
-
-        role_model_summary = ", ".join(f"{role_name}={role_llm_configs[role_name].model}" for role_name in _ROLE_SEQUENCE)
-        role_endpoint_summary = ", ".join(
-            f"{role_name}@{self._describe_endpoint(role_llm_configs[role_name])}" for role_name in _ROLE_SEQUENCE
-        )
-        pipeline_notes = [
-            "Generated the itinerary with HelloAgents business-specialist multi-agent pipeline.",
-            "Roles executed: brief_parser -> (poi_specialist || weather_specialist) -> poi_collection -> (hotel_specialist || transport_specialist) -> itinerary_planner.",
-            f"Role models: {role_model_summary}.",
-            f"Role endpoints: {role_endpoint_summary}.",
-            "POI collection deterministically normalizes the unified POI specialist output before stay and route planning.",
-            "Weather guidance is currently planning-oriented city or area segment output, not a live forecast feed.",
-            "Hotel recommendations use POI cluster distribution plus configured search grounding, not a dedicated booking inventory API.",
-            "Transport guidance uses POI cluster distribution and the configured search provider to ground transfer, fare, and sequencing assumptions before final planning.",
-            "Executed through the HelloAgents PoC adapter boundary with third-party-only role execution.",
-        ]
-        expected_weather_dates = {
-            request.start_date + timedelta(days=offset)
-            for offset in range(max(1, (request.end_date - request.start_date).days + 1))
-        }
-        dated_weather = {
-            forecast.date: tuple(dict.fromkeys(str(url).strip() for url in forecast.source_urls if str(url).strip()))
-            for forecast in weather.daily_forecasts
-        }
-        if any(not dated_weather.get(day) for day in expected_weather_dates):
-            pipeline_notes.append("天气已按日期生成，但至少一天没有独立逐日来源；该日仅保留城市/月份参考并标注风险。")
-        elif (
-            len(set(dated_weather.values())) == 1
-            and len(expected_weather_dates) > 1
-            and any(forecast.forecast_type != "short_range" for forecast in weather.daily_forecasts)
-        ):
-            pipeline_notes.append("天气各日共用同一组非短期来源，不能视为最新逐日预报；出发前应刷新。")
-        if any(forecast.evidence_status == "referenced" for forecast in weather.daily_forecasts):
-            pipeline_notes.append("至少一天逐日天气保留了日期与来源，但正文抓取或解析未完成；已作为参考展示并提示出发前刷新。")
-        if any(forecast.evidence_status == "conflicted" for forecast in weather.daily_forecasts):
-            pipeline_notes.append("至少一天逐日天气与来源正文存在字段冲突；仅清空冲突字段，其余字段继续按证据等级展示。")
-        if any(not str(forecast.precipitation_probability or "").strip() for forecast in weather.daily_forecasts):
-            pipeline_notes.append("至少一天来源未提供可核验的降水概率；已留空该字段，不根据天气现象推算百分比。")
-        if poi_fallback_reason:
-            pipeline_notes.append(
-                "POI specialist role failed or timed out; continued with deterministic POI grounding from trip context."
-            )
-        if weather_language_warning:
-            warning = "Weather specialist output did not fully match the requested locale; returning the original specialist output without localization repair."
-            self._log_event(
-                "helloagents_weather_language_warning",
-                message=warning,
-                level="WARNING",
-                role="weather_specialist",
-            )
-            pipeline_notes.append(warning)
-        if repair_needed:
-            warning = "Itinerary planner output did not fully match the requested locale; returning the original planner output without localization repair."
-            self._log_event(
-                "helloagents_planner_language_warning",
-                message=warning,
-                level="WARNING",
-                role="itinerary_planner",
-                response_chars=len(planner_response),
-            )
-            pipeline_notes.append(warning)
-        return final_payload, pipeline_notes, agent_runs, poi_grounding, weather, weather_citations, weather_tool_results, grounding_documents, hotel, transport
 
     def _build_trip_payload(self, request: PlanningRequest) -> dict[str, Any]:
         return build_trip_request_payload(request)
@@ -1449,7 +748,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         assert self._llm_config is not None
         return {role_name: self._llm_config.config_for_role(role_name) for role_name in _ROLE_SEQUENCE}
 
-    def _build_role_configs(self, request: PlanningRequest) -> dict[str, HelloAgentsRoleConfig]:
+    def _build_role_configs(self, request: PlanningRequest) -> dict[str, PlanningRoleConfig]:
         planner_messages = build_planning_messages(request)
         planner_system_prompt = next((message["content"] for message in planner_messages if message.get("role") == "system"), "")
         brief_prompt = build_brief_parser_prompt()
@@ -1464,24 +763,22 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return {
             # brief_parser:
             # 中文注释：先把原始 trip request 压缩成结构化 brief，避免后续角色直接面对松散输入。
-            "brief_parser": HelloAgentsRoleConfig(
+            "brief_parser": PlanningRoleConfig(
                 role_name="brief_parser",
                 title="Brief parser",
                 description="Compresses the trip input into a compact planning brief.",
                 prompt_focus="Extract constraints and preferences into JSON only. Do not draft the itinerary.",
-                agent_class_name="SimpleAgent",
                 system_prompt=f"{brief_prompt.system_prompt} {language_instruction}{locale_clause}",
                 prompt_version=brief_prompt.version,
                 progress_percent=24,
             ),
             # poi_specialist:
             # 中文注释：统一负责景点、街区、自然风景与非餐饮体验类 POI grounding，不生成日程顺序。
-            "poi_specialist": HelloAgentsRoleConfig(
+            "poi_specialist": PlanningRoleConfig(
                 role_name="poi_specialist",
                 title="POI specialist",
                 description="Discovers core attraction, district, scenery, and non-food experience POIs with compact evidence.",
                 prompt_focus="Use trip_request, planning_brief, poi_context, and native search when the configured POI model supports it; do not call external tools, plan the final itinerary, include food/cafe stops, or pass long evidence.",
-                agent_class_name="SimpleAgent",
                 system_prompt=f"{poi_prompt.system_prompt} {language_instruction}{locale_clause}",
                 prompt_version=poi_prompt.version,
                 progress_percent=44,
@@ -1493,12 +790,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             ),
             # weather_specialist:
             # 中文注释：负责天气 planning guidance，强调季节性和可执行建议，不伪装成实时预报。
-            "weather_specialist": HelloAgentsRoleConfig(
+            "weather_specialist": PlanningRoleConfig(
                 role_name="weather_specialist",
                 title="Weather specialist",
                 description="Produces city or area weather guidance, timing advice, and packing notes.",
                 prompt_focus="Use Grok's native search context when this role runs on Grok; otherwise use MCP tool results. Return weather guidance JSON only.",
-                agent_class_name="SimpleAgent",
                 system_prompt=f"{weather_prompt.system_prompt} {language_instruction}{locale_clause}",
                 prompt_version=weather_prompt.version,
                 progress_percent=52,
@@ -1506,12 +802,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             ),
             # hotel_specialist:
             # 中文注释：负责住宿区域与候选酒店建议，目标是降低转场成本并匹配预算。
-            "hotel_specialist": HelloAgentsRoleConfig(
+            "hotel_specialist": PlanningRoleConfig(
                 role_name="hotel_specialist",
                 title="Hotel specialist",
                 description="Recommends stay areas and hotels based on POI clusters, budget, and pace.",
                 prompt_focus="Use poi_collection, stay preference, budget, candidate hotels, and Grok native search context when this role runs on Grok; otherwise use MCP tool results. Return hotel recommendation JSON only.",
-                agent_class_name="SimpleAgent",
                 system_prompt=f"{hotel_prompt.system_prompt} {language_instruction}{locale_clause}",
                 prompt_version=hotel_prompt.version,
                 progress_percent=62,
@@ -1520,12 +815,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             ),
             # transport_specialist:
             # 中文注释：负责交通票价、换乘约束和到离程策略，把交通价格与时效从最终 planner 里拆出来单独 grounding。
-            "transport_specialist": HelloAgentsRoleConfig(
+            "transport_specialist": PlanningRoleConfig(
                 role_name="transport_specialist",
                 title="Transport specialist",
                 description="Builds grounded transport options, pricing constraints, and transfer strategy.",
                 prompt_focus="Use poi_collection, the trip brief, and Grok native search context when this role runs on Grok; otherwise use MCP tool results. Return transport guidance JSON only, including grounded cost estimates.",
-                agent_class_name="SimpleAgent",
                 system_prompt=f"{transport_prompt.system_prompt} {language_instruction}{locale_clause}",
                 prompt_version=transport_prompt.version,
                 progress_percent=68,
@@ -1534,12 +828,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             ),
             # itinerary_planner:
             # 中文注释：最终总控角色，复用主 planner prompt，再消费四份结构化中间结果生成最终 itinerary。
-            "itinerary_planner": HelloAgentsRoleConfig(
+            "itinerary_planner": PlanningRoleConfig(
                 role_name="itinerary_planner",
                 title="Itinerary planner",
                 description="Combines the POI collection, weather, hotel strategy, and transport constraints into the final itinerary draft.",
                 prompt_focus="Return the final itinerary JSON using the brief, poi_collection, weather guidance, hotel strategy, and transport guidance.",
-                agent_class_name="SimpleAgent",
                 system_prompt=f"{planner_prompt.system_prompt} {language_instruction}{locale_clause}",
                 prompt_version=planner_prompt.version,
                 progress_percent=82,
@@ -1547,7 +840,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             ),
         }
 
-    def _emit_role_progress(self, role_config: HelloAgentsRoleConfig) -> None:
+    def _emit_role_progress(self, role_config: PlanningRoleConfig) -> None:
         if self._progress_callback is None:
             return
         self._progress_callback(role_config.role_name, role_config.title, role_config.description, role_config.progress_percent)
@@ -1557,7 +850,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _build_agent_run(
         self,
-        role_config: HelloAgentsRoleConfig,
+        role_config: PlanningRoleConfig,
         llm_config: LlmEndpointConfig,
         output_summary: str,
         *,
@@ -1584,66 +877,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             citations=citations,
         )
 
-    def _run_role_batch(
-        self,
-        *,
-        module: Any,
-        roles_to_run: dict[str, HelloAgentsRoleConfig],
-        role_llm_configs: dict[str, LlmEndpointConfig],
-        payloads_by_role: dict[str, dict[str, Any]],
-        thread_name_prefix: str,
-    ) -> dict[str, Future]:
-        if self._should_serialize_role_batch_for_endpoint_limit(roles_to_run, role_llm_configs):
-            self._log_event(
-                "helloagents_specialist_batch_serialized",
-                message="Serializing streaming search roles that share the same upstream endpoint to reduce 429 rate-limit failures.",
-                roles=list(roles_to_run.keys()),
-                thread_name_prefix=thread_name_prefix,
-            )
-            futures: dict[str, Future] = {}
-            for role_name, role_config in roles_to_run.items():
-                future: Future = Future()
-                try:
-                    future.set_result(
-                        self._run_role(
-                            module=module,
-                            role_config=role_config,
-                            llm_config=role_llm_configs[role_name],
-                            input_payload=payloads_by_role[role_name],
-                        )
-                    )
-                except Exception as exc:
-                    future.set_exception(exc)
-                futures[role_name] = future
-            return futures
 
-        with ThreadPoolExecutor(max_workers=max(1, len(roles_to_run)), thread_name_prefix=thread_name_prefix) as executor:
-            return {
-                role_name: executor.submit(
-                    self._run_role,
-                    module=module,
-                    role_config=role_config,
-                    llm_config=role_llm_configs[role_name],
-                    input_payload=payloads_by_role[role_name],
-                )
-                for role_name, role_config in roles_to_run.items()
-            }
-
-    def _should_serialize_role_batch_for_endpoint_limit(
-        self,
-        roles_to_run: dict[str, HelloAgentsRoleConfig],
-        role_llm_configs: dict[str, LlmEndpointConfig],
-    ) -> bool:
-        if len(roles_to_run) < 2:
-            return False
-        shared_streaming_search_roles: dict[tuple[str, str, str], list[str]] = {}
-        for role_name, role_config in roles_to_run.items():
-            llm_config = role_llm_configs[role_name]
-            if not role_config.stream or not self._role_config_uses_search_capable_grok(role_name, llm_config):
-                continue
-            identity = self._rate_limit_identity(llm_config)
-            shared_streaming_search_roles.setdefault(identity, []).append(role_name)
-        return any(len(role_names) > 1 for role_names in shared_streaming_search_roles.values())
 
     def _has_native_search(self, role_name: str, llm_config: LlmEndpointConfig | None) -> bool:
         """Return true only for a model whose endpoint is known to provide built-in web search."""
@@ -1662,117 +896,6 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         api_key = str(getattr(llm_config, "api_key", "") or "").strip()
         return protocol, base_url, api_key
 
-    def _run_role(
-        self,
-        *,
-        module: Any,
-        role_config: HelloAgentsRoleConfig,
-        llm_config: LlmEndpointConfig,
-        input_payload: dict[str, Any],
-    ) -> str:
-        agent_class = getattr(module, role_config.agent_class_name, None)
-        if agent_class is None:
-            raise RuntimeError(f"hello_agents does not expose {role_config.agent_class_name}")
-
-        effective_llm_config = llm_config
-        if role_config.timeout_cap_seconds is not None:
-            capped_timeout = min(float(llm_config.timeout_seconds), float(role_config.timeout_cap_seconds))
-            effective_llm_config = llm_config.model_copy(update={"timeout_seconds": capped_timeout})
-        llm = HelloAgentsCompatibleLLM(
-            effective_llm_config,
-            temperature=role_config.temperature,
-            max_tokens=role_config.max_tokens,
-            retry_attempts=role_config.retry_attempts,
-            min_timeout_seconds=role_config.min_timeout_seconds,
-            stream=role_config.stream,
-        )
-        enriched_payload = self._augment_payload_with_tool_results(role_config.role_name, input_payload)
-        prompt_payload = self._build_role_prompt_payload(enriched_payload, role_name=role_config.role_name)
-        prompt_payload_json = json.dumps(prompt_payload, ensure_ascii=False)
-        if role_config.role_name == "poi_specialist":
-            self._log_event(
-                "helloagents_poi_specialist_input_snapshot",
-                message="POI specialist input snapshot prepared.",
-                role=role_config.role_name,
-                snapshot=self._build_poi_input_snapshot(enriched_payload),
-            )
-        agent_config = None
-        config_class = getattr(module, "Config", None)
-        if config_class is not None:
-            try:
-                # Disable third-party trace files/console output. Our own job logs already
-                # capture the execution trace, and the upstream package's finalize() path
-                # prints emoji markers that can crash under GBK terminals on Windows.
-                agent_config = config_class(trace_enabled=False)
-            except Exception:
-                agent_config = None
-        agent = agent_class(
-            name=role_config.role_name,
-            llm=llm,
-            system_prompt=role_config.system_prompt,
-            config=agent_config,
-            enable_tool_calling=False,
-        )
-        started = time.perf_counter()
-        self._log_event(
-            "helloagents_role_started",
-            message=f"Role {role_config.role_name} started.",
-            role=role_config.role_name,
-            endpoint=self._describe_endpoint(effective_llm_config),
-            model=effective_llm_config.model,
-            payload_keys=sorted(prompt_payload.keys()),
-            payload_bytes=len(prompt_payload_json.encode("utf-8")),
-            max_tokens=role_config.max_tokens,
-            retry_attempts=role_config.retry_attempts,
-            timeout_seconds=llm.kwargs["timeout"],
-            stream=llm.kwargs["stream"],
-        )
-        try:
-            response = agent.run(prompt_payload_json)
-        except Exception as exc:
-            endpoint = self._describe_endpoint(effective_llm_config)
-            elapsed_seconds = max(time.perf_counter() - started, 0.0)
-            raw_reason = str(exc).strip() or exc.__class__.__name__
-            if isinstance(exc, httpx.TimeoutException) or "timed out" in raw_reason.lower() or "timeout" in raw_reason.lower():
-                reason = f"timed out after {elapsed_seconds:.1f}s"
-            else:
-                reason = raw_reason
-            self._log_event(
-                "helloagents_role_failed",
-                message=f"Role {role_config.role_name} failed.",
-                level="ERROR",
-                role=role_config.role_name,
-                endpoint=endpoint,
-                model=effective_llm_config.model,
-                elapsed_seconds=round(elapsed_seconds, 3),
-                reason=reason,
-            )
-            raise RuntimeError(
-                f"HelloAgents role '{role_config.role_name}' failed via third-party endpoint {endpoint} after {elapsed_seconds:.1f}s: {reason}"
-            ) from exc
-
-        content = self._coerce_text(response)
-        native_citations = [
-            str(item).strip()
-            for item in (getattr(llm, "last_citations", []) or [])
-            if str(item).strip()
-        ]
-        self._native_role_citations[role_config.role_name] = list(dict.fromkeys(native_citations))
-        if not content.strip():
-            endpoint = self._describe_endpoint(llm_config)
-            raise RuntimeError(
-                f"HelloAgents role '{role_config.role_name}' returned an empty response from third-party endpoint {endpoint}"
-            )
-        self._log_event(
-            "helloagents_role_completed",
-            message=f"Role {role_config.role_name} completed.",
-            role=role_config.role_name,
-            endpoint=self._describe_endpoint(effective_llm_config),
-            model=effective_llm_config.model,
-            elapsed_seconds=round(max(time.perf_counter() - started, 0.0), 3),
-            response_chars=len(content),
-        )
-        return content
 
     def _build_poi_input_snapshot(self, payload: dict[str, Any]) -> dict[str, Any]:
         trip_request = payload.get("trip_request") if isinstance(payload.get("trip_request"), dict) else {}
@@ -1869,7 +992,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             )
         return compact_docs
 
-    def _build_poi_output_snapshot(self, grounding: HelloAgentsPoiGrounding) -> dict[str, Any]:
+    def _build_poi_output_snapshot(self, grounding: PoiGrounding) -> dict[str, Any]:
         return {
             "candidate_areas": [str(item).strip() for item in grounding.candidate_areas if str(item).strip()],
             "featured_pois": [
@@ -1912,7 +1035,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _build_poi_debug_notes(
         self,
         input_payload: dict[str, Any],
-        grounding: HelloAgentsPoiGrounding,
+        grounding: PoiGrounding,
         tool_results: dict[str, Any],
     ) -> list[str]:
         input_snapshot = self._build_poi_input_snapshot(input_payload)
@@ -2137,7 +1260,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             return re.sub(r"https?://[^\s<>'\"\]]+", "[link omitted]", value)
         return value
 
-    def _build_poi_research_payload(self, request: PlanningRequest, brief: HelloAgentsBrief) -> dict[str, Any]:
+    def _build_poi_research_payload(self, request: PlanningRequest, brief: PlanningBrief) -> dict[str, Any]:
         return {
             "trip_request": self._build_trip_payload(request),
             "planning_brief": brief.model_dump(mode="json"),
@@ -2192,7 +1315,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         ]
         return " ".join(part for part in task_parts if part).strip()
 
-    def _build_attraction_research_payload(self, request: PlanningRequest, brief: HelloAgentsBrief) -> dict[str, Any]:
+    def _build_attraction_research_payload(self, request: PlanningRequest, brief: PlanningBrief) -> dict[str, Any]:
         queries = [*brief.interests, *brief.must_have, request.destination, "local highlights"]
         return {
             "trip_request": self._build_trip_payload(request),
@@ -2200,7 +1323,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "candidate_attractions": self._collect_poi_candidates(request, queries, limit=8),
         }
 
-    def _build_food_research_payload(self, request: PlanningRequest, brief: HelloAgentsBrief) -> dict[str, Any]:
+    def _build_food_research_payload(self, request: PlanningRequest, brief: PlanningBrief) -> dict[str, Any]:
         food_interests = [
             item
             for item in [*brief.interests, *brief.must_have, *request.interests]
@@ -2227,7 +1350,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "candidate_food_pois": self._collect_food_candidates(request, queries, limit=8),
         }
 
-    def _build_weather_research_payload(self, request: PlanningRequest, brief: HelloAgentsBrief) -> dict[str, Any]:
+    def _build_weather_research_payload(self, request: PlanningRequest, brief: PlanningBrief) -> dict[str, Any]:
         trip_days = max(1, (request.end_date - request.start_date).days + 1)
         expected_dates = [
             (request.start_date + timedelta(days=offset)).isoformat()
@@ -2261,7 +1384,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             },
         }
 
-    def _build_hotel_research_payload(self, request: PlanningRequest, brief: HelloAgentsBrief, *, poi_collection: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _build_hotel_research_payload(self, request: PlanningRequest, brief: PlanningBrief, *, poi_collection: dict[str, Any] | None = None) -> dict[str, Any]:
         poi_areas = self._top_poi_area_names(poi_collection or {}, limit=4)
         queries = [
             brief.accommodation,
@@ -2278,7 +1401,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "candidate_hotels": self._collect_hotel_candidates(request, queries, limit=6),
         }
 
-    def _build_transport_research_payload(self, request: PlanningRequest, brief: HelloAgentsBrief, *, poi_collection: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _build_transport_research_payload(self, request: PlanningRequest, brief: PlanningBrief, *, poi_collection: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
             "trip_request": self._build_trip_payload(request),
             "planning_brief": brief.model_dump(mode="json"),
@@ -2313,7 +1436,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             },
         }
 
-    def _build_planner_attractions_payload(self, attraction: HelloAgentsAttractionGrounding) -> dict[str, Any]:
+    def _build_planner_attractions_payload(self, attraction: AttractionGrounding) -> dict[str, Any]:
         return {
             "candidate_areas": [str(area).strip() for area in attraction.candidate_areas if str(area).strip()][:4],
             "featured_pois": [
@@ -2385,7 +1508,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     closed_dates.append(value)
         return closed_dates[:16]
 
-    def _build_planner_weather_payload(self, weather: HelloAgentsWeatherGuidance, *, expected_days: int) -> dict[str, Any]:
+    def _build_planner_weather_payload(self, weather: WeatherGuidance, *, expected_days: int) -> dict[str, Any]:
         return {
             "overall_outlook": self._truncate_planner_text(weather.overall_outlook, 180),
             "source_urls": [str(url).strip() for url in weather.source_urls if str(url).strip()][:5],
@@ -2432,7 +1555,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _build_planner_hotels_payload(
         self,
-        hotel: HelloAgentsHotelRecommendation,
+        hotel: HotelRecommendation,
         *,
         destination: str = "",
         accommodation_preference: str = "",
@@ -2488,11 +1611,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _sanitize_hotel_recommendation(
         self,
-        hotel: HelloAgentsHotelRecommendation | None,
+        hotel: HotelRecommendation | None,
         *,
         destination: str,
         accommodation_preference: str = "",
-    ) -> HelloAgentsHotelRecommendation | None:
+    ) -> HotelRecommendation | None:
         if hotel is None:
             return None
         hotel = hotel.model_copy(deep=True)
@@ -2571,14 +1694,14 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return re.sub(r"(?i)poi", "景点", text)
 
     @classmethod
-    def _soften_hotel_candidate_claims(cls, candidate: HelloAgentsHotelCandidate) -> None:
+    def _soften_hotel_candidate_claims(cls, candidate: HotelCandidate) -> None:
         for field in ("reason", "review_summary", "preference_match"):
             setattr(candidate, field, cls._soften_hotel_text(getattr(candidate, field)))
 
     @classmethod
     def _hotel_matches_accommodation_preference(
         cls,
-        candidate: HelloAgentsHotelCandidate,
+        candidate: HotelCandidate,
         accommodation_preference: str,
     ) -> bool:
         preference = str(accommodation_preference or "").casefold()
@@ -2594,7 +1717,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         )
         return not (explicitly_requests_hotel and not allows_alternative_lodging and is_alternative_lodging)
 
-    def _hotel_candidate_to_planner_dict(self, candidate: HelloAgentsHotelCandidate) -> dict[str, Any]:
+    def _hotel_candidate_to_planner_dict(self, candidate: HotelCandidate) -> dict[str, Any]:
         return {
             **{key: getattr(candidate, key) for key in HotelEvidence.model_fields},
             "name": candidate.name,
@@ -2618,7 +1741,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _build_stay_recommendation(
         self,
-        hotel: HelloAgentsHotelRecommendation | None,
+        hotel: HotelRecommendation | None,
         *,
         destination: str = "",
         accommodation_preference: str = "",
@@ -2692,7 +1815,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             return None
         return stay
 
-    def _hotel_candidate_to_stay_candidate(self, candidate: HelloAgentsHotelCandidate) -> StayHotelCandidate:
+    def _hotel_candidate_to_stay_candidate(self, candidate: HotelCandidate) -> StayHotelCandidate:
         display_aliases = {
             "moderate": "中等价位",
             "budget": "经济型",
@@ -2756,7 +1879,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return any(token in path for token in ("/search", "/searchresult", "/list/", "/city/"))
 
     @classmethod
-    def _hotel_conflicting_source_urls(cls, candidates: list[HelloAgentsHotelCandidate | None]) -> set[str]:
+    def _hotel_conflicting_source_urls(cls, candidates: list[HotelCandidate | None]) -> set[str]:
         url_names: dict[str, set[str]] = {}
         for candidate in candidates:
             if candidate is None:
@@ -2773,7 +1896,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     @classmethod
     def _is_verified_hotel_candidate(
         cls,
-        candidate: HelloAgentsHotelCandidate | None,
+        candidate: HotelCandidate | None,
         *,
         destination: str = "",
         blocked_urls: set[str] | None = None,
@@ -2797,7 +1920,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return any(url in candidate.verified_source_urls or cls._hotel_entity_matches_source(candidate.name, title or url)
                    for url, title in usable)
 
-    def _build_planner_transport_payload(self, transport: HelloAgentsTransportGuidance) -> dict[str, Any]:
+    def _build_planner_transport_payload(self, transport: TransportGuidance) -> dict[str, Any]:
         minimum_departure_buffer = max(
             transport.minimum_departure_buffer_minutes,
             transport.departure_transfer_minutes + transport.station_buffer_minutes + transport.luggage_buffer_minutes,
@@ -2854,10 +1977,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "tea",
         }
 
-    def _is_food_poi(self, poi: HelloAgentsResearchPoi | HelloAgentsFoodPoi | None) -> bool:
+    def _is_food_poi(self, poi: ResearchPoi | FoodPoi | None) -> bool:
         if poi is None:
             return False
-        if isinstance(poi, HelloAgentsFoodPoi):
+        if isinstance(poi, FoodPoi):
             return True
         if self._is_food_poi_kind_value(getattr(poi, "kind", "")):
             return True
@@ -2873,7 +1996,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         cuisine = str(poi.get("cuisine_or_type") or "").strip()
         return self._looks_like_food_interest(f"{category} {cuisine}")
 
-    def _normalize_poi_collection_kind(self, poi: HelloAgentsResearchPoi) -> str:
+    def _normalize_poi_collection_kind(self, poi: ResearchPoi) -> str:
         raw_kind = str(poi.kind or "").strip().lower().replace("-", "_").replace(" ", "_")
         if self._is_food_poi(poi):
             if raw_kind in {"market", "night_market", "cafe", "coffee"}:
@@ -2885,7 +2008,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _build_poi_collection(
         self,
-        poi_grounding: HelloAgentsPoiGrounding,
+        poi_grounding: PoiGrounding,
     ) -> dict[str, Any]:
         pois: list[dict[str, Any]] = []
         area_stats: dict[str, dict[str, Any]] = {}
@@ -3064,9 +2187,9 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             try:
                 available_tools = client.available_tools()
             except Exception as exc:
-                _LOGGER.warning("HelloAgents role=%s provider=%s unable_to_list_tools=%s", role_name, config.provider, exc)
+                _LOGGER.warning("PlanningCore role=%s provider=%s unable_to_list_tools=%s", role_name, config.provider, exc)
                 continue
-            _LOGGER.debug("HelloAgents role=%s provider=%s available_tools=%s", role_name, config.provider, sorted(available_tools))
+            _LOGGER.debug("PlanningCore role=%s provider=%s available_tools=%s", role_name, config.provider, sorted(available_tools))
             resolved_clients.append((client, available_tools))
         self._role_search_gateway_cache[role_name] = resolved_clients
         return resolved_clients
@@ -3177,7 +2300,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 tool_results = self._collect_role_tool_results(role_name, client, available_tools, input_payload)
             except Exception as exc:
                 last_error = exc
-                _LOGGER.warning("HelloAgents role=%s provider=%s tool_collection_failed=%s", role_name, self._search_provider(client), exc)
+                _LOGGER.warning("PlanningCore role=%s provider=%s tool_collection_failed=%s", role_name, self._search_provider(client), exc)
                 continue
             if tool_results:
                 if self._search_provider(client) != self._search_provider(clients[0][0]):
@@ -3197,7 +2320,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 elapsed_seconds=round(max(time.perf_counter() - started, 0.0), 3),
                 error=str(last_error).strip() or last_error.__class__.__name__,
             )
-            _LOGGER.warning("HelloAgents role=%s tool_collection_failed=%s", role_name, last_error)
+            _LOGGER.warning("PlanningCore role=%s tool_collection_failed=%s", role_name, last_error)
             return input_payload
         self._log_event(
             "helloagents_tool_collection_completed",
@@ -3365,7 +2488,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         try:
             search_result = self._call_search_like_tool(client, search_tool, search_query, 10, role_name="poi_specialist")
         except Exception as exc:
-            _LOGGER.warning("HelloAgents role=poi_specialist tool=%s failed=%s", search_tool, exc)
+            _LOGGER.warning("PlanningCore role=poi_specialist tool=%s failed=%s", search_tool, exc)
             return {}
         payload: dict[str, Any] = {
             "search_tool": search_tool,
@@ -3384,7 +2507,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         try:
             grounding_docs = self._collect_grounding_docs(query, destination, interests=interests, social_context="poi")
         except Exception as exc:
-            _LOGGER.warning("HelloAgents role=poi_specialist grounding_failed=%s", exc)
+            _LOGGER.warning("PlanningCore role=poi_specialist grounding_failed=%s", exc)
         else:
             if grounding_docs:
                 payload["grounding_docs"] = grounding_docs
@@ -3419,7 +2542,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             try:
                 search_result = self._call_search_like_tool(client, search_tool, search_query, 5, role_name="weather_specialist")
             except Exception as exc:
-                _LOGGER.warning("HelloAgents role=weather_specialist tool=%s failed=%s", search_tool, exc)
+                _LOGGER.warning("PlanningCore role=weather_specialist tool=%s failed=%s", search_tool, exc)
                 return {}
             return {
                 "research_tool": search_tool,
@@ -3432,7 +2555,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             try:
                 research_result = self._call_research_like_tool(client, research_tool, available_tools, research_instructions, role_name="weather_specialist")
             except Exception as exc:
-                _LOGGER.warning("HelloAgents role=weather_specialist tool=%s failed=%s", research_tool, exc)
+                _LOGGER.warning("PlanningCore role=weather_specialist tool=%s failed=%s", research_tool, exc)
             else:
                 citations = self._extract_urls_from_search_result(research_result)
                 payload = {
@@ -3446,7 +2569,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                         try:
                             fallback_result = self._call_search_like_tool(client, fallback_tool, search_query, 5, role_name="weather_specialist")
                         except Exception as exc:
-                            _LOGGER.warning("HelloAgents role=weather_specialist tool=%s failed=%s", fallback_tool, exc)
+                            _LOGGER.warning("PlanningCore role=weather_specialist tool=%s failed=%s", fallback_tool, exc)
                         else:
                             payload["fallback_search_tool"] = fallback_tool
                             payload["fallback_search"] = fallback_result
@@ -3459,7 +2582,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         try:
             answer_result = self._call_search_like_tool(client, answer_tool, search_query, 5, role_name="weather_specialist")
         except Exception as exc:
-            _LOGGER.warning("HelloAgents role=weather_specialist tool=%s failed=%s", answer_tool, exc)
+            _LOGGER.warning("PlanningCore role=weather_specialist tool=%s failed=%s", answer_tool, exc)
             return {}
         return {"research_tool": answer_tool, "answer": answer_result, "citations": self._extract_urls_from_search_result(answer_result)}
 
@@ -3492,7 +2615,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             try:
                 search_result = self._call_search_like_tool(client, search_tool, query, 6, role_name="hotel_specialist")
             except Exception as exc:
-                _LOGGER.warning("HelloAgents role=hotel_specialist tool=%s failed=%s", search_tool, exc)
+                _LOGGER.warning("PlanningCore role=hotel_specialist tool=%s failed=%s", search_tool, exc)
                 return {}
             payload["search_tool"] = search_tool
             payload["search_query"] = query
@@ -3508,7 +2631,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         try:
             grounding_docs = self._collect_grounding_docs(query, destination, interests=[], social_context="hotel")
         except Exception as exc:
-            _LOGGER.warning("HelloAgents role=hotel_specialist grounding_failed=%s", exc)
+            _LOGGER.warning("PlanningCore role=hotel_specialist grounding_failed=%s", exc)
         else:
             if grounding_docs:
                 payload["grounding_docs"] = grounding_docs
@@ -3520,7 +2643,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 try:
                     payload["crawl"] = self._call_crawling_tool(client, crawl_tool, crawl_urls, role_name="hotel_specialist")
                 except Exception as exc:
-                    _LOGGER.warning("HelloAgents role=hotel_specialist tool=%s failed=%s", crawl_tool, exc)
+                    _LOGGER.warning("PlanningCore role=hotel_specialist tool=%s failed=%s", crawl_tool, exc)
                     return payload
                 payload["crawl_urls"] = crawl_urls
                 return payload
@@ -3558,7 +2681,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         try:
             search_result = self._call_search_like_tool(client, search_tool, query, 6, role_name="transport_specialist")
         except Exception as exc:
-            _LOGGER.warning("HelloAgents role=transport_specialist tool=%s failed=%s", search_tool, exc)
+            _LOGGER.warning("PlanningCore role=transport_specialist tool=%s failed=%s", search_tool, exc)
             return {}
 
         payload["search_tool"] = search_tool
@@ -3577,7 +2700,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             try:
                 crawl_result = self._call_crawling_tool(client, fetch_tool, crawl_urls, role_name="transport_specialist")
             except Exception as exc:
-                _LOGGER.warning("HelloAgents role=transport_specialist tool=%s failed=%s", fetch_tool, exc)
+                _LOGGER.warning("PlanningCore role=transport_specialist tool=%s failed=%s", fetch_tool, exc)
             else:
                 payload["crawl"] = crawl_result
                 citations = list(dict.fromkeys([*citations, *crawl_urls, *self._extract_urls_from_search_result(crawl_result)]))
@@ -3591,7 +2714,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 xhs_source_enabled=False,
             )
         except Exception as exc:
-            _LOGGER.warning("HelloAgents role=transport_specialist grounding_failed=%s", exc)
+            _LOGGER.warning("PlanningCore role=transport_specialist grounding_failed=%s", exc)
         else:
             if grounding_docs:
                 payload["grounding_docs"] = grounding_docs
@@ -3765,7 +2888,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         return {key: value for key, value in snapshot.items() if value not in (None, "", [], {})}
 
     def _call_mcp_tool(self, client: ConfiguredSearchGateway, tool_name: str, arguments: dict[str, Any], *, role_name: str) -> dict[str, Any]:
-        _LOGGER.debug("HelloAgents role=%s tool=%s args=%s", role_name, tool_name, json.dumps(arguments, ensure_ascii=False))
+        _LOGGER.debug("PlanningCore role=%s tool=%s args=%s", role_name, tool_name, json.dumps(arguments, ensure_ascii=False))
         argument_bytes = len(json.dumps(arguments, ensure_ascii=False, default=str).encode("utf-8"))
         self._log_event(
             "helloagents_mcp_tool_request",
@@ -3941,7 +3064,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             "price_hint": detail.price_level or "unknown",
         }
 
-    def _build_weather_segments(self, request: PlanningRequest, brief: HelloAgentsBrief) -> list[dict[str, Any]]:
+    def _build_weather_segments(self, request: PlanningRequest, brief: PlanningBrief) -> list[dict[str, Any]]:
         raw_values = [request.destination, brief.destination]
         names: list[str] = []
         for raw_value in raw_values:
@@ -4032,7 +3155,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             return content
         return str(response)
 
-    def _weather_guidance_needs_language_repair(self, weather: HelloAgentsWeatherGuidance, request: PlanningRequest) -> bool:
+    def _weather_guidance_needs_language_repair(self, weather: WeatherGuidance, request: PlanningRequest) -> bool:
         locale = infer_output_locale(request)
         texts = [
             weather.overall_outlook,
@@ -4068,7 +3191,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             return has_english and not has_cjk
         return has_cjk and not has_english
 
-    def _validate_weather_date_coverage(self, weather: HelloAgentsWeatherGuidance, request: PlanningRequest) -> None:
+    def _validate_weather_date_coverage(self, weather: WeatherGuidance, request: PlanningRequest) -> None:
         if request.planning_generated_at is None:
             return
         expected_dates = {
@@ -4086,10 +3209,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _repair_weather_guidance_language(
         self,
-        weather: HelloAgentsWeatherGuidance,
+        weather: WeatherGuidance,
         request: PlanningRequest,
         llm_client: OpenAICompatibleClient,
-    ) -> HelloAgentsWeatherGuidance:
+    ) -> WeatherGuidance:
         locale = infer_output_locale(request)
         target_language = "Simplified Chinese" if locale == "zh-CN" else "English"
         messages = [
@@ -4131,7 +3254,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             },
         ]
         content = llm_client.create_chat_completion(messages=messages, temperature=0.1, max_tokens=1200)
-        return self._parse_structured_response(content, HelloAgentsWeatherGuidance)
+        return self._parse_structured_response(content, WeatherGuidance)
 
     def _parse_structured_response(self, content: str, model_cls: type[BaseModel]) -> BaseModel:
         payloads = self._extract_json_payloads(content)
@@ -4152,13 +3275,13 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             }
             if len(signatures) > 1:
                 _LOGGER.warning(
-                    "HelloAgents response contained %d conflicting valid JSON objects for %s; using the last complete object as the model's final revision.",
+                    "PlanningCore response contained %d conflicting valid JSON objects for %s; using the last complete object as the model's final revision.",
                     len(valid_payloads),
                     model_cls.__name__,
                 )
             else:
                 _LOGGER.warning(
-                    "HelloAgents response contained %d duplicate JSON objects for %s; using the last object.",
+                    "PlanningCore response contained %d duplicate JSON objects for %s; using the last object.",
                     len(valid_payloads),
                     model_cls.__name__,
                 )
@@ -4170,7 +3293,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _extract_json_payloads(self, content: str) -> list[dict[str, Any]]:
         candidate = str(content).strip()
         if not candidate:
-            raise ValueError("HelloAgents response was empty")
+            raise ValueError("PlanningCore response was empty")
 
         if candidate.startswith("```"):
             candidate = self._strip_code_fences(candidate)
@@ -4192,7 +3315,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             cursor = start + end
 
         if not payloads:
-            raise ValueError("HelloAgents response did not contain a valid JSON object")
+            raise ValueError("PlanningCore response did not contain a valid JSON object")
         return payloads
 
     def _strip_code_fences(self, content: str) -> str:
@@ -4203,13 +3326,13 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             lines = lines[:-1]
         return "\n".join(lines).strip()
 
-    def _summarize_brief(self, brief: HelloAgentsBrief) -> str:
+    def _summarize_brief(self, brief: PlanningBrief) -> str:
         must_have = ", ".join(brief.must_have[:3]) if brief.must_have else "none"
         budget_mode = "hard budget" if brief.budget_is_hard_constraint else "flexible budget"
         priority = brief.budget_priority or "balanced"
         return f"{brief.destination}; {brief.trip_days} days; pace {brief.pace or 'n/a'}; {budget_mode}; priority {priority}; must-have {must_have}."
 
-    def _summarize_attractions(self, attractions: HelloAgentsAttractionGrounding) -> str:
+    def _summarize_attractions(self, attractions: AttractionGrounding) -> str:
         booking_ready = sum(1 for poi in attractions.featured_pois if poi.booking_info is not None or poi.visit_requirements is not None)
         return (
             f"{len(attractions.candidate_areas)} areas, "
@@ -4218,7 +3341,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             f"{len(attractions.sequencing_hints)} sequencing hints."
         )
 
-    def _summarize_pois(self, grounding: HelloAgentsPoiGrounding) -> str:
+    def _summarize_pois(self, grounding: PoiGrounding) -> str:
         food_count = sum(1 for poi in grounding.featured_pois if self._is_food_poi(poi))
         attraction_count = max(len(grounding.featured_pois) - food_count, 0)
         sourced_count = sum(
@@ -4246,13 +3369,13 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             f"{len(grounding.sequencing_hints)} sequencing hints."
         )
 
-    def _summarize_weather(self, weather: HelloAgentsWeatherGuidance) -> str:
+    def _summarize_weather(self, weather: WeatherGuidance) -> str:
         return (
             f"{self._truncate_planner_text(weather.overall_outlook, 120)} "
             f"{len(weather.segments)} weather segments, {len(weather.packing_notes)} packing notes, {len(weather.weather_risks)} weather risks."
         )
 
-    def _summarize_foods(self, foods: HelloAgentsFoodRecommendation) -> str:
+    def _summarize_foods(self, foods: FoodRecommendation) -> str:
         reliable_prices = sum(1 for poi in foods.featured_pois if poi.price_hint and poi.price_hint.strip().lower() != "unknown")
         reliable_reviews = sum(1 for poi in foods.featured_pois if poi.review_score and poi.review_score.strip().lower() != "unknown")
         return (
@@ -4262,7 +3385,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             f"{reliable_reviews} with review signals."
         )
 
-    def _summarize_hotels(self, hotels: HelloAgentsHotelRecommendation, *, destination: str = "") -> str:
+    def _summarize_hotels(self, hotels: HotelRecommendation, *, destination: str = "") -> str:
         all_candidates = [*hotels.hotel_candidates, *([hotels.final_recommended_hotel] if hotels.final_recommended_hotel else [])]
         conflicting_urls = self._hotel_conflicting_source_urls(all_candidates)
         verified_candidates = [
@@ -4287,7 +3410,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             f"{len(hotels.review_notes)} review notes."
         )
 
-    def _summarize_transport(self, transport: HelloAgentsTransportGuidance) -> str:
+    def _summarize_transport(self, transport: TransportGuidance) -> str:
         verified = sum(row.evidence_status == "verified" for row in transport.service_candidates)
         referenced = sum(row.evidence_status == "referenced" for row in transport.service_candidates)
         return (
@@ -4300,9 +3423,9 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _sanitize_transport_service_candidates(
         self,
-        transport: HelloAgentsTransportGuidance,
+        transport: TransportGuidance,
         request: PlanningRequest,
-    ) -> HelloAgentsTransportGuidance:
+    ) -> TransportGuidance:
         expected = {
             "outbound": (request.origin, request.destination, request.start_date),
             "return": (request.destination, request.origin, request.end_date),
@@ -4356,7 +3479,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         self,
         payload: LlmPlanningPayload,
         request: PlanningRequest,
-        transport: HelloAgentsTransportGuidance | None = None,
+        transport: TransportGuidance | None = None,
     ) -> LlmPlanningPayload:
         normalized = payload.model_copy(deep=True)
         candidates = [
@@ -4512,7 +3635,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _normalize_departure_waiting_blocks(
         self,
         payload: LlmPlanningPayload,
-        transport: HelloAgentsTransportGuidance,
+        transport: TransportGuidance,
     ) -> LlmPlanningPayload:
         """Cap station waiting without reducing the total return safety buffer."""
         normalized = payload.model_copy(deep=True)
@@ -4616,10 +3739,10 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         self,
         payload: LlmPlanningPayload,
         request: PlanningRequest,
-        transport: HelloAgentsTransportGuidance,
+        transport: TransportGuidance,
         *,
         available_poi_count: int = 0,
-        poi_grounding: HelloAgentsPoiGrounding | None = None,
+        poi_grounding: PoiGrounding | None = None,
     ) -> None:
         errors: list[str] = validate_timeline(payload, request, transport)
         generated_at = request.planning_generated_at
@@ -4833,7 +3956,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
 
     def _pick_weather_outlook_for_date(
         self,
-        weather_guidance: HelloAgentsWeatherGuidance,
+        weather_guidance: WeatherGuidance,
         *,
         target_date: date,
         trip_start_date: date,
@@ -4904,7 +4027,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _resolve_weather_temperature_hint(
         self,
         selected_outlook: str,
-        weather_guidance: HelloAgentsWeatherGuidance,
+        weather_guidance: WeatherGuidance,
         weather_tool_results: dict[str, Any] | None,
     ) -> str:
         # Once daily evidence has been normalized, never reintroduce a
@@ -4927,7 +4050,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             return snippet
         return ""
 
-    def _format_weather_segment_note(self, segment: HelloAgentsWeatherSegment) -> str:
+    def _format_weather_segment_note(self, segment: WeatherSegment) -> str:
         parts = [
             segment.outlook,
             segment.temperature_range,
@@ -4945,14 +4068,14 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _find_matching_featured_poi(
         self,
         item_name: str,
-        poi_grounding: HelloAgentsPoiGrounding | HelloAgentsAttractionGrounding | None,
-    ) -> HelloAgentsResearchPoi | None:
+        poi_grounding: PoiGrounding | AttractionGrounding | None,
+    ) -> ResearchPoi | None:
         if poi_grounding is None:
             return None
         target = self._normalize_match_key(item_name)
         if not target:
             return None
-        best_match: HelloAgentsResearchPoi | None = None
+        best_match: ResearchPoi | None = None
         best_score = -1
         for poi in poi_grounding.featured_pois:
             if self._is_food_poi(poi):
@@ -4975,7 +4098,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _attach_nearby_poi_suggestions(
         self,
         planned_days: list[PlannedDay],
-        poi_grounding: HelloAgentsPoiGrounding | HelloAgentsAttractionGrounding | None,
+        poi_grounding: PoiGrounding | AttractionGrounding | None,
     ) -> None:
         """Expose researched nearby POIs without forcing them into the timeline."""
         if poi_grounding is None:
@@ -5005,7 +4128,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 core_key = self._normalize_match_key(core.name)
                 core_area = self._normalize_match_key(core.area)
                 core_sources = set(core.source_urls)
-                ranked: list[tuple[int, int, bool, HelloAgentsResearchPoi]] = []
+                ranked: list[tuple[int, int, bool, ResearchPoi]] = []
                 for candidate in candidates:
                     candidate_key = self._normalize_match_key(candidate.name)
                     if not candidate_key or candidate_key in assigned:
@@ -5044,14 +4167,14 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _find_matching_featured_food(
         self,
         item_name: str,
-        poi_grounding: HelloAgentsPoiGrounding | HelloAgentsFoodRecommendation | None,
-    ) -> HelloAgentsResearchPoi | HelloAgentsFoodPoi | None:
+        poi_grounding: PoiGrounding | FoodRecommendation | None,
+    ) -> ResearchPoi | FoodPoi | None:
         if poi_grounding is None:
             return None
         target = self._normalize_match_key(item_name)
         if not target:
             return None
-        best_match: HelloAgentsResearchPoi | HelloAgentsFoodPoi | None = None
+        best_match: ResearchPoi | FoodPoi | None = None
         best_score = -1
         for poi in poi_grounding.featured_pois:
             if not self._is_food_poi(poi):
@@ -5094,7 +4217,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             )
         )
 
-    def _build_attraction_booking_info(self, poi: HelloAgentsResearchPoi | None) -> BookingInfo | None:
+    def _build_attraction_booking_info(self, poi: ResearchPoi | None) -> BookingInfo | None:
         if poi is None:
             return None
         base = (
@@ -5138,7 +4261,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             return None
         return base
 
-    def _build_food_booking_info(self, food_poi: HelloAgentsResearchPoi | HelloAgentsFoodPoi | None) -> BookingInfo | None:
+    def _build_food_booking_info(self, food_poi: ResearchPoi | FoodPoi | None) -> BookingInfo | None:
         if food_poi is None:
             return None
         notes = [
@@ -5304,7 +4427,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _build_transport_booking_summary(
         self,
         payload_summary: Any,
-        transport_guidance: HelloAgentsTransportGuidance | None,
+        transport_guidance: TransportGuidance | None,
     ) -> TransportBookingSummary | None:
         payload_transport = (
             TransportBookingSummary.model_validate(payload_summary.model_dump(mode="json"))
@@ -5415,7 +4538,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
     def _build_day_weather(
         self,
         day_index: int,
-        weather_guidance: HelloAgentsWeatherGuidance | None,
+        weather_guidance: WeatherGuidance | None,
         citations: list[str] | None,
         weather_tool_results: dict[str, Any] | None = None,
         *,
@@ -5529,13 +4652,13 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         pipeline_notes: list[str],
         agent_runs: list[AgentRunStep],
         *,
-        poi_grounding: HelloAgentsPoiGrounding | None = None,
-        weather_guidance: HelloAgentsWeatherGuidance | None = None,
+        poi_grounding: PoiGrounding | None = None,
+        weather_guidance: WeatherGuidance | None = None,
         weather_citations: list[str] | None = None,
         weather_tool_results: dict[str, Any] | None = None,
         grounding_documents: list[dict[str, Any]] | None = None,
-        hotel_recommendation: HelloAgentsHotelRecommendation | None = None,
-        transport_guidance: HelloAgentsTransportGuidance | None = None,
+        hotel_recommendation: HotelRecommendation | None = None,
+        transport_guidance: TransportGuidance | None = None,
     ) -> PlanningResult:
         expected_days = max(1, (request.end_date - request.start_date).days + 1)
         if len(payload.days) != expected_days:
@@ -5582,11 +4705,11 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     matched_poi.visit_requirements
                     if matched_poi is not None
                     else matched_food.visit_requirements
-                    if isinstance(matched_food, HelloAgentsResearchPoi)
+                    if isinstance(matched_food, ResearchPoi)
                     else None
                 )
                 route_ref = None
-                note = item.note.strip() or ("\u6765\u81ea\u5df2\u914d\u7f6e\u7684 HelloAgents \u884c\u7a0b\u8349\u7a3f\u3002" if zh_output else "Generated from the configured HelloAgents itinerary draft.")
+                note = item.note.strip() or ("\u6765\u81ea\u5df2\u914d\u7f6e\u7684 LangGraph \u884c\u7a0b\u8349\u7a3f\u3002" if zh_output else "Generated from the configured LangGraph itinerary draft.")
                 if maps_grounded and previous_stop is not None and current_stop is not None:
                     route_estimate = self._maps_provider.estimate_route(previous_stop, current_stop, route_mode)
                     matrix_cell = matrix_lookup[(previous_stop.stop_id, current_stop.stop_id)]
@@ -5690,18 +4813,18 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 transport_guidance,
             ),
             trace=AgentTrace(
-                provider="helloagents-poc",
+                provider="planning-core",
                 workflow_id=generate_workflow_id(),
                 notes=[
                     *pipeline_notes,
-                    f"Default HelloAgents endpoint: {host}.",
+                    f"Default model endpoint: {host}.",
                     (
-                        f"Enriched the HelloAgents planner output with structured POI and route references via {self._maps_provider.provider_name}."
+                        f"Enriched the planner output with structured POI and route references via {self._maps_provider.provider_name}."
                         if maps_grounded
                         else "未配置真实地图服务，已关闭占位坐标、距离和路线分钟数。"
                     ),
                 ],
-                license_notice=_LICENSE_NOTICE,
+                license_notice=None,
                 agent_runs=agent_runs,
                 grounding_documents=list(grounding_documents or []),
                 transport_guidance=transport_guidance.model_dump(mode="json") if transport_guidance is not None else None,
@@ -5771,7 +4894,7 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                     or (requirements and str(requirements.reservation_policy or "").casefold() == "required")
                 )
                 if not required or (
-                    booking and HelloAgentsOrchestrator._looks_like_specific_booking_entry(booking.official_booking_url)
+                    booking and PlanningCore._looks_like_specific_booking_entry(booking.official_booking_url)
                 ):
                     continue
                 downgraded_names.append(item.name)

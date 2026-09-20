@@ -5,7 +5,7 @@ import pytest
 from PIL import Image
 
 from travelmind_api.agents.base import *
-from travelmind_api.agents.helloagents import HelloAgentsDailyForecast, HelloAgentsHotelCandidate, HelloAgentsHotelRecommendation, HelloAgentsOrchestrator, HelloAgentsPoiGrounding, HelloAgentsResearchPoi, HelloAgentsTransportGuidance, HelloAgentsWeatherGuidance
+from travelmind_api.agents.planning_core import DailyForecast, HotelCandidate, HotelRecommendation, PlanningCore, PoiGrounding, ResearchPoi, TransportGuidance, WeatherGuidance
 from travelmind_api.services.budgeting import enrich_plan_with_budget
 from travelmind_api.services.execution_validation import validate_timeline
 from travelmind_api.services.hotel_evidence import verify_hotel_pages
@@ -64,12 +64,12 @@ def test_cross_day_clocks_survive_and_overlap_is_rejected():
     ]}
     payload = parse_planning_response(json.dumps(raw))
     assert payload.days[0].items[0].end_time == "06:00"
-    assert any("时间重叠" in error for error in validate_timeline(payload, request(), HelloAgentsTransportGuidance()))
+    assert any("时间重叠" in error for error in validate_timeline(payload, request(), TransportGuidance()))
 
 
 def test_poi_open_day_evidence_marks_non_holiday_monday_closed(monkeypatch):
-    poi = HelloAgentsResearchPoi(name="故宫博物院", source_urls=["https://www.dpm.org.cn/Visit.html"])
-    grounding = HelloAgentsPoiGrounding(featured_pois=[poi])
+    poi = ResearchPoi(name="故宫博物院", source_urls=["https://www.dpm.org.cn/Visit.html"])
+    grounding = PoiGrounding(featured_pois=[poi])
     monkeypatch.setattr(
         "travelmind_api.services.poi_operation_evidence.ConfiguredSearchGateway.call_operation",
         lambda *_args, **_kwargs: {"results": [{
@@ -86,8 +86,8 @@ def test_poi_open_day_evidence_marks_non_holiday_monday_closed(monkeypatch):
 
 
 def test_poi_open_day_evidence_respects_known_public_holiday_exception(monkeypatch):
-    poi = HelloAgentsResearchPoi(name="示例博物馆", source_urls=["https://museum.example.org/visit"])
-    grounding = HelloAgentsPoiGrounding(featured_pois=[poi])
+    poi = ResearchPoi(name="示例博物馆", source_urls=["https://museum.example.org/visit"])
+    grounding = PoiGrounding(featured_pois=[poi])
     monkeypatch.setattr(
         "travelmind_api.services.poi_operation_evidence.ConfiguredSearchGateway.call_operation",
         lambda *_args, **_kwargs: {"results": [{
@@ -104,8 +104,8 @@ def test_poi_open_day_evidence_respects_known_public_holiday_exception(monkeypat
 
 
 def test_poi_open_day_evidence_discovers_official_page_when_guides_are_insufficient(monkeypatch):
-    poi = HelloAgentsResearchPoi(name="恭王府", source_urls=["https://travel.qunar.com/p-cs299914-beijing-jingdian"])
-    grounding = HelloAgentsPoiGrounding(featured_pois=[poi])
+    poi = ResearchPoi(name="恭王府", source_urls=["https://travel.qunar.com/p-cs299914-beijing-jingdian"])
+    grounding = PoiGrounding(featured_pois=[poi])
 
     def fake_call(_self, operation, arguments):
         if operation == "search":
@@ -133,12 +133,12 @@ def test_poi_open_day_evidence_discovers_official_page_when_guides_are_insuffici
 
 
 def test_planner_poi_collection_keeps_open_day_evidence():
-    poi = HelloAgentsResearchPoi(
+    poi = ResearchPoi(
         name="故宫博物院",
         evidence_notes=["开放日来源复核：2026-09-21（周一）落在周一闭馆规则内。"],
         caveats=["须提前预约。"],
     )
-    collection = HelloAgentsOrchestrator(None)._build_poi_collection(HelloAgentsPoiGrounding(featured_pois=[poi]))
+    collection = PlanningCore(None)._build_poi_collection(PoiGrounding(featured_pois=[poi]))
     assert "周一闭馆" in collection["pois"][0]["evidence_notes"][0]
     assert collection["pois"][0]["caveats"] == ["须提前预约。"]
 
@@ -209,9 +209,9 @@ def test_intercity_transport_item_is_not_counted_twice():
 
 
 def test_hotel_simplified_traditional_and_independent_evidence(monkeypatch):
-    candidate = HelloAgentsHotelCandidate(name="上海隐居繁华武康路公馆", city="上海", address="武康路100号",
+    candidate = HotelCandidate(name="上海隐居繁华武康路公馆", city="上海", address="武康路100号",
                                           source_urls=["https://hotel.example.org/shanghai/detail"])
-    hotel = HelloAgentsHotelRecommendation(final_recommended_hotel=candidate)
+    hotel = HotelRecommendation(final_recommended_hotel=candidate)
     monkeypatch.setattr("travelmind_api.services.hotel_evidence.ConfiguredSearchGateway.call_operation",
                         lambda *args: {"results": [{"url": candidate.source_urls[0],
                             "raw_content": "# 上海隱居繁華武康路公館\n地址：上海武康路100號"}]})
@@ -228,7 +228,7 @@ def test_early_checkin_without_evidence_fails():
     payload = LlmPlanningPayload(summary="上海", days=[{"title": "入住", "items": [
         {"type": "lodging", "name": "酒店入住", "start_time": "08:00", "end_time": "09:00"}
     ]}])
-    assert any("提前入住未确认" in error for error in validate_timeline(payload, request(), HelloAgentsTransportGuidance()))
+    assert any("提前入住未确认" in error for error in validate_timeline(payload, request(), TransportGuidance()))
 
 
 def test_visual_review_only_accepts_explicit_complete_verdicts(monkeypatch):
@@ -249,32 +249,32 @@ def test_visual_review_only_accepts_explicit_complete_verdicts(monkeypatch):
 
 
 def test_hotel_fetch_failure_cannot_become_verified():
-    from travelmind_api.agents.helloagents import HelloAgentsOrchestrator
+    from travelmind_api.agents.planning_core import PlanningCore
 
-    candidate = HelloAgentsHotelCandidate(name="上海示例酒店", city="上海",
+    candidate = HotelCandidate(name="上海示例酒店", city="上海",
         source_urls=["https://hotel.example.org/detail/1"], source_page_titles=["上海示例酒店"])
-    hotel = verify_hotel_pages(HelloAgentsHotelRecommendation(final_recommended_hotel=candidate), None)
-    assert not HelloAgentsOrchestrator._is_verified_hotel_candidate(hotel.final_recommended_hotel, destination="上海")
+    hotel = verify_hotel_pages(HotelRecommendation(final_recommended_hotel=candidate), None)
+    assert not PlanningCore._is_verified_hotel_candidate(hotel.final_recommended_hotel, destination="上海")
 
 
 def test_promoted_hotel_is_removed_from_alternative_candidates():
-    candidate = HelloAgentsHotelCandidate(
+    candidate = HotelCandidate(
         name="上海示例酒店", city="上海", identity_status="page_verified",
         source_urls=["https://hotel.example.org/detail/1"], verified_source_urls=["https://hotel.example.org/detail/1"],
     )
-    hotel = HelloAgentsHotelRecommendation(hotel_candidates=[candidate])
-    sanitized = HelloAgentsOrchestrator(None)._sanitize_hotel_recommendation(hotel, destination="上海")
+    hotel = HotelRecommendation(hotel_candidates=[candidate])
+    sanitized = PlanningCore(None)._sanitize_hotel_recommendation(hotel, destination="上海")
     assert sanitized.final_recommended_hotel.name == "上海示例酒店"
     assert sanitized.hotel_candidates == []
 
 
 def test_verified_homestay_does_not_replace_explicit_hotel_preference():
-    candidate = HelloAgentsHotelCandidate(
+    candidate = HotelCandidate(
         name="上海示例民宿", city="上海", hotel_type="历史洋房民宿", identity_status="page_verified",
         source_urls=["https://hotel.example.org/detail/1"], verified_source_urls=["https://hotel.example.org/detail/1"],
     )
-    sanitized = HelloAgentsOrchestrator(None)._sanitize_hotel_recommendation(
-        HelloAgentsHotelRecommendation(final_recommended_hotel=candidate),
+    sanitized = PlanningCore(None)._sanitize_hotel_recommendation(
+        HotelRecommendation(final_recommended_hotel=candidate),
         destination="上海",
         accommodation_preference="安静、交通方便的中档酒店",
     )
@@ -337,7 +337,7 @@ def test_transport_candidate_page_tuple_cannot_mix_adjacent_train_rows(monkeypat
     monkeypatch.setattr("travelmind_api.services.transport_evidence.ConfiguredSearchGateway.call_operation",
                         lambda *args: {"results": [{"url": source, "raw_content": page}]})
     config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
-    verified = verify_transport_candidate_pages(HelloAgentsTransportGuidance(service_candidates=candidates), config)
+    verified = verify_transport_candidate_pages(TransportGuidance(service_candidates=candidates), config)
     assert [candidate.service_number for candidate in verified.service_candidates] == ["G253"]
     assert verified.service_candidates[0].evidence_status == "verified"
     assert "G251" in " ".join(verified.notes)
@@ -351,7 +351,7 @@ def test_transport_candidates_remain_referenced_when_page_extraction_fails(monke
     monkeypatch.setattr("travelmind_api.services.transport_evidence.ConfiguredSearchGateway.call_operation",
                         lambda *args: (_ for _ in ()).throw(RuntimeError("timeout")))
     config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
-    verified = verify_transport_candidate_pages(HelloAgentsTransportGuidance(service_candidates=[candidate]), config)
+    verified = verify_transport_candidate_pages(TransportGuidance(service_candidates=[candidate]), config)
     assert [row.service_number for row in verified.service_candidates] == ["G246"]
     assert verified.service_candidates[0].evidence_status == "referenced"
     assert "待确认参考" in " ".join(verified.notes)
@@ -366,7 +366,7 @@ def test_transport_candidate_accepts_one_complete_markdown_row(monkeypatch):
                         lambda *args: {"results": [{"url": source,
                             "raw_content": "| 车次 | 出发站 | 发车 | 到达站 | 到达 |\n| G246 | 广州南 | 08:27 | 上海虹桥 | 15:03 |"}]})
     config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
-    verified = verify_transport_candidate_pages(HelloAgentsTransportGuidance(service_candidates=[candidate]), config)
+    verified = verify_transport_candidate_pages(TransportGuidance(service_candidates=[candidate]), config)
     assert [row.service_number for row in verified.service_candidates] == ["G246"]
     assert verified.service_candidates[0].evidence_status == "verified"
 
@@ -389,7 +389,7 @@ def test_transport_candidate_falls_back_to_single_service_detail_page(monkeypatc
 
     monkeypatch.setattr("travelmind_api.services.transport_evidence.ConfiguredSearchGateway.call_operation", operation)
     config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
-    verified = verify_transport_candidate_pages(HelloAgentsTransportGuidance(service_candidates=[candidate]), config)
+    verified = verify_transport_candidate_pages(TransportGuidance(service_candidates=[candidate]), config)
     assert [row.service_number for row in verified.service_candidates] == ["G253"]
     assert verified.service_candidates[0].source_url == detail
     assert verified.service_candidates[0].evidence_status == "verified"
@@ -398,10 +398,10 @@ def test_transport_candidate_falls_back_to_single_service_detail_page(monkeypatc
 def test_weather_fields_require_same_date_window_in_source(monkeypatch):
     supported_url = "https://weather.example.org/shanghai-15d"
     forecasts = [
-        HelloAgentsDailyForecast(date="2026-09-20", forecast_type="short_range", condition="多云转晴",
+        DailyForecast(date="2026-09-20", forecast_type="short_range", condition="多云转晴",
             temperature_min_c="24", temperature_max_c="30", wind="北风小于3级",
             outlook="多云转晴", checked_at="2026-09-15 10:00+08:00", source_urls=[supported_url]),
-        HelloAgentsDailyForecast(date="2026-09-21", forecast_type="short_range", condition="晴",
+        DailyForecast(date="2026-09-21", forecast_type="short_range", condition="晴",
             temperature_min_c="23", temperature_max_c="29", wind="北风小于3级",
             outlook="晴", checked_at="2026-09-15 10:00+08:00", source_urls=[supported_url]),
     ]
@@ -409,7 +409,7 @@ def test_weather_fields_require_same_date_window_in_source(monkeypatch):
     monkeypatch.setattr("travelmind_api.services.weather_evidence.ConfiguredSearchGateway.call_operation",
                         lambda *args: {"results": [{"url": supported_url, "raw_content": page}]})
     config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
-    verified = verify_daily_forecast_pages(HelloAgentsWeatherGuidance(overall_outlook="天气", daily_forecasts=forecasts), config)
+    verified = verify_daily_forecast_pages(WeatherGuidance(overall_outlook="天气", daily_forecasts=forecasts), config)
     assert verified.daily_forecasts[0].forecast_type == "short_range"
     assert verified.daily_forecasts[0].evidence_status == "verified"
     assert verified.daily_forecasts[0].source_urls == [supported_url]
@@ -422,14 +422,14 @@ def test_weather_fields_require_same_date_window_in_source(monkeypatch):
 
 def test_weather_keeps_dated_sourced_values_as_reference_when_extract_fails(monkeypatch):
     source = "https://weather.example.org/shanghai-15d"
-    forecast = HelloAgentsDailyForecast(date="2026-09-22", forecast_type="short_range", condition="晴",
+    forecast = DailyForecast(date="2026-09-22", forecast_type="short_range", condition="晴",
         temperature_min_c="21", temperature_max_c="30", checked_at="2026-09-15 10:00+08:00",
         source_urls=[source])
     monkeypatch.setattr("travelmind_api.services.weather_evidence.ConfiguredSearchGateway.call_operation",
                         lambda *args: (_ for _ in ()).throw(RuntimeError("timeout")))
     config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
     verified = verify_daily_forecast_pages(
-        HelloAgentsWeatherGuidance(overall_outlook="天气", daily_forecasts=[forecast]), config)
+        WeatherGuidance(overall_outlook="天气", daily_forecasts=[forecast]), config)
     assert verified.daily_forecasts[0].condition == "晴"
     assert verified.daily_forecasts[0].temperature_max_c == "30"
     assert verified.daily_forecasts[0].evidence_status == "referenced"
@@ -438,7 +438,7 @@ def test_weather_keeps_dated_sourced_values_as_reference_when_extract_fails(monk
 
 def test_weather_condition_is_verified_when_one_of_multiple_sources_supports_it(monkeypatch):
     urls = ["https://weather.example.org/a", "https://weather.example.org/b"]
-    forecast = HelloAgentsDailyForecast(date="2026-09-22", forecast_type="short_range", condition="多云转晴",
+    forecast = DailyForecast(date="2026-09-22", forecast_type="short_range", condition="多云转晴",
         temperature_min_c="21", temperature_max_c="30", checked_at="2026-09-15 10:00+08:00", source_urls=urls)
     monkeypatch.setattr(
         "travelmind_api.services.weather_evidence.ConfiguredSearchGateway.call_operation",
@@ -449,14 +449,14 @@ def test_weather_condition_is_verified_when_one_of_multiple_sources_supports_it(
     )
     config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
     verified = verify_daily_forecast_pages(
-        HelloAgentsWeatherGuidance(overall_outlook="天气", daily_forecasts=[forecast]), config)
+        WeatherGuidance(overall_outlook="天气", daily_forecasts=[forecast]), config)
     assert verified.daily_forecasts[0].condition == "多云转晴"
     assert verified.daily_forecasts[0].field_evidence["condition"] == "verified"
 
 
 def test_weather_drops_unverified_conflicting_condition_claims(monkeypatch):
     source = "https://weather.example.org/shanghai-15d"
-    forecast = HelloAgentsDailyForecast(
+    forecast = DailyForecast(
         date="2026-09-22",
         forecast_type="short_range",
         condition="多云转晴",
@@ -473,7 +473,7 @@ def test_weather_drops_unverified_conflicting_condition_claims(monkeypatch):
     )
     config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
     verified = verify_daily_forecast_pages(
-        HelloAgentsWeatherGuidance(
+        WeatherGuidance(
             overall_outlook="降水概率较低",
             daily_forecasts=[forecast],
             weather_risks=["22日可能有阵雨", "早晚温差较大"],
@@ -493,7 +493,7 @@ def test_monday_closure_note_is_a_hard_timeline_error():
           "end_time": "11:30", "visit_requirements": {"notes": ["周一闭馆（国定假日除外）"]}}]},
         {"title": "周二", "items": [{"type": "sight", "name": "豫园", "start_time": "09:00", "end_time": "10:00"}]},
     ])
-    assert any("当天闭馆" in error for error in validate_timeline(payload, request(), HelloAgentsTransportGuidance()))
+    assert any("当天闭馆" in error for error in validate_timeline(payload, request(), TransportGuidance()))
 
 
 def test_poi_source_closure_survives_when_planner_drops_the_note():
@@ -502,20 +502,20 @@ def test_poi_source_closure_survives_when_planner_drops_the_note():
         {"title": "周一", "items": [{"type": "sight", "name": "上海博物馆", "start_time": "09:30", "end_time": "11:30"}]},
         {"title": "周二", "items": [{"type": "sight", "name": "豫园", "start_time": "09:00", "end_time": "10:00"}]},
     ])
-    grounding = HelloAgentsPoiGrounding(featured_pois=[
-        HelloAgentsResearchPoi(name="上海博物馆", visit_requirements=VisitRequirements(notes=["每周一闭馆"]))
+    grounding = PoiGrounding(featured_pois=[
+        ResearchPoi(name="上海博物馆", visit_requirements=VisitRequirements(notes=["每周一闭馆"]))
     ])
     with pytest.raises(ValueError, match="POI 专家证据注明当天闭馆"):
-        HelloAgentsOrchestrator(None)._validate_execution_constraints(
-            payload, request(), HelloAgentsTransportGuidance(), poi_grounding=grounding,
+        PlanningCore(None)._validate_execution_constraints(
+            payload, request(), TransportGuidance(), poi_grounding=grounding,
         )
 
 
 def test_unused_related_pois_are_attached_as_nearby_suggestions():
     source = "https://guide.example.org/bund"
-    grounding = HelloAgentsPoiGrounding(featured_pois=[
-        HelloAgentsResearchPoi(name="外滩", area="黄浦区", source_urls=[source]),
-        HelloAgentsResearchPoi(
+    grounding = PoiGrounding(featured_pois=[
+        ResearchPoi(name="外滩", area="黄浦区", source_urls=[source]),
+        ResearchPoi(
             name="外白渡桥",
             area="黄浦区",
             reason="可与外滩顺路组合，补充历史桥梁视角。",
@@ -524,7 +524,7 @@ def test_unused_related_pois_are_attached_as_nearby_suggestions():
             source_urls=[source],
             confidence="high",
         ),
-        HelloAgentsResearchPoi(
+        ResearchPoi(
             name="豫园",
             area="黄浦区",
             reason="古典园林",
@@ -533,7 +533,7 @@ def test_unused_related_pois_are_attached_as_nearby_suggestions():
     ])
     hotel = item("上海外滩酒店", type="lodging")
     days = [PlannedDay(day_index=1, title="外滩", summary="", total_cost=0, items=[hotel, item("外滩")])]
-    HelloAgentsOrchestrator(None)._attach_nearby_poi_suggestions(days, grounding)
+    PlanningCore(None)._attach_nearby_poi_suggestions(days, grounding)
     assert hotel.nearby_suggestions == []
     suggestions = days[0].items[1].nearby_suggestions
     assert [row.name for row in suggestions] == ["外白渡桥"]
@@ -549,7 +549,7 @@ def test_unverified_area_level_hotel_price_is_removed_from_budget():
                      booking_info=BookingInfo(estimated_price=1100, unit_price=1100, price_status="estimated"))
             ])
         ], stay_recommendation=StayRecommendation(recommended_areas=["黄浦区", "徐汇区"]))
-    HelloAgentsOrchestrator._clear_unverified_lodging_prices(plan)
+    PlanningCore._clear_unverified_lodging_prices(plan)
     result = enrich_plan_with_budget(plan, request())
     booking = result.days[0].items[0].booking_info
     assert booking.estimated_price is None and booking.unit_price is None
@@ -565,7 +565,7 @@ def test_unverified_hotel_numeric_risk_is_removed():
         days=[PlannedDay(day_index=1, title="入住", summary="", total_cost=1200, items=[
             item("黄浦区中档酒店", type="lodging", booking_info=BookingInfo(estimated_price=1200, price_status="estimated"))
         ])])
-    HelloAgentsOrchestrator._clear_unverified_lodging_prices(plan)
+    PlanningCore._clear_unverified_lodging_prices(plan)
     result = enrich_plan_with_budget(plan, request())
     assert "1200元" not in " ".join(result.risks)
     assert "低于6800元" not in result.summary
@@ -579,7 +579,7 @@ def test_mandatory_reservation_without_official_entry_is_downgraded():
     plan = PlanningResult(summary="博物馆", total_budget_estimate=0, risks=[],
         trace=AgentTrace(provider="qa", workflow_id="qa", notes=[]),
         days=[PlannedDay(day_index=1, title="博物馆", summary="", total_cost=0, items=[museum])])
-    HelloAgentsOrchestrator._downgrade_unverified_reservation_claims(plan)
+    PlanningCore._downgrade_unverified_reservation_claims(plan)
     assert museum.booking_info.reservation_required is False
     assert museum.booking_info.booking_required is False
     assert museum.visit_requirements.reservation_policy == "check_before_visit"
@@ -641,7 +641,7 @@ def test_hotel_to_station_transfer_is_not_treated_as_return_train():
         {"type": "transport", "name": "上海虹桥至广州南高铁", "start_time": "14:00", "end_time": "21:00",
          "booking_info": {"transport_scope": "return", "duration_minutes_min": 400}},
     ]}])
-    normalized = HelloAgentsOrchestrator(None)._mark_unverified_schedules_as_planning_windows(payload, request())
+    normalized = PlanningCore(None)._mark_unverified_schedules_as_planning_windows(payload, request())
     assert normalized.days[0].items[0].booking_info.transport_scope == "local"
     assert normalized.days[0].items[1].booking_info.transport_scope == "return"
 
@@ -660,8 +660,8 @@ def test_planner_transport_time_is_overwritten_by_evidence_candidate():
                           "schedule_status": "reference", "schedule_checked_at": "错误时间",
                           "schedule_source_url": "https://wrong.example.org"}},
     ]}])
-    normalized = HelloAgentsOrchestrator(None)._mark_unverified_schedules_as_planning_windows(
-        payload, request(), HelloAgentsTransportGuidance(service_candidates=[candidate]))
+    normalized = PlanningCore(None)._mark_unverified_schedules_as_planning_windows(
+        payload, request(), TransportGuidance(service_candidates=[candidate]))
     item = normalized.days[0].items[0]
     assert (item.start_time, item.end_time) == ("08:27", "15:03")
     assert item.booking_info.transport_scope == "outbound"
@@ -682,8 +682,8 @@ def test_same_service_number_with_wrong_direction_is_not_accepted():
                           "schedule_status": "reference", "schedule_checked_at": "模型时间",
                           "schedule_source_url": "https://wrong.example.org"}},
     ]}])
-    normalized = HelloAgentsOrchestrator(None)._mark_unverified_schedules_as_planning_windows(
-        payload, request(), HelloAgentsTransportGuidance(service_candidates=[candidate]))
+    normalized = PlanningCore(None)._mark_unverified_schedules_as_planning_windows(
+        payload, request(), TransportGuidance(service_candidates=[candidate]))
     booking = normalized.days[0].items[0].booking_info
     assert booking.service_number is None
     assert booking.transport_scope == "outbound"
@@ -701,9 +701,9 @@ def test_long_station_wait_is_capped_without_reducing_return_buffer():
         {"type": "transport", "name": "G253 上海虹桥至广州南", "start_time": "16:00", "end_time": "22:27",
          "booking_info": {"transport_scope": "return", "service_number": "G253"}},
     ]}])
-    normalized = HelloAgentsOrchestrator(None)._normalize_departure_waiting_blocks(
+    normalized = PlanningCore(None)._normalize_departure_waiting_blocks(
         payload,
-        HelloAgentsTransportGuidance(station_buffer_minutes=45),
+        TransportGuidance(station_buffer_minutes=45),
     )
     transfer, waiting = normalized.days[0].items[1:3]
     assert (transfer.start_time, transfer.end_time) == ("13:40", "14:45")
@@ -721,9 +721,9 @@ def test_station_wait_within_cap_is_still_reclassified_as_local_buffer():
         {"type": "transport", "name": "G305 北京西至广州南", "start_time": "12:30", "end_time": "20:13",
          "booking_info": {"transport_scope": "return", "service_number": "G305", "duration_minutes_min": 463}},
     ]}])
-    normalized = HelloAgentsOrchestrator(None)._normalize_departure_waiting_blocks(
+    normalized = PlanningCore(None)._normalize_departure_waiting_blocks(
         payload,
-        HelloAgentsTransportGuidance(station_buffer_minutes=60),
+        TransportGuidance(station_buffer_minutes=60),
     )
     waiting = normalized.days[0].items[1]
     assert waiting.booking_info.transport_scope == "local"
@@ -746,8 +746,8 @@ def test_sparse_arrival_day_is_rejected_when_many_pois_are_available():
         ]},
     ])
     with pytest.raises(ValueError, match="内容密度不足"):
-        HelloAgentsOrchestrator(None)._validate_execution_constraints(
-            payload, request(), HelloAgentsTransportGuidance(), available_poi_count=14,
+        PlanningCore(None)._validate_execution_constraints(
+            payload, request(), TransportGuidance(), available_poi_count=14,
         )
 
 
@@ -767,7 +767,7 @@ def test_unverified_final_return_window_is_shifted_inside_trip_end():
         {"type": "transport", "name": "高铁返程窗口", "start_time": "17:30", "end_time": "00:30",
          "booking_info": {"transport_scope": "return", "duration_minutes_min": 396}},
     ]}])
-    orchestrator = HelloAgentsOrchestrator(None)
+    orchestrator = PlanningCore(None)
     shifted = orchestrator._mark_unverified_schedules_as_planning_windows(payload, request())
     assert (shifted.days[0].items[-1].start_time, shifted.days[0].items[-1].end_time,
             shifted.days[0].items[-1].end_day_offset) == ("16:45", "23:45", 0)

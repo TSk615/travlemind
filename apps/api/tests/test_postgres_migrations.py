@@ -19,9 +19,12 @@ def test_postgres_upgrade_downgrade_cycle():
 
     engine = create_engine(POSTGRES_URL, pool_pre_ping=True)
     inspector = inspect(engine)
-    assert {"users", "trips", "job_records", "alembic_version"}.issubset(inspector.get_table_names())
+    assert {"users", "trips", "job_records", "workflow_runs", "alembic_version"}.issubset(
+        inspector.get_table_names()
+    )
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0003_trip_budget_numeric"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005_workflow_runs"
+    assert "workflow_run_id" in {column["name"] for column in inspector.get_columns("job_records")}
 
     command.downgrade(config, "base")
     assert "users" not in inspect(engine).get_table_names()

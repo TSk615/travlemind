@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from travelmind_api.agents.helloagents import HelloAgentsOrchestrator, HelloAgentsPoiGrounding
+from travelmind_api.agents.planning_core import PlanningCore, PoiGrounding
 from travelmind_api.api.schemas.common import success_response
 from travelmind_api.api.schemas.llm import LlmConnectionTestRequest, LlmConnectionTestResponse, LlmModelsRequest, LlmProxyRequest
 from travelmind_api.core.config import get_settings
@@ -673,7 +673,7 @@ def _collect_poi_probe_tool_results(
     payload: PoiSpecialistProbeRequest,
     current_user: User,
     input_payload: dict[str, Any],
-    orchestrator: HelloAgentsOrchestrator,
+    orchestrator: PlanningCore,
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     del current_user, input_payload, orchestrator
     search_meta: dict[str, Any] = {
@@ -695,7 +695,7 @@ def _collect_poi_probe_tool_results(
 def probe_poi_specialist(payload: PoiSpecialistProbeRequest, current_user: User = Depends(get_current_user)):
     llm_config = _resolve_proxy_config(payload, current_user)
     llm_config = llm_config.model_copy(update={"timeout_seconds": max(float(llm_config.timeout_seconds), 300.0)})
-    orchestrator = HelloAgentsOrchestrator(None)
+    orchestrator = PlanningCore(None)
     input_payload = _build_poi_probe_input_payload(payload)
     tool_results, search_meta, warnings = _collect_poi_probe_tool_results(payload, current_user, input_payload, orchestrator)
     enriched_payload = dict(input_payload)
@@ -732,7 +732,7 @@ def probe_poi_specialist(payload: PoiSpecialistProbeRequest, current_user: User 
     parsed_json, parse_error = _parse_probe_json_text(raw_text)
     if parsed_json is not None:
         try:
-            parsed_json = HelloAgentsPoiGrounding.model_validate(parsed_json).model_dump(mode="json")
+            parsed_json = PoiGrounding.model_validate(parsed_json).model_dump(mode="json")
         except Exception:
             pass
     return success_response(

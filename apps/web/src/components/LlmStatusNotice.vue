@@ -21,12 +21,9 @@ void settingsStore.bootstrap()
 const enCopy = {
   loadingTitle: "Loading model status",
   loadingMessage: "Checking which provider and model configuration are active for future generation and refinement requests.",
-  helloConfiguredTitle: "Current provider configuration: HelloAgents",
-  helloConfiguredMessage:
-    "Future trip generation requests will attempt the backend HelloAgents PoC workflow. This card reflects saved settings, not the latest execution result. Refinement still uses the browser relay with your saved model settings.",
   langGraphConfiguredTitle: "Current provider configuration: LangGraph",
   langGraphConfiguredMessage:
-    "Future trip generation requests will use the backend LangGraph workflow. This card reflects saved settings, not the latest execution result. Refinement remains on the existing path during migration.",
+    "Future trip generation and refinement requests will use the durable backend LangGraph workflow. This card reflects saved settings, not the latest execution result.",
   standardConfiguredTitle: "Current provider configuration: Standard",
   standardConfiguredMessage:
     "Future generation and refinement requests will use the saved third-party model configuration. This card reflects saved settings, not the latest execution result.",
@@ -39,12 +36,9 @@ const enCopy = {
 const zhCopy = {
   loadingTitle: "正在读取模型配置",
   loadingMessage: "正在确认后续生成与润色将使用的服务提供方和模型配置。",
-  helloConfiguredTitle: "当前提供方配置：HelloAgents",
-  helloConfiguredMessage:
-    "后续行程生成会尝试走后端 HelloAgents PoC 工作流。此卡片只展示你保存的配置，不代表最近一次实际执行结果。润色仍会通过浏览器中转，并使用你保存的模型设置。",
   langGraphConfiguredTitle: "当前提供方配置：LangGraph",
   langGraphConfiguredMessage:
-    "后续行程生成会走后端 LangGraph 工作流。此卡片只展示你保存的配置，不代表最近一次实际执行结果；迁移期间润色仍沿用现有路径。",
+    "后续行程生成与润色都会走可恢复的后端 LangGraph 工作流。此卡片只展示你保存的配置，不代表最近一次实际执行结果。",
   standardConfiguredTitle: "当前提供方配置：标准模式",
   standardConfiguredMessage:
     "后续生成与润色会使用你保存的第三方模型配置。此卡片只展示你保存的配置，不代表最近一次实际执行结果。",
@@ -55,14 +49,10 @@ const zhCopy = {
 }
 
 const copy = computed(() => (locale.value === "zh-CN" ? zhCopy : enCopy))
-const usesHelloAgents = computed(() => settingsStore.usesHelloAgents)
 const usesLangGraph = computed(() => settingsStore.usesLangGraph)
 const title = computed(() => {
   if (!settingsStore.isConfigured) {
     return copy.value.fallbackTitle
-  }
-  if (usesHelloAgents.value) {
-    return copy.value.helloConfiguredTitle
   }
   return usesLangGraph.value ? copy.value.langGraphConfiguredTitle : copy.value.standardConfiguredTitle
 })
@@ -74,11 +64,7 @@ const message = computed(() => {
   const model = settingsStore.settings?.agent.model?.trim()
   const wireApi = settingsStore.settings?.agent.wire_api ?? "responses"
   const protocol = settingsStore.settings?.agent.provider_protocol ?? "openai"
-  const prefix = usesHelloAgents.value
-    ? copy.value.helloConfiguredMessage
-    : usesLangGraph.value
-      ? copy.value.langGraphConfiguredMessage
-      : copy.value.standardConfiguredMessage
+  const prefix = usesLangGraph.value ? copy.value.langGraphConfiguredMessage : copy.value.standardConfiguredMessage
   return model ? `${prefix} ${copy.value.configuredDetailPrefix}: ${model} (${protocol}/${wireApi}).` : prefix
 })
 </script>

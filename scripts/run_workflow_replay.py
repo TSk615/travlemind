@@ -21,7 +21,7 @@ from travelmind_api.services.workflow_evaluation import (
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", choices=("helloagents", "langgraph"), required=True)
+    parser.add_argument("--provider", choices=("standard", "langgraph"), required=True)
     parser.add_argument("--cases", default="apps/api/tests/fixtures/langgraph-replay-cases.json")
     parser.add_argument("--output", required=True)
     parser.add_argument("--limit", type=int, default=0)

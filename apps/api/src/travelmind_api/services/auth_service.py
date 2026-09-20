@@ -116,7 +116,7 @@ def _normalize_agent_provider_value(agent_provider: str | None) -> str | None:
     if not is_supported_agent_provider(normalized):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={"code": "invalid_agent_provider", "message": "agent_provider must be standard, helloagents, or langgraph"},
+            detail={"code": "invalid_agent_provider", "message": "agent_provider must be standard or langgraph"},
         )
     return normalize_agent_provider(normalized, default=AGENT_PROVIDER_STANDARD)
 

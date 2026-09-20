@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from travelmind_api.agents.base import AgentTrace, PlanningResult
-from travelmind_api.agents.helloagents import HelloAgentsOrchestrator, HelloAgentsPoiGrounding
+from travelmind_api.agents.planning_core import PlanningCore, PoiGrounding
 from travelmind_api.core.database import SessionLocal
 from travelmind_api.db.models import Trip, User
 from travelmind_api.jobs.handlers import _build_request, _persist_trip_plan
@@ -40,11 +40,11 @@ def main() -> None:
             )
             if not poi_record or not poi_record.get("parsed_return"):
                 raise RuntimeError("Audit does not contain a parsed POI specialist result")
-            grounding = HelloAgentsPoiGrounding.model_validate(poi_record["parsed_return"])
+            grounding = PoiGrounding.model_validate(poi_record["parsed_return"])
             for day in plan.days:
                 for item in day.items:
                     item.nearby_suggestions = []
-            HelloAgentsOrchestrator(None)._attach_nearby_poi_suggestions(plan.days, grounding)
+            PlanningCore(None)._attach_nearby_poi_suggestions(plan.days, grounding)
         verified_conditions = [
             day.weather.condition
             for day in plan.days

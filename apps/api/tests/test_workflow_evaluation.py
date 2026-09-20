@@ -60,7 +60,7 @@ def test_replay_hard_gate_runs_all_cases_against_deterministic_contract():
 
 def test_replay_quality_gate_accepts_equal_quality_within_ten_percent_limits():
     cases = load_replay_cases(FIXTURE)
-    baseline = _observations(cases, "helloagents", latency_ms=1000, cost_usd=0.10)
+    baseline = _observations(cases, "retained-deployment", latency_ms=1000, cost_usd=0.10)
     candidate = _observations(cases, "langgraph", latency_ms=1099, cost_usd=0.109)
 
     report = evaluate_replay_gate(cases, baseline, candidate)
@@ -73,7 +73,7 @@ def test_replay_quality_gate_accepts_equal_quality_within_ten_percent_limits():
 
 def test_replay_quality_gate_rejects_hard_violation_and_missing_cost():
     cases = load_replay_cases(FIXTURE)
-    baseline = _observations(cases, "helloagents", latency_ms=1000, cost_usd=0.10)
+    baseline = _observations(cases, "retained-deployment", latency_ms=1000, cost_usd=0.10)
     candidate = _observations(cases, "langgraph", latency_ms=900, cost_usd=0.09)
     candidate[0] = candidate[0].model_copy(
         update={"hard_violations": ["closed POI scheduled"], "cost_usd": None}
@@ -88,7 +88,7 @@ def test_replay_quality_gate_rejects_hard_violation_and_missing_cost():
 
 def test_replay_quality_gate_rejects_latency_and_cost_regressions():
     cases = load_replay_cases(FIXTURE)
-    baseline = _observations(cases, "helloagents", latency_ms=1000, cost_usd=0.10)
+    baseline = _observations(cases, "retained-deployment", latency_ms=1000, cost_usd=0.10)
     candidate = _observations(cases, "langgraph", latency_ms=1200, cost_usd=0.12)
 
     report = evaluate_replay_gate(cases, baseline, candidate)

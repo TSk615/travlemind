@@ -114,7 +114,6 @@ const enCopy = {
   providerLabel: "Planning provider",
   providerStandard: "Standard",
   providerLangGraph: "LangGraph",
-  providerHelloAgents: "HelloAgents (PoC)",
   baseUrlLabel: "Base URL",
   baseUrlPlaceholder: "https://api.example.com/v1",
   modelLabel: "Model",
@@ -144,7 +143,7 @@ const enCopy = {
   keyHelp: "Leave the API key blank to keep the current stored value.",
   searchSection: "Search service",
   searchSectionHint:
-    "Controls the search grounding service used by backend search and HelloAgents. You can switch between MCP access and direct API access.",
+    "Controls the grounding service used by backend search and LangGraph roles. You can switch between MCP access and direct API access.",
   searchProviderLabel: "Search provider",
   searchProviderGrokSearch: "GrokSearch bridge",
   searchProviderTavily: "Tavily",
@@ -166,7 +165,7 @@ const zhCopy = {
   kicker: "设置",
   title: "模型与搜索设置",
   description:
-    "模型配置与搜索服务配置分开管理。后端会使用已保存的搜索服务执行搜索与 HelloAgents 工具调用。",
+    "模型配置与搜索服务配置分开管理。后端会使用已保存的搜索服务为 LangGraph 角色提供 grounding。",
   refresh: "重新加载",
   save: "保存设置",
   saving: "保存中...",
@@ -185,7 +184,6 @@ const zhCopy = {
   providerLabel: "规划提供方",
   providerStandard: "标准模式",
   providerLangGraph: "LangGraph",
-  providerHelloAgents: "HelloAgents（PoC）",
   baseUrlLabel: "接口地址",
   baseUrlPlaceholder: "https://api.example.com/v1",
   modelLabel: "模型",
@@ -215,7 +213,7 @@ const zhCopy = {
   keyHelp: "如果要保留当前已保存的 API 密钥，请将输入框留空。",
   searchSection: "搜索服务",
   searchSectionHint:
-    "控制后端搜索与 HelloAgents 使用的搜索服务。你可以在 MCP 访问和直接 API 访问之间切换。",
+    "控制后端搜索与 LangGraph 角色使用的 grounding 服务。你可以在 MCP 访问和直接 API 访问之间切换。",
   searchProviderLabel: "搜索提供方",
   searchProviderGrokSearch: "GrokSearch 桥接",
   searchProviderTavily: "Tavily",
@@ -867,7 +865,6 @@ void refreshXhsStatus()
           <select id="agent-provider" v-model="form.agent_provider">
             <option value="standard">{{ copy.providerStandard }}</option>
             <option value="langgraph">{{ copy.providerLangGraph }}</option>
-            <option value="helloagents">{{ copy.providerHelloAgents }}</option>
           </select>
         </div>
 

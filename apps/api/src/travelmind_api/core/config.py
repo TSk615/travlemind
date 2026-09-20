@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     worker_max_jobs: int = 8
     agent_provider: str = "standard"
     langgraph_rollout_percent: int = Field(default=100, ge=0, le=100)
-    langgraph_rollout_fallback_provider: Literal["standard", "helloagents"] = "helloagents"
+    langgraph_rollout_fallback_provider: Literal["standard"] = "standard"
     log_level: str = "INFO"
     log_root: str | None = None
     export_root: str | None = None

@@ -105,7 +105,7 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
                 "api_key": raw_api_key,
                 "model": "gpt-5.4-mini",
                 "wire_api": "chat_completions",
-                "agent_provider": "helloagents",
+                "agent_provider": "langgraph",
                 "poi_provider_protocol": "newapi",
                 "poi_base_url": " https://poi.example.com/v1/ ",
                 "poi_api_key": "poi-secret-4321",
@@ -138,7 +138,7 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
     assert updated["agent"]["provider_protocol"] == "newapi"
     assert updated["agent"]["model"] == "gpt-5.4-mini"
     assert updated["agent"]["wire_api"] == "chat_completions"
-    assert updated["agent"]["agent_provider"] == "helloagents"
+    assert updated["agent"]["agent_provider"] == "langgraph"
     assert updated["agent"]["configured"] is True
     assert updated["agent"]["has_api_key"] is True
     assert updated["agent"]["api_key_masked"].startswith(raw_api_key[:4])
@@ -196,7 +196,7 @@ def test_llm_settings_can_be_saved_and_read_back_masked(client: TestClient):
         assert user.llm_model == "gpt-5.4-mini"
         assert user.llm_wire_api == "chat_completions"
         assert user.llm_provider_protocol == "newapi"
-        assert user.llm_agent_provider == "helloagents"
+        assert user.llm_agent_provider == "langgraph"
         assert user.poi_llm_base_url == "https://poi.example.com/v1"
         assert user.poi_llm_api_key == "poi-secret-4321"
         assert user.poi_llm_model == "Console/grok-4.20-multi-agent-0309"
@@ -258,7 +258,7 @@ def test_trip_jobs_do_not_persist_llm_secret_snapshots(client: TestClient, monke
         "api_key": "sk-job-snapshot-5678",
         "model": "gpt-5.4",
         "wire_api": "responses",
-        "agent_provider": "helloagents",
+        "agent_provider": "langgraph",
         "xhs_source_enabled": True,
     }
     settings_response = client.put("/api/v1/settings/llm", json=raw_config)

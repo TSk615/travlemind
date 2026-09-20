@@ -10,6 +10,9 @@ from travelmind_api.prompts.roles.trip import (
     build_brief_parser_prompt,
 )
 
+# Keep the historical namespace in persisted input fingerprints. Renaming these
+# identifiers would invalidate resumable checkpoints even though the runtime
+# and prompt module are now framework-neutral.
 POI_SPECIALIST_PROMPT_VERSION = "helloagents.poi_specialist.v15"
 ATTRACTION_SPECIALIST_PROMPT_VERSION = "helloagents.attraction_specialist.v3"
 FOOD_SPECIALIST_PROMPT_VERSION = "helloagents.food_specialist.v1"

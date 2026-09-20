@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-import travelmind_api.agents.helloagents as helloagents_module
+import travelmind_api.agents.planning_core as planning_core_module
 
 from travelmind_api.agents.base import (
     AgentTrace,
@@ -16,20 +16,21 @@ from travelmind_api.agents.base import (
     TransportBookingSummary,
 )
 from travelmind_api.agents.factory import build_orchestrator
-from travelmind_api.agents.helloagents import (
-    HelloAgentsBrief,
-    HelloAgentsHotelCandidate,
-    HelloAgentsHotelRecommendation,
-    HelloAgentsOrchestrator,
-    HelloAgentsPoiGrounding,
-    HelloAgentsRoleConfig,
-    HelloAgentsTransportGuidance,
+from travelmind_api.agents.planning_core import (
+    PlanningBrief,
+    HotelCandidate,
+    HotelRecommendation,
+    PlanningCore,
+    PoiGrounding,
+    PlanningRoleConfig,
+    TransportGuidance,
 )
+from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator
 from travelmind_api.agents.openai_compatible import OpenAICompatibleOrchestrator
 from travelmind_api.agents.stub import StubOrchestrator
 from travelmind_api.api.schemas.search import ScoreBreakdown, SearchDocumentResponse
 from travelmind_api.core.config import Settings
-from travelmind_api.prompts.roles.helloagents import (
+from travelmind_api.prompts.roles.planning import (
     build_hotel_specialist_prompt,
     build_poi_specialist_prompt,
     build_weather_specialist_prompt,
@@ -1057,246 +1058,20 @@ def test_openai_compatible_client_retries_streaming_once_after_http2_internal_er
     assert captured_payloads[1]["stream"] is True
 
 
-def test_helloagents_compatible_llm_retries_once_after_transport_error(monkeypatch):
-    class FakeClient:
-        def __init__(self, config):
-            del config
-            self.calls = 0
-
-        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None):
-            del messages, temperature, max_tokens
-            self.calls += 1
-            if self.calls == 1:
-                raise httpx.ReadError(
-                    "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1016)",
-                    request=httpx.Request("POST", "https://llm.example.test/v1/responses"),
-                )
-            return "retry succeeded"
-
-    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
-    llm = helloagents_module.HelloAgentsCompatibleLLM(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses")
-    )
-
-    result = llm.invoke([{"role": "user", "content": "hello"}])
-
-    assert result.content == "retry succeeded"
-    assert llm._client.calls == 2
 
 
-def test_helloagents_compatible_llm_retries_stream_rate_limit_error_event(monkeypatch):
-    class FakeClient:
-        def __init__(self, config):
-            del config
-            self.calls = 0
-            self.stream_values: list[bool] = []
-
-        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
-            del messages, temperature, max_tokens
-            self.calls += 1
-            self.stream_values.append(stream)
-            if self.calls == 1:
-                raise ValueError("Chat Completions stream returned an error event: Console API returned 429")
-            return "retry succeeded"
-
-    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
-    monkeypatch.setattr(helloagents_module.time, "sleep", lambda seconds: None)
-    llm = helloagents_module.HelloAgentsCompatibleLLM(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
-        retry_attempts=2,
-        stream=True,
-    )
-
-    result = llm.invoke([{"role": "user", "content": "hello"}])
-
-    assert result.content == "retry succeeded"
-    assert llm._client.calls == 2
-    assert llm._client.stream_values == [True, True]
 
 
-def test_helloagents_compatible_llm_uses_extended_rate_limit_retries(monkeypatch):
-    class FakeClient:
-        def __init__(self, config):
-            del config
-            self.calls = 0
-            self.stream_values: list[bool] = []
-
-        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
-            del messages, temperature, max_tokens
-            self.calls += 1
-            self.stream_values.append(stream)
-            if self.calls <= 5:
-                raise ValueError("Chat Completions stream returned an error event: Console API returned 429")
-            return "retry succeeded"
-
-    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
-    monkeypatch.setattr(helloagents_module.time, "sleep", lambda seconds: None)
-    llm = helloagents_module.HelloAgentsCompatibleLLM(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
-        retry_attempts=2,
-        stream=True,
-    )
-
-    result = llm.invoke([{"role": "user", "content": "hello"}])
-
-    assert result.content == "retry succeeded"
-    assert llm._client.calls == 6
-    assert llm._client.stream_values == [True, True, True, True, True, True]
-    assert llm.kwargs["retry_attempts"] == 2
-    assert llm.kwargs["rate_limit_retry_attempts"] == 6
 
 
-def test_helloagents_compatible_llm_retries_stream_http2_transport_error_event(monkeypatch):
-    class FakeClient:
-        def __init__(self, config):
-            del config
-            self.calls = 0
-            self.stream_values: list[bool] = []
-
-        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
-            del messages, temperature, max_tokens
-            self.calls += 1
-            self.stream_values.append(stream)
-            if self.calls == 1:
-                raise ValueError(
-                    "Chat Completions stream returned an error event: Console transport failed: "
-                    "Transport request failed: Failed to perform, curl: (92) HTTP/2 stream 1 "
-                    "was not closed cleanly: INTERNAL_ERROR (err 2)."
-                )
-            return "retry succeeded"
-
-    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
-    monkeypatch.setattr(helloagents_module.time, "sleep", lambda seconds: None)
-    llm = helloagents_module.HelloAgentsCompatibleLLM(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
-        retry_attempts=2,
-        stream=True,
-    )
-
-    result = llm.invoke([{"role": "user", "content": "hello"}])
-
-    assert result.content == "retry succeeded"
-    assert llm._client.calls == 2
-    assert llm._client.stream_values == [True, True]
 
 
-def test_helloagents_compatible_llm_does_not_retry_non_rate_limit_value_error(monkeypatch):
-    class FakeClient:
-        def __init__(self, config):
-            del config
-            self.calls = 0
-
-        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
-            del messages, temperature, max_tokens, stream
-            self.calls += 1
-            raise ValueError("Chat Completions stream did not contain assistant text")
-
-    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
-    llm = helloagents_module.HelloAgentsCompatibleLLM(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="grok-test", wire_api="chat_completions"),
-        retry_attempts=2,
-        stream=True,
-    )
-
-    with pytest.raises(ValueError, match="did not contain assistant text"):
-        llm.invoke([{"role": "user", "content": "hello"}])
-
-    assert llm._client.calls == 1
 
 
-def test_helloagents_compatible_llm_can_disable_retry_for_fast_fallback(monkeypatch):
-    class FakeClient:
-        def __init__(self, config):
-            del config
-            self.calls = 0
-
-        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None):
-            del messages, temperature, max_tokens
-            self.calls += 1
-            raise httpx.TimeoutException("timed out", request=httpx.Request("POST", "https://llm.example.test/v1/responses"))
-
-    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
-    llm = helloagents_module.HelloAgentsCompatibleLLM(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        retry_attempts=1,
-        max_tokens=3200,
-    )
-
-    with pytest.raises(httpx.TimeoutException):
-        llm.invoke([{"role": "user", "content": "hello"}])
-
-    assert llm._client.calls == 1
-    assert llm.kwargs["retry_attempts"] == 1
-    assert llm.kwargs["max_tokens"] == 3200
 
 
-def test_helloagents_compatible_llm_can_force_streaming(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class FakeClient:
-        def __init__(self, config):
-            del config
-
-        def create_chat_completion(self, *, messages, temperature=0.2, max_tokens=None, stream=False):
-            del messages, temperature, max_tokens
-            captured["stream"] = stream
-            return "stream succeeded"
-
-    monkeypatch.setattr(helloagents_module, "OpenAICompatibleClient", FakeClient)
-    llm = helloagents_module.HelloAgentsCompatibleLLM(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        stream=True,
-    )
-
-    result = llm.invoke([{"role": "user", "content": "hello"}])
-
-    assert result.content == "stream succeeded"
-    assert captured["stream"] is True
-    assert llm.kwargs["stream"] is True
 
 
-def test_helloagents_run_role_disables_third_party_trace_output():
-    captured: dict[str, object] = {}
-
-    class FakeConfig:
-        def __init__(self, trace_enabled=True, **kwargs):
-            captured["trace_enabled"] = trace_enabled
-            captured["config_kwargs"] = kwargs
-            self.trace_enabled = trace_enabled
-
-    class FakeSimpleAgent:
-        def __init__(self, *, name, llm, system_prompt, config=None, **kwargs):
-            del name, llm, system_prompt, kwargs
-            captured["agent_config"] = config
-
-        def run(self, prompt):
-            assert "trip_request" in prompt
-            return '{"destination":"Kyoto","trip_days":2,"budget_band":"midrange","budget_is_hard_constraint":true,"budget_priority":"","allow_budget_flex":false,"pace":"balanced","must_have":[],"avoid":[],"transport":"rail","accommodation":"","interests":[],"planning_constraints":[]}'
-
-    fake_module = SimpleNamespace(SimpleAgent=FakeSimpleAgent, Config=FakeConfig)
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    response = orchestrator._run_role(
-        module=fake_module,
-        role_config=HelloAgentsRoleConfig(
-            role_name="brief_parser",
-            title="Brief parser",
-            description="test",
-            prompt_focus="test",
-            agent_class_name="SimpleAgent",
-            system_prompt="Return JSON only.",
-            prompt_version="test.v1",
-        ),
-        llm_config=LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        input_payload={"trip_request": {"destination": "Kyoto"}},
-    )
-
-    assert captured["trace_enabled"] is False
-    assert captured["agent_config"] is not None
-    assert '"destination":"Kyoto"' in response
 
 
 def test_build_orchestrator_returns_stub_without_llm_config(monkeypatch):
@@ -1477,30 +1252,18 @@ def test_user_poi_role_override_requires_complete_saved_settings():
 
 
 
-def test_build_orchestrator_prefers_helloagents_when_requested():
+def test_build_orchestrator_maps_legacy_helloagents_alias_to_langgraph():
     orchestrator = build_orchestrator(
         Settings(agent_provider="standard"),
         llm_config=LlmConfig(base_url="https://llm.override.test/v1", api_key="override-key", model="gpt-override", wire_api="responses"),
         agent_provider="helloagents",
     )
 
-    assert isinstance(orchestrator, HelloAgentsOrchestrator)
+    assert isinstance(orchestrator, LangGraphOrchestrator)
 
 
 
-def test_build_orchestrator_ignores_helloagents_when_disabled():
-    orchestrator = build_orchestrator(
-        Settings(agent_provider="helloagents"),
-        llm_config=LlmConfig(base_url="https://llm.override.test/v1", api_key="override-key", model="gpt-override", wire_api="responses"),
-        agent_provider="helloagents",
-        enable_helloagents=False,
-    )
-
-    assert isinstance(orchestrator, OpenAICompatibleOrchestrator)
-
-
-
-def _fake_helloagents_module(
+def _fake_planning_core_module(
     calls: list[str],
     *,
     llm_by_role: dict[str, dict[str, object]] | None = None,
@@ -1843,175 +1606,20 @@ def _fake_helloagents_module(
 
 
 
-def test_helloagents_orchestrator_raises_when_package_is_unavailable(monkeypatch):
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: (_ for _ in ()).throw(ModuleNotFoundError("hello_agents")))
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    with pytest.raises(ModuleNotFoundError):
-        orchestrator.plan_trip(_planning_request())
 
 
 
-def test_helloagents_orchestrator_returns_business_specialist_result(monkeypatch):
-    calls: list[str] = []
-    llm_by_role: dict[str, dict[str, object]] = {}
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls, llm_by_role=llm_by_role))
-    config = LlmConfig.from_mapping(
-        {
-            "base_url": "https://default.example.test/v1",
-            "api_key": "default-key",
-            "model": "gpt-default",
-            "wire_api": "responses",
-            "role_overrides": {
-                "poi_specialist": {
-                    "base_url": "https://poi.example.test/v1",
-                    "model": "gpt-poi",
-                },
-                "hotel_specialist": {
-                    "base_url": "https://hotels.example.test/v1",
-                    "api_key": "hotel-key",
-                    "model": "gpt-hotels",
-                },
-            },
-        }
-    )
-    assert config is not None
-    orchestrator = HelloAgentsOrchestrator(config, maps_provider=StubMapsPoiProvider())
-
-    result = orchestrator.plan_trip(_planning_request())
-
-    assert isinstance(result, PlanningResult)
-    assert result.trace.provider == "helloagents-poc"
-    assert result.days[0].items[0].location_ref is None
-    assert result.days[0].items[1].route_from_previous is None
-    assert any("关闭占位坐标" in note for note in result.trace.notes)
-    assert calls[0] == "brief_parser"
-    assert calls[-1] == "itinerary_planner"
-    assert set(calls[1:3]) == {"poi_specialist", "weather_specialist"}
-    assert set(calls[3:5]) == {"hotel_specialist", "transport_specialist"}
-    assert llm_by_role["poi_specialist"]["base_url"] == "https://poi.example.test/v1"
-    assert llm_by_role["poi_specialist"]["model"] == "gpt-poi"
-    assert llm_by_role["poi_specialist"]["timeout"] == 300
-    assert llm_by_role["poi_specialist"]["max_tokens"] == 4800
-    assert llm_by_role["poi_specialist"]["retry_attempts"] == 1
-    assert llm_by_role["poi_specialist"]["stream"] is True
-    assert llm_by_role["weather_specialist"]["base_url"] == "https://default.example.test/v1"
-    assert llm_by_role["weather_specialist"]["retry_attempts"] == 2
-    assert llm_by_role["weather_specialist"]["stream"] is True
-    assert llm_by_role["hotel_specialist"]["base_url"] == "https://hotels.example.test/v1"
-    assert llm_by_role["hotel_specialist"]["api_key"] == "hotel-key"
-    assert llm_by_role["hotel_specialist"]["max_tokens"] == 1800
-    assert llm_by_role["hotel_specialist"]["stream"] is True
-    assert llm_by_role["transport_specialist"]["base_url"] == "https://default.example.test/v1"
-    assert llm_by_role["transport_specialist"]["max_tokens"] == 1600
-    assert llm_by_role["transport_specialist"]["stream"] is True
-    assert llm_by_role["itinerary_planner"]["base_url"] == "https://default.example.test/v1"
-    assert llm_by_role["itinerary_planner"]["stream"] is True
-    assert len(result.trace.agent_runs) == 6
-    assert all(run.prompt_version for run in result.trace.agent_runs)
-    assert any("business-specialist" in note.lower() for note in result.trace.notes)
-    assert any("not a live forecast feed" in note.lower() for note in result.trace.notes)
-    assert any(run.key == "poi_specialist" for run in result.trace.agent_runs)
-    assert result.days[0].items[0].booking_info is not None
-    assert result.days[0].items[0].booking_info.official_booking_url == "https://www.city.kyoto.lg.jp/official/ginkakuji"
-    assert result.days[0].items[0].visit_requirements is not None
-    assert all(item.type not in {"meal", "food", "restaurant", "cafe", "dining", "snack"} for day in result.days for item in day.items)
-    assert result.transport_booking_summary is not None
-    assert result.transport_booking_summary.official_booking_url == "https://rail.example.test/kyoto"
-    assert result.transport_booking_summary.booking_required is True
-    assert result.stay_recommendation is not None
-    # The fake specialist's URLs are not independently fetched hotel evidence.
-    assert result.stay_recommendation.final_recommended_hotel is None
-    assert result.stay_recommendation.recommended_areas == ["Downtown Kyoto", "Higashiyama"]
-    assert result.budget_summary is not None
-    assert result.budget_summary.breakdown.tickets >= 25
-
-
-def test_helloagents_orchestrator_serializes_shared_streaming_grok_endpoint_roles():
-    config = LlmConfig.from_mapping(
-        {
-            "base_url": "https://default.example.test/v1",
-            "api_key": "default-key",
-            "model": "gpt-default",
-            "wire_api": "responses",
-            "role_overrides": {
-                "poi_specialist": {
-                    "base_url": "https://newapi.rainflow.foo/v1",
-                    "api_key": "shared-key",
-                    "model": "Console/grok-4.20-multi-agent-0309",
-                    "wire_api": "responses",
-                    "provider_protocol": "newapi",
-                },
-                "weather_specialist": {
-                    "base_url": "https://newapi.rainflow.foo/v1",
-                    "api_key": "shared-key",
-                    "model": "Console/grok-4.20-0309-non-reasoning",
-                    "wire_api": "responses",
-                    "provider_protocol": "newapi",
-                },
-            },
-        }
-    )
-    assert config is not None
-    orchestrator = HelloAgentsOrchestrator(config, maps_provider=StubMapsPoiProvider())
-    role_configs = orchestrator._build_role_configs(_planning_request())
-    role_llm_configs = orchestrator._build_role_llm_configs()
-
-    assert orchestrator._should_serialize_role_batch_for_endpoint_limit(
-        {
-            "poi_specialist": role_configs["poi_specialist"],
-            "weather_specialist": role_configs["weather_specialist"],
-        },
-        role_llm_configs,
-    )
 
 
 
-def test_helloagents_orchestrator_uses_transport_guidance_to_override_budget_breakdown(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    result = orchestrator.plan_trip(_planning_request())
-
-    assert result.trace.transport_guidance is not None
-    assert result.trace.transport_guidance["estimated_intercity_cost"] == 320
-    assert result.trace.transport_guidance["estimated_local_transport_cost"] == 60
-    assert result.budget_summary is not None
-    assert result.budget_summary.breakdown.transport == 380
-    assert result.budget_summary.estimated_total >= result.budget_summary.breakdown.transport
-    assert sum(item.amount for item in result.budget_summary.line_items if item.key.startswith("transport_intercity_")) == 320
-    assert sum(item.amount for item in result.budget_summary.line_items if item.key.startswith("transport_local_")) == 60
-    assert all(item.day_index is not None for item in result.budget_summary.line_items)
 
 
-def test_budgeting_classifies_grounded_prices_by_item_type(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
 
-    result = orchestrator.plan_trip(_planning_request())
 
-    assert result.budget_summary is not None
-    assert result.budget_summary.breakdown.tickets == 25
-    assert result.budget_summary.breakdown.dining == 0
-    assert result.budget_summary.breakdown.accommodation == 0
-    assert result.budget_summary.breakdown.transport == 380
-    assert result.budget_summary.breakdown.total == sum(day.total_cost for day in result.days)
-    assert sum(item.amount for item in result.budget_summary.line_items) == result.budget_summary.estimated_total
 
 
 def test_departure_buffer_starts_after_last_non_transport_activity():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -2089,7 +1697,7 @@ def test_departure_buffer_starts_after_last_non_transport_activity():
     orchestrator._validate_execution_constraints(
         payload,
         _planning_request(),
-        HelloAgentsTransportGuidance(
+        TransportGuidance(
             departure_transfer_minutes=50,
             station_buffer_minutes=40,
             luggage_buffer_minutes=30,
@@ -2176,127 +1784,12 @@ def test_budgeting_uses_itemized_costs_without_filling_unused_budget_capacity():
     assert any("planner-stated day totals" in risk for risk in result.risks)
 
 
-def test_helloagents_orchestrator_fails_when_specialist_role_fails(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(
-        helloagents_module,
-        "import_module",
-        lambda _: _fake_helloagents_module(calls, failing_role="weather_specialist"),
-    )
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    with pytest.raises(RuntimeError, match="weather_specialist"):
-        orchestrator.plan_trip(_planning_request())
-    assert calls[0] == "brief_parser"
-    assert "weather_specialist" in calls
-    assert "itinerary_planner" not in calls
 
 
-def test_helloagents_orchestrator_fails_when_poi_role_fails_even_with_tool_evidence(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(
-        helloagents_module,
-        "import_module",
-        lambda _: _fake_helloagents_module(calls, failing_role="poi_specialist"),
-    )
-
-    def fake_augment(self, role_name, input_payload):
-        del self
-        if role_name == "poi_specialist":
-            input_payload["tool_results"] = {
-                "search_tool": "web_search",
-                "search_query": "Kyoto named POIs temples coffee market",
-                "poi_source": "web_search_crawl",
-                "search": {
-                    "content": "- **Ginkaku-ji**: temple with calm scenic walks.\n- **Nishiki Market**: food market with lunch snacks.",
-                    "sources": [
-                        {"title": "Ginkaku-ji official guide", "url": "https://source.example.test/ginkakuji"},
-                        {"title": "Nishiki Market food guide", "url": "https://source.example.test/nishiki"},
-                    ],
-                },
-            }
-        return input_payload
-
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_augment_payload_with_tool_results", fake_augment)
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    with pytest.raises(RuntimeError, match="poi_specialist"):
-        orchestrator.plan_trip(_planning_request())
-
-    assert "poi_specialist" in calls
-    assert "itinerary_planner" not in calls
-    checkpoint = orchestrator.get_resume_checkpoint()
-    assert checkpoint is not None
-    assert checkpoint["failed_role"] == "poi_specialist"
 
 
-def test_helloagents_orchestrator_does_not_use_sparse_poi_fallback_without_evidence(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(
-        helloagents_module,
-        "import_module",
-        lambda _: _fake_helloagents_module(calls, failing_role="poi_specialist"),
-    )
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    with pytest.raises(RuntimeError, match="poi_specialist"):
-        orchestrator.plan_trip(_planning_request())
-
-    assert "poi_specialist" in calls
-    assert "itinerary_planner" not in calls
-    checkpoint = orchestrator.get_resume_checkpoint()
-    assert checkpoint is not None
-    assert checkpoint["failed_role"] == "poi_specialist"
 
 
-def test_helloagents_orchestrator_does_not_resume_poi_fallback_checkpoint():
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-    request = _planning_request()
-    orchestrator.set_resume_checkpoint(
-        {
-            "version": 1,
-            "workflow": "helloagents_trip_generate",
-            "trip_id": request.trip_id,
-            "roles": {
-                "poi_specialist": {
-                    "status": "completed",
-                    "fallback_used": True,
-                    "fallback_reason": "stream did not contain assistant text",
-                    "parsed": {
-                        "candidate_areas": [request.destination],
-                        "featured_pois": [
-                            {
-                                "name": request.destination,
-                                "kind": "mixed_area",
-                                "area": request.destination,
-                                "reason": "Recovered from trip context.",
-                                "confidence": "low",
-                            }
-                        ],
-                    },
-                }
-            },
-        }
-    )
-    orchestrator._start_resume_checkpoint(request, orchestrator._build_trip_payload(request))
-
-    assert orchestrator._load_checkpoint_model("poi_specialist", HelloAgentsPoiGrounding) is None
-    checkpoint = orchestrator.get_resume_checkpoint()
-    assert checkpoint is not None
-    assert "poi_specialist" not in checkpoint["roles"]
-    assert "poi_specialist" not in checkpoint["completed_roles"]
 
 
 def _zh_planning_request() -> PlanningRequest:
@@ -2407,93 +1900,28 @@ def test_openai_compatible_orchestrator_warns_when_chinese_output_is_not_localiz
     assert any("did not fully match the requested locale" in note for note in result.trace.notes)
 
 
-def test_helloagents_orchestrator_warns_when_weather_guidance_locale_mismatches(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    result = orchestrator.plan_trip(_zh_planning_request())
-
-    assert result.days[0].weather is not None
-    assert "cool" in result.days[0].weather.summary.casefold()
-    assert any("Weather specialist output did not fully match the requested locale" in note for note in result.trace.notes)
 
 
 
 
-def test_helloagents_orchestrator_attaches_weather_citations(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
-    monkeypatch.setattr(
-        HelloAgentsOrchestrator,
-        "_build_role_mcp_clients",
-        lambda self, role_name: [(object(), {"answer"})] if role_name == "weather_specialist" else [],
-    )
-    monkeypatch.setattr(
-        HelloAgentsOrchestrator,
-        "_call_search_like_tool",
-        lambda self, client, tool_name, query, num_results, *, role_name: {
-            "answer": "Mock weather answer",
-            "results": [
-                {"url": "https://weather.example.test/forecast"},
-                {"url": "https://weather.example.test/advisory"},
-            ],
-        },
-    )
-
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    result = orchestrator.plan_trip(_planning_request())
-
-    weather_run = next(run for run in result.trace.agent_runs if run.key == "weather_specialist")
-    assert "https://weather.example.test/forecast" in weather_run.citations
-    assert "https://weather.example.test/advisory" in weather_run.citations
-    assert result.days[0].weather is not None
-    assert result.days[0].weather.citations == [
-        "https://weather.example.test/forecast",
-        "https://weather.example.test/advisory",
-    ]
 
 
 
-def test_helloagents_orchestrator_embeds_daily_weather_into_days(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    result = orchestrator.plan_trip(_planning_request())
-
-    assert result.days[0].weather is not None
-    assert result.days[0].weather.summary.startswith("Day 1:")
-    assert result.days[0].weather.notes
-    assert len(result.days[0].weather.notes) <= 2
-    assert result.days[1].weather is not None
-    assert result.days[1].weather.summary.startswith("Day 2:")
-    assert len(result.days[1].weather.notes) <= 2
 
 
 def test_helloagents_planner_hotels_payload_filters_unverified_concrete_hotels():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
-    unverified = HelloAgentsHotelCandidate(
+    unverified = HotelCandidate(
         name="大理中央地标酒店",
         area="大理古城",
         reason="Looks central, but no source URL was returned.",
         price_hint="current search snapshot",
         booking_confidence="medium",
     )
-    hotel = HelloAgentsHotelRecommendation(
+    hotel = HotelRecommendation(
         recommended_areas=["大理古城"],
         final_recommended_hotel=unverified,
         hotel_candidates=[unverified],
@@ -2509,11 +1937,11 @@ def test_helloagents_planner_hotels_payload_filters_unverified_concrete_hotels()
 
 
 def test_helloagents_planner_hotels_payload_keeps_source_backed_hotels():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
-    verified = HelloAgentsHotelCandidate(
+    verified = HotelCandidate(
         name="Verified Dali Hotel",
         city="Dali",
         area="Dali Old Town",
@@ -2523,7 +1951,7 @@ def test_helloagents_planner_hotels_payload_keeps_source_backed_hotels():
         source_urls=["https://hotel.example.test/dali-verified"],
         source_page_titles=["Verified Dali Hotel | official listing"],
     )
-    hotel = HelloAgentsHotelRecommendation(
+    hotel = HotelRecommendation(
         recommended_areas=["Dali Old Town"],
         final_recommended_hotel=verified,
         hotel_candidates=[verified],
@@ -2537,14 +1965,14 @@ def test_helloagents_planner_hotels_payload_keeps_source_backed_hotels():
 
 
 def test_helloagents_parser_uses_last_valid_object_when_response_contains_conflicting_objects():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
 
     parsed = orchestrator._parse_structured_response(
         '{"destination":"Kyoto","trip_days":2}{"destination":"Osaka","trip_days":3}',
-        HelloAgentsBrief,
+        PlanningBrief,
     )
 
     assert parsed.destination == "Osaka"
@@ -2552,11 +1980,11 @@ def test_helloagents_parser_uses_last_valid_object_when_response_contains_confli
 
 
 def test_helloagents_hotel_verification_requires_city_and_page_entity_match():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
-    valid = HelloAgentsHotelCandidate(
+    valid = HotelCandidate(
         name="汕头小公园宜必思酒店",
         city="汕头",
         area="金平区",
@@ -2573,23 +2001,23 @@ def test_helloagents_hotel_verification_requires_city_and_page_entity_match():
 
 
 def test_helloagents_hotel_verification_removes_conflicting_source_url_candidates():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
-    first = HelloAgentsHotelCandidate(
+    first = HotelCandidate(
         name="汕头宜必思酒店",
         city="汕头",
         source_urls=["https://hotel.example.test/hotel-123"],
         source_page_titles=["汕头宜必思酒店 | 酒店详情"],
     )
-    second = HelloAgentsHotelCandidate(
+    second = HotelCandidate(
         name="汕头新华酒店",
         city="汕头",
         source_urls=["https://hotel.example.test/hotel-123"],
         source_page_titles=["汕头新华酒店 | 酒店详情"],
     )
-    hotel = HelloAgentsHotelRecommendation(
+    hotel = HotelRecommendation(
         recommended_areas=["金平区"],
         final_recommended_hotel=first,
         hotel_candidates=[first, second],
@@ -2603,7 +2031,7 @@ def test_helloagents_hotel_verification_removes_conflicting_source_url_candidate
 
 
 def test_helloagents_planner_poi_payload_excludes_food_pois():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -2626,115 +2054,19 @@ def test_helloagents_planner_poi_payload_excludes_food_pois():
 
 
 
-def test_helloagents_orchestrator_adds_grounding_links_to_agent_citations_and_temperature_to_day_weather(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
-
-    def fake_augment(self, role_name, input_payload):
-        del self
-        if role_name == "poi_specialist":
-            input_payload["tool_results"] = {
-                "grounding_docs": [
-                    {"url": "https://www.xiaohongshu.com/explore/attraction-post"},
-                    {"url": "https://official.example.test/guide"},
-                    {"url": "https://www.xiaohongshu.com/explore/food-post"},
-                ],
-                "crawl_urls": ["https://food.example.test/detail"],
-            }
-        elif role_name == "hotel_specialist":
-            input_payload["tool_results"] = {
-                "grounding_docs": [
-                    {"url": "https://www.xiaohongshu.com/explore/hotel-post"},
-                ],
-                "crawl_urls": ["https://hotel.example.test/detail"],
-            }
-        elif role_name == "weather_specialist":
-            input_payload["tool_results"] = {
-                "citations": ["https://weather.example.test/forecast"],
-                "answer": {
-                    "text": "Forecast temperatures around 24?C to 30?C with afternoon rain risk.",
-                },
-                "grounding_docs": [
-                    {"url": "https://weather.example.test/climate-guide"},
-                    {"url": "https://transport.example.test/rail-fares"},
-                ],
-            }
-        elif role_name == "transport_specialist":
-            input_payload["tool_results"] = {
-                "citations": ["https://transport.example.test/rail-fares"],
-                "grounding_docs": [
-                    {"url": "https://transport.example.test/rail-fares"},
-                ],
-            }
-        return input_payload
-
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_augment_payload_with_tool_results", fake_augment)
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    result = orchestrator.plan_trip(_planning_request())
-
-    poi_run = next(run for run in result.trace.agent_runs if run.key == "poi_specialist")
-    hotel_run = next(run for run in result.trace.agent_runs if run.key == "hotel_specialist")
-    transport_run = next(run for run in result.trace.agent_runs if run.key == "transport_specialist")
-
-    assert "https://www.xiaohongshu.com/explore/attraction-post" in poi_run.citations
-    assert "https://www.xiaohongshu.com/explore/food-post" in poi_run.citations
-    assert "https://food.example.test/detail" in poi_run.citations
-    assert "https://www.xiaohongshu.com/explore/hotel-post" in hotel_run.citations
-    assert "https://hotel.example.test/detail" in hotel_run.citations
-    assert "https://transport.example.test/rail-fares" in transport_run.citations
-    assert result.days[0].weather is not None
-    assert "24" in result.days[0].weather.summary
-    grounding_urls = [doc.get("url") for doc in result.trace.grounding_documents]
-    assert "https://weather.example.test/climate-guide" in grounding_urls
-    assert grounding_urls.count("https://transport.example.test/rail-fares") == 1
 
 
 
-def test_helloagents_poi_specialist_records_input_and_output_snapshots(monkeypatch):
-    calls: list[str] = []
-    events: list[dict[str, object]] = []
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
-
-    def fake_log_job_event(event, **payload):
-        events.append({"event": event, "payload": payload})
-        return None
-
-    monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    result = orchestrator.plan_trip(_planning_request())
-
-    poi_run = next(run for run in result.trace.agent_runs if run.key == "poi_specialist")
-    assert any("POI input snapshot:" in note for note in poi_run.notes)
-    assert any("POI tool snapshot: search_tool=none, search_query=none" in note for note in poi_run.notes)
-    assert any("POI output snapshot:" in note and "Ginkaku-ji" in note for note in poi_run.notes)
-
-    input_event = next(item for item in events if item["event"] == "helloagents_poi_specialist_input_snapshot")
-    output_event = next(item for item in events if item["event"] == "helloagents_poi_specialist_output_snapshot")
-    input_snapshot = input_event["payload"]["snapshot"]
-    output_snapshot = output_event["payload"]["snapshot"]
-
-    assert input_snapshot["trip_request"]["destination"] == "Kyoto"
-    assert input_snapshot["tool_results"] == {}
-    assert any(item["name"] == "Ginkaku-ji" and item["kind"] == "attraction" for item in output_snapshot["featured_pois"])
-    assert any(item["name"] == "Nishiki Market brunch" and item["kind"] == "market" for item in output_snapshot["featured_pois"])
 
 
 
 def test_helloagents_build_day_weather_uses_tool_temperature_hint_when_daily_outlook_omits_it():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
 
-    weather_guidance = helloagents_module.HelloAgentsWeatherGuidance(
+    weather_guidance = planning_core_module.WeatherGuidance(
         overall_outlook="Mild spring weather with occasional rain.",
         daily_outlook=["Day 1: light rain risk after lunch."],
         packing_notes=["Carry a compact umbrella."],
@@ -2754,20 +2086,20 @@ def test_helloagents_build_day_weather_uses_tool_temperature_hint_when_daily_out
 
 
 def test_helloagents_build_day_weather_uses_matching_date_sources():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
-    weather_guidance = helloagents_module.HelloAgentsWeatherGuidance(
+    weather_guidance = planning_core_module.WeatherGuidance(
         overall_outlook="Warm with showers.",
         source_urls=["https://weather.example.test/city"],
         daily_forecasts=[
-            helloagents_module.HelloAgentsDailyForecast(
+            planning_core_module.DailyForecast(
                 date=date(2026, 4, 14),
                 outlook="18°C to 24°C.",
                 source_urls=["https://weather.example.test/2026-04-14"],
             ),
-            helloagents_module.HelloAgentsDailyForecast(
+            planning_core_module.DailyForecast(
                 date=date(2026, 4, 15),
                 outlook="19°C to 25°C.",
                 source_urls=["https://weather.example.test/2026-04-15"],
@@ -2810,8 +2142,8 @@ def test_helloagents_weather_tool_results_use_deep_research_when_available(monke
             }
         raise AssertionError(f"Unexpected MCP tool: {tool_name}")
 
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
-    orchestrator = HelloAgentsOrchestrator(
+    monkeypatch.setattr(PlanningCore, "_call_mcp_tool", fake_call)
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -2851,8 +2183,8 @@ def test_helloagents_hotel_tool_results_crawl_top_search_urls_when_available(mon
             }
         raise AssertionError(f"Unexpected MCP tool: {tool_name}")
 
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
-    orchestrator = HelloAgentsOrchestrator(
+    monkeypatch.setattr(PlanningCore, "_call_mcp_tool", fake_call)
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -2879,7 +2211,7 @@ def test_helloagents_hotel_tool_results_crawl_top_search_urls_when_available(mon
 
 def test_helloagents_hotel_tool_results_include_grounding_docs(monkeypatch):
     monkeypatch.setattr(
-        helloagents_module,
+        planning_core_module,
         "search_documents",
         lambda query, destination, manual_links, *, interests=None, social_context="general", search_service_config=None, xhs_source_enabled=True, xhs_user_id=None: [
             SearchDocumentResponse(
@@ -2904,11 +2236,11 @@ def test_helloagents_hotel_tool_results_include_grounding_docs(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        HelloAgentsOrchestrator,
+        PlanningCore,
         "_call_mcp_tool",
         lambda self, client, tool_name, arguments, *, role_name: {"results": [{"url": "https://stay.example.test/hotel-alpha"}]},
     )
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -2929,16 +2261,16 @@ def test_helloagents_hotel_tool_results_include_grounding_docs(monkeypatch):
 
 def test_helloagents_weather_tool_results_do_not_include_social_grounding(monkeypatch):
     monkeypatch.setattr(
-        helloagents_module,
+        planning_core_module,
         "search_documents",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("weather should not request social grounding")),
     )
     monkeypatch.setattr(
-        HelloAgentsOrchestrator,
+        PlanningCore,
         "_call_search_like_tool",
         lambda self, client, tool_name, query, num_results, *, role_name: {"answer": "Mock weather answer", "results": []},
     )
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -2962,9 +2294,9 @@ def test_helloagents_poi_specialist_augment_skips_tool_collection_with_native_se
         del self
         raise AssertionError(f"POI specialist should not build tool clients for {role_name}")
 
-    monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_build_role_mcp_clients", forbidden_build_role_mcp_clients)
-    orchestrator = HelloAgentsOrchestrator(
+    monkeypatch.setattr(planning_core_module, "log_job_event", fake_log_job_event)
+    monkeypatch.setattr(PlanningCore, "_build_role_mcp_clients", forbidden_build_role_mcp_clients)
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://rainflow.example.test/v1", api_key="test-key", model="Web/grok-chat-fast", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -2987,7 +2319,7 @@ def test_helloagents_poi_specialist_augment_skips_tool_collection_with_native_se
 
 def test_helloagents_poi_specialist_augment_collects_mcp_evidence_without_native_search(monkeypatch):
     monkeypatch.setattr(
-        helloagents_module,
+        planning_core_module,
         "search_documents",
         lambda query, destination, manual_links, **kwargs: [],
     )
@@ -2995,18 +2327,18 @@ def test_helloagents_poi_specialist_augment_collects_mcp_evidence_without_native
         config=SearchServiceConfig(provider="groksearch", transport="mcp", base_url="https://groksearch.example.test/mcp", api_key="test-key")
     )
     monkeypatch.setattr(
-        HelloAgentsOrchestrator,
+        PlanningCore,
         "_build_role_mcp_clients",
         lambda self, role_name: [(fake_client, {"web_search"})],
     )
     monkeypatch.setattr(
-        HelloAgentsOrchestrator,
+        PlanningCore,
         "_call_mcp_tool",
         lambda self, client, tool_name, arguments, *, role_name: {
             "sources": [{"url": "https://example.test/kyoto-guide", "title": "Kyoto guide"}]
         },
     )
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3025,7 +2357,7 @@ def test_helloagents_poi_specialist_augment_collects_mcp_evidence_without_native
 
 
 def test_helloagents_has_native_search_requires_known_web_model():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3047,8 +2379,8 @@ def test_helloagents_has_native_search_requires_known_web_model():
     ) is True
 
 
-def _booking_orchestrator() -> HelloAgentsOrchestrator:
-    return HelloAgentsOrchestrator(
+def _booking_orchestrator() -> PlanningCore:
+    return PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3058,7 +2390,7 @@ def test_food_booking_info_negated_reservation_hint_is_not_required():
     orchestrator = _booking_orchestrator()
     for hint in ("无需预约，随到随吃", "无须预约", "不需要预约", "不用预约", "免预约", "No reservation needed", "Reservation not required", "Walk-in only", "walk in welcome"):
         booking = orchestrator._build_food_booking_info(
-            helloagents_module.HelloAgentsFoodPoi(name="Test Diner", reservation_hint=hint)
+            planning_core_module.FoodPoi(name="Test Diner", reservation_hint=hint)
         )
         assert booking is not None, hint
         assert booking.reservation_required is False, hint
@@ -3069,7 +2401,7 @@ def test_food_booking_info_positive_reservation_hint_is_required():
     orchestrator = _booking_orchestrator()
     for hint in ("需要预约", "需预约", "建议预约", "请提前订位", "Reservation required", "Please reserve ahead"):
         booking = orchestrator._build_food_booking_info(
-            helloagents_module.HelloAgentsFoodPoi(name="Test Diner", reservation_hint=hint)
+            planning_core_module.FoodPoi(name="Test Diner", reservation_hint=hint)
         )
         assert booking is not None, hint
         assert booking.reservation_required is True, hint
@@ -3086,8 +2418,8 @@ def test_helloagents_direct_grok_specialist_skips_mcp_tool_collection(monkeypatc
         del self
         raise AssertionError(f"Grok direct specialist should not build tool clients for {role_name}")
 
-    monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_build_role_mcp_clients", forbidden_build_role_mcp_clients)
+    monkeypatch.setattr(planning_core_module, "log_job_event", fake_log_job_event)
+    monkeypatch.setattr(PlanningCore, "_build_role_mcp_clients", forbidden_build_role_mcp_clients)
     config = LlmConfig.from_mapping(
         {
             "base_url": "https://default.example.test/v1",
@@ -3105,7 +2437,7 @@ def test_helloagents_direct_grok_specialist_skips_mcp_tool_collection(monkeypatc
             },
         }
     )
-    orchestrator = HelloAgentsOrchestrator(config, maps_provider=StubMapsPoiProvider())
+    orchestrator = PlanningCore(config, maps_provider=StubMapsPoiProvider())
     payload = {
         "trip_request": {"destination": "Kyoto"},
         "planning_brief": {"destination": "Kyoto"},
@@ -3203,7 +2535,7 @@ def test_hotel_specialist_prompt_rejects_unsourced_concrete_hotel_names():
 def test_helloagents_poi_tool_results_use_groksearch_search_evidence_only(monkeypatch):
     calls: list[tuple[str, dict[str, object], str]] = []
     monkeypatch.setattr(
-        helloagents_module,
+        planning_core_module,
         "search_documents",
         lambda query, destination, manual_links, **kwargs: [],
     )
@@ -3230,8 +2562,8 @@ def test_helloagents_poi_tool_results_use_groksearch_search_evidence_only(monkey
             }
         raise AssertionError(f"Unexpected MCP tool: {tool_name}")
 
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
-    orchestrator = HelloAgentsOrchestrator(
+    monkeypatch.setattr(PlanningCore, "_call_mcp_tool", fake_call)
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3264,7 +2596,7 @@ def test_helloagents_poi_tool_results_use_groksearch_search_evidence_only(monkey
 def test_helloagents_poi_tool_results_fall_back_to_groksearch_answer_when_web_search_is_unavailable(monkeypatch):
     calls: list[tuple[str, dict[str, object], str]] = []
     monkeypatch.setattr(
-        helloagents_module,
+        planning_core_module,
         "search_documents",
         lambda query, destination, manual_links, **kwargs: [],
     )
@@ -3284,8 +2616,8 @@ def test_helloagents_poi_tool_results_fall_back_to_groksearch_answer_when_web_se
             "sources": [{"url": "https://example.test/kyoto-poi", "title": "Kyoto POI guide"}],
         }
 
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
-    orchestrator = HelloAgentsOrchestrator(
+    monkeypatch.setattr(PlanningCore, "_call_mcp_tool", fake_call)
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3331,8 +2663,8 @@ def test_helloagents_mcp_tool_call_logs_request_and_response_snapshots(monkeypat
                 ],
             }
 
-    monkeypatch.setattr(helloagents_module, "log_job_event", fake_log_job_event)
-    orchestrator = HelloAgentsOrchestrator(
+    monkeypatch.setattr(planning_core_module, "log_job_event", fake_log_job_event)
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3353,7 +2685,7 @@ def test_helloagents_mcp_tool_call_logs_request_and_response_snapshots(monkeypat
 
 def test_helloagents_weather_tool_results_use_groksearch_web_search(monkeypatch):
     monkeypatch.setattr(
-        HelloAgentsOrchestrator,
+        PlanningCore,
         "_call_search_like_tool",
         lambda self, client, tool_name, query, num_results, *, role_name: {
             "session_id": "session_123",
@@ -3361,7 +2693,7 @@ def test_helloagents_weather_tool_results_use_groksearch_web_search(monkeypatch)
             "sources": [{"url": "https://weather.example.test/forecast"}],
         },
     )
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3392,13 +2724,13 @@ def test_helloagents_hotel_tool_results_use_groksearch_answer_without_fetch(monk
             }
         raise AssertionError(f"Unexpected MCP tool: {tool_name}")
 
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
+    monkeypatch.setattr(PlanningCore, "_call_mcp_tool", fake_call)
     monkeypatch.setattr(
-        helloagents_module,
+        planning_core_module,
         "search_documents",
         lambda query, destination, manual_links, *, interests=None, social_context="general", search_service_config=None, xhs_source_enabled=True: [],
     )
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3443,13 +2775,13 @@ def test_helloagents_transport_tool_results_use_groksearch_answer_without_fetch(
             }
         raise AssertionError(f"Unexpected MCP tool: {tool_name}")
 
-    monkeypatch.setattr(HelloAgentsOrchestrator, "_call_mcp_tool", fake_call)
+    monkeypatch.setattr(PlanningCore, "_call_mcp_tool", fake_call)
     monkeypatch.setattr(
-        helloagents_module,
+        planning_core_module,
         "search_documents",
         lambda query, destination, manual_links, *, interests=None, social_context="general", search_service_config=None, xhs_source_enabled=True: [],
     )
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3486,7 +2818,7 @@ def test_helloagents_transport_tool_results_use_groksearch_answer_without_fetch(
 
 
 def test_helloagents_extract_urls_from_text_payload():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3502,7 +2834,7 @@ def test_helloagents_extract_urls_from_text_payload():
 
 
 def test_helloagents_role_prompt_payload_strips_tool_url_metadata():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3530,7 +2862,7 @@ def test_helloagents_role_prompt_payload_strips_tool_url_metadata():
 
 
 def test_helloagents_hotel_prompt_payload_compacts_large_tool_results():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3579,7 +2911,7 @@ def test_helloagents_hotel_prompt_payload_compacts_large_tool_results():
 
 
 def test_helloagents_transport_prompt_payload_compacts_large_tool_results():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3629,7 +2961,7 @@ def test_helloagents_transport_prompt_payload_compacts_large_tool_results():
 
 
 def test_helloagents_poi_prompt_payload_uses_compact_evidence_brief():
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3721,7 +3053,7 @@ def test_helloagents_poi_grounding_accepts_lightweight_top_pois_shape():
         ],
     }
 
-    grounding = HelloAgentsPoiGrounding.model_validate(payload)
+    grounding = PoiGrounding.model_validate(payload)
 
     assert grounding.title == "去大理值得去的POI推荐列表"
     assert len(grounding.top_pois) == 2
@@ -3738,7 +3070,7 @@ def test_helloagents_poi_grounding_accepts_lightweight_top_pois_shape():
     assert grounding.featured_pois[1].confidence == "low"
     assert grounding.poi_risks
 
-    orchestrator = HelloAgentsOrchestrator(
+    orchestrator = PlanningCore(
         LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
         maps_provider=StubMapsPoiProvider(),
     )
@@ -3764,7 +3096,7 @@ def test_helloagents_poi_grounding_accepts_lightweight_top_pois_shape():
 
 
 def test_helloagents_poi_grounding_rejects_generic_homepage_evidence_and_keeps_detail_pages():
-    grounding = HelloAgentsPoiGrounding.model_validate(
+    grounding = PoiGrounding.model_validate(
         {
             "top_pois": [
                 {
@@ -3795,7 +3127,7 @@ def test_helloagents_poi_grounding_rejects_generic_homepage_evidence_and_keeps_d
     assert grounding.featured_pois[1].source_urls == []
     assert grounding.featured_pois[1].confidence == "low"
 
-    ranking_grounding = HelloAgentsPoiGrounding.model_validate(
+    ranking_grounding = PoiGrounding.model_validate(
         {
             "top_pois": [
                 {
@@ -3812,7 +3144,7 @@ def test_helloagents_poi_grounding_rejects_generic_homepage_evidence_and_keeps_d
 
 def test_helloagents_poi_grounding_keeps_shared_regional_guide_for_multiple_pois():
     shared_url = "https://travel.example.test/shantou-old-town-guide"
-    grounding = HelloAgentsPoiGrounding.model_validate(
+    grounding = PoiGrounding.model_validate(
         {
             "top_pois": [
                 {"name": "小公园开埠区", "kind": "district", "source_urls": [shared_url]},
@@ -3824,18 +3156,6 @@ def test_helloagents_poi_grounding_keeps_shared_regional_guide_for_multiple_pois
 
     assert [poi.source_urls for poi in grounding.featured_pois] == [[shared_url], [shared_url], [shared_url]]
 
-def test_helloagents_orchestrator_warns_when_chinese_final_payload_is_not_localized(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(helloagents_module, "import_module", lambda _: _fake_helloagents_module(calls))
-    orchestrator = HelloAgentsOrchestrator(
-        LlmConfig(base_url="https://llm.example.test/v1", api_key="test-key", model="gpt-test", wire_api="responses"),
-        maps_provider=StubMapsPoiProvider(),
-    )
-
-    result = orchestrator.plan_trip(_zh_planning_request())
-
-    assert result.summary.startswith("Two Kyoto days")
-    assert any("Itinerary planner output did not fully match the requested locale" in note for note in result.trace.notes)
 
 
 def test_parse_planning_response_unwraps_nested_itinerary_payload():

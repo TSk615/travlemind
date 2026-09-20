@@ -89,3 +89,45 @@ def test_drain_audit_allows_active_langgraph_job(client):
         assert audit.safe_to_remove_legacy_runtime is True
         assert audit.active_jobs_by_provider == {"langgraph": 1}
         assert audit.blocking_job_ids == []
+
+
+def test_drain_audit_reports_pre_workflow_schema_without_mutating_it(tmp_path):
+    import json
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    from travelmind_api.services.workflow_rollout import audit_workflow_drain
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'legacy.db').as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE job_records ("
+                "id VARCHAR(40) PRIMARY KEY, type VARCHAR(64), status VARCHAR(32), "
+                "payload_json JSON, created_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO job_records (id, type, status, payload_json) "
+                "VALUES (:id, :type, :status, :payload)"
+            ),
+            {
+                "id": "job-legacy-schema",
+                "type": "trip.generate",
+                "status": "queued",
+                "payload": json.dumps({"trip_id": "trip-1"}),
+            },
+        )
+
+    with Session(engine) as session:
+        audit = audit_workflow_drain(session)
+
+    assert audit.safe_to_remove_legacy_runtime is False
+    assert audit.schema_ready_for_langgraph is False
+    assert len(audit.schema_blockers) == 2
+    assert audit.unknown_provider_job_ids == ["job-legacy-schema"]
+    with engine.connect() as connection:
+        columns = connection.execute(text("PRAGMA table_info(job_records)")).all()
+    assert "workflow_run_id" not in {row[1] for row in columns}

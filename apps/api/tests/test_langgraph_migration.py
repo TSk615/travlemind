@@ -15,7 +15,7 @@ from travelmind_api.agents.base import (
     PlanningResult,
     RefinementContext,
 )
-from travelmind_api.agents.helloagents import HelloAgentsBrief, HelloAgentsOrchestrator
+from travelmind_api.agents.planning_core import PlanningBrief, PlanningCore
 from travelmind_api.agents.factory import build_orchestrator
 from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator
 from travelmind_api.agents.provider import normalize_agent_provider, select_agent_provider_for_new_job
@@ -25,7 +25,7 @@ from travelmind_api.agents.workflows.trip_generation import (
     build_brief_probe_graph,
     build_initial_state,
 )
-from travelmind_api.prompts.roles.helloagents import build_brief_parser_prompt as build_legacy_brief_prompt
+from travelmind_api.prompts.roles.planning import build_brief_parser_prompt as build_legacy_brief_prompt
 from travelmind_api.prompts.roles.trip import build_brief_parser_prompt
 from travelmind_api.core.config import Settings
 from travelmind_api.services.llm.config import LlmConfig
@@ -108,9 +108,9 @@ class _RecordingInvoker:
 
 
 def test_framework_neutral_brief_schema_and_prompt_remain_legacy_compatible():
-    assert HelloAgentsBrief is PlanningBrief
+    assert PlanningBrief is PlanningBrief
     assert build_legacy_brief_prompt() == build_brief_parser_prompt()
-    assert HelloAgentsOrchestrator(None)._build_trip_payload(_request()) == build_trip_request_payload(_request())
+    assert PlanningCore(None)._build_trip_payload(_request()) == build_trip_request_payload(_request())
 
 
 def test_openai_compatible_role_invoker_preserves_citations_and_unknown_usage():
@@ -226,19 +226,19 @@ def test_langgraph_rollout_assignment_is_deterministic_and_honors_boundaries():
         "langgraph",
         rollout_key="job-1",
         langgraph_rollout_percent=0,
-        fallback_provider="helloagents",
-    ) == "helloagents"
+        fallback_provider="standard",
+    ) == "standard"
     assert select_agent_provider_for_new_job(
         "langgraph",
         rollout_key="job-1",
         langgraph_rollout_percent=100,
-        fallback_provider="helloagents",
+        fallback_provider="standard",
     ) == "langgraph"
     assert select_agent_provider_for_new_job(
         "standard",
         rollout_key="job-1",
         langgraph_rollout_percent=100,
-        fallback_provider="helloagents",
+        fallback_provider="standard",
     ) == "standard"
 
     assignments = [
@@ -246,7 +246,7 @@ def test_langgraph_rollout_assignment_is_deterministic_and_honors_boundaries():
             "langgraph",
             rollout_key=f"job-{index}",
             langgraph_rollout_percent=50,
-            fallback_provider="helloagents",
+            fallback_provider="standard",
         )
         for index in range(100)
     ]
@@ -255,11 +255,11 @@ def test_langgraph_rollout_assignment_is_deterministic_and_honors_boundaries():
             "langgraph",
             rollout_key=f"job-{index}",
             langgraph_rollout_percent=50,
-            fallback_provider="helloagents",
+            fallback_provider="standard",
         )
         for index in range(100)
     ]
-    assert {"langgraph", "helloagents"}.issubset(set(assignments))
+    assert {"langgraph", "standard"}.issubset(set(assignments))
 
 
 def test_partial_langgraph_rollout_requires_a_stable_job_key():
@@ -280,19 +280,19 @@ def test_job_provider_snapshot_survives_rollout_switch(monkeypatch):
     monkeypatch.setattr(
         handlers,
         "settings",
-        Settings(langgraph_rollout_percent=0, langgraph_rollout_fallback_provider="helloagents"),
+        Settings(langgraph_rollout_percent=0, langgraph_rollout_fallback_provider="standard"),
     )
     first = handlers._resolve_job_agent_provider(user=user, job=job, existing_run=None)
     monkeypatch.setattr(
         handlers,
         "settings",
-        Settings(langgraph_rollout_percent=100, langgraph_rollout_fallback_provider="helloagents"),
+        Settings(langgraph_rollout_percent=100, langgraph_rollout_fallback_provider="standard"),
     )
     retry = handlers._resolve_job_agent_provider(user=user, job=job, existing_run=None)
 
-    assert first == "helloagents"
+    assert first == "standard"
     assert retry == first
-    assert job.payload_json["workflow_provider"] == "helloagents"
+    assert job.payload_json["workflow_provider"] == "standard"
 
 
 def test_settings_rejects_invalid_langgraph_rollout_percentage():
@@ -301,11 +301,11 @@ def test_settings_rejects_invalid_langgraph_rollout_percentage():
 
 
 def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monkeypatch):
-    from test_llm_orchestrator import _fake_helloagents_module
+    from test_llm_orchestrator import _fake_planning_core_module
     import travelmind_api.agents.langgraph_orchestrator as langgraph_module
 
     calls: list[str] = []
-    fake_module = _fake_helloagents_module(calls)
+    fake_module = _fake_planning_core_module(calls)
 
     class FixtureRoleInvoker:
         def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
@@ -379,11 +379,11 @@ def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monke
 
 
 def test_langgraph_orchestrator_repairs_one_invalid_draft(monkeypatch):
-    from test_llm_orchestrator import _fake_helloagents_module
+    from test_llm_orchestrator import _fake_planning_core_module
     import travelmind_api.agents.langgraph_orchestrator as langgraph_module
 
     calls: list[str] = []
-    fake_module = _fake_helloagents_module(calls)
+    fake_module = _fake_planning_core_module(calls)
     planner_calls = 0
 
     class RepairingFixtureInvoker:

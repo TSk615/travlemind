@@ -65,7 +65,7 @@ const messages: Record<LocaleCode, Record<string, unknown>> = {
       ],
       cards: {
         search: { kicker: "Search", title: "Official-first retrieval", description: "Seeded official sources plus manual links, with placeholder trust scoring for future ranking upgrades." },
-        planning: { kicker: "Planning", title: "Adapter-based agents", description: "`helloagents` stays behind an internal orchestrator boundary, so the product contract is not locked to a PoC dependency." },
+        planning: { kicker: "Planning", title: "Durable agent workflows", description: "LangGraph coordinates resumable role execution behind a framework-neutral product contract." },
         export: { kicker: "Export", title: "Shareable trip packets", description: "PDF export runs through the same job system as itinerary generation, which keeps progress reporting consistent." }
       }
     },
@@ -235,7 +235,7 @@ const messages: Record<LocaleCode, Record<string, unknown>> = {
       ],
       cards: {
         search: { kicker: "检索", title: "官方优先召回", description: "当前版本优先使用官方来源和手动链接，并为后续评分升级预留占位能力。" },
-        planning: { kicker: "规划", title: "可替换 Agent 编排", description: "`helloagents` 被封装在内部编排边界之后，产品接口不会被 PoC 依赖锁死。" },
+        planning: { kicker: "规划", title: "可恢复 Agent 工作流", description: "LangGraph 在框架中立的产品契约后协调可恢复的角色执行。" },
         export: { kicker: "导出", title: "可分享行程包", description: "PDF 导出与行程生成共用同一套任务系统，因此进度反馈保持一致。" }
       }
     },

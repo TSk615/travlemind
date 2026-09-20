@@ -668,7 +668,7 @@ def _process_trip_generation(job: JobExecution) -> dict:
         ).strip()
         existing_run = session.get(WorkflowRun, requested_run_id) if requested_run_id else None
         provider = _resolve_job_agent_provider(user=user, job=job_record, existing_run=existing_run)
-        if provider in {"helloagents", "langgraph"}:
+        if provider == AGENT_PROVIDER_LANGGRAPH:
             missing_poi_fields = user_poi_role_override_missing_fields(user)
             if missing_poi_fields:
                 raise HTTPException(
@@ -707,7 +707,6 @@ def _process_trip_generation(job: JobExecution) -> dict:
             settings,
             llm_config=llm_config,
             agent_provider=provider,
-            enable_helloagents=True,
             progress_callback=lambda role_key, role_title, role_description, progress_percent: _emit_agent_progress(
                 job.id,
                 role_key,
@@ -885,7 +884,6 @@ def _process_trip_refine(job: JobExecution) -> dict:
             settings,
             llm_config=llm_config,
             agent_provider=provider,
-            enable_helloagents=False,
             progress_callback=lambda role_key, role_title, role_description, progress_percent: _emit_agent_progress(
                 job.id,
                 role_key,
@@ -1050,7 +1048,6 @@ def _process_pdf_export(job: JobExecution) -> dict:
             settings,
             llm_config=_resolve_llm_config(user, job.payload),
             agent_provider=_resolve_agent_provider(user),
-            enable_helloagents=False,
         )
         orchestrator.set_execution_context(job_id=job.id)
         request = _build_request(trip, user)

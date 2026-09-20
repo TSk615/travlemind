@@ -7,7 +7,7 @@ param(
     [switch]$InlineMode,
     [switch]$ArqMode,
     [switch]$StubAgent,
-    [switch]$HelloAgents,
+    [switch]$LangGraph,
     [int]$BridgePort = 8085,
     [int]$ApiPort = 8000,
     [int]$WebPort = 5173
@@ -37,8 +37,8 @@ New-Item -ItemType Directory -Force -Path $env:NPM_CONFIG_CACHE | Out-Null
 if ($InlineMode -and $ArqMode) {
     throw "-InlineMode and -ArqMode cannot be used together."
 }
-if ($StubAgent -and $HelloAgents) {
-    throw "-StubAgent and -HelloAgents cannot be used together."
+if ($StubAgent -and $LangGraph) {
+    throw "-StubAgent and -LangGraph cannot be used together."
 }
 
 $selectedPorts = @()
@@ -209,8 +209,6 @@ function Stop-StartedProcesses {
 }
 
 $queueMode = if ($ArqMode) { "arq" } else { "inline" }
-$agentProvider = if ($HelloAgents) { "helloagents" } else { "stub" }
-
 $uvEnv = @{ "UV_CACHE_DIR" = (Join-Path $repoRoot ".uv-cache") }
 $sharedEnv = @{ "UV_CACHE_DIR" = $uvEnv["UV_CACHE_DIR"] }
 if ($InlineMode -or -not $ArqMode) {
@@ -220,11 +218,11 @@ if ($ArqMode) {
     $sharedEnv["TRAVELMIND_QUEUE_MODE"] = "arq"
     $sharedEnv["TRAVELMIND_REDIS_URL"] = "redis://127.0.0.1:6379/0"
 }
-if ($StubAgent -or -not $HelloAgents) {
+if ($StubAgent -or -not $LangGraph) {
     $sharedEnv["TRAVELMIND_AGENT_PROVIDER"] = "stub"
 }
-if ($HelloAgents) {
-    $sharedEnv["TRAVELMIND_AGENT_PROVIDER"] = "helloagents"
+if ($LangGraph) {
+    $sharedEnv["TRAVELMIND_AGENT_PROVIDER"] = "langgraph"
 }
 
 $started = @()

@@ -4,7 +4,7 @@ from travelmind_api.prompts.planning import (
     build_planning_messages,
     build_planning_prompt_bundle,
 )
-from travelmind_api.prompts.roles.helloagents import (
+from travelmind_api.prompts.roles.planning import (
     ATTRACTION_OUTPUT_SCHEMA,
     BRIEF_OUTPUT_SCHEMA,
     FOOD_OUTPUT_SCHEMA,

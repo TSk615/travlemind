@@ -72,7 +72,7 @@ const isDebug = computed(() => {
 
 const refineModalOpen = ref(false)
 async function openRefineModal() {
-  if (actionLocked.value || !canUseBrowserModel.value) {
+  if (actionLocked.value || !canUseModel.value) {
     return
   }
   refineError.value = null
@@ -379,16 +379,16 @@ const tripId = computed(() => String(props.id ?? ""))
 const routeJobId = computed(() => String(props.jobId ?? ""))
 const hasItinerary = computed(() => Boolean(trip.value?.itinerary))
 const isJobRunning = computed(() => isJobActive(activeJob.value?.status))
-const canCancelActiveJob = computed(() => Boolean(activeJob.value && isJobRunning.value && !activeJob.value.job_id.startsWith("browser:")))
+const canCancelActiveJob = computed(() => Boolean(activeJob.value && isJobRunning.value))
 const actionLocked = computed(() => generatePending.value || resumeGeneratePending.value || refinePending.value || exportPending.value || deletePending.value || itinerarySavePending.value || isJobRunning.value)
 const imageEnrichInProgress = computed(() => activeJob.value?.type === "trip.image_enrich" && isJobRunning.value)
 const canRetryImageEnrichment = computed(() => Boolean(hasItinerary.value && !imageEnrichPending.value && !imageEnrichInProgress.value))
-const canUseBrowserModel = computed(() => settingsStore.loaded && settingsStore.isConfigured)
+const canUseModel = computed(() => settingsStore.loaded && settingsStore.isConfigured)
 const canGenerate = computed(() => settingsStore.loaded && settingsStore.isConfigured)
 const canResumeGeneration = computed(() =>
   Boolean(activeJob.value?.status === "failed" && activeJob.value?.type === "trip.generate" && activeJob.value?.can_resume && !resumeGeneratePending.value && !isJobRunning.value)
 )
-const usesHelloAgents = computed(() => settingsStore.usesHelloAgents)
+const usesLangGraph = computed(() => settingsStore.usesLangGraph)
 const communityPublication = computed(() => trip.value?.community_post ?? null)
 const communityActionLocked = computed(() => actionLocked.value || communityPending.value)
 const communityPreviewImage = computed(() => {
@@ -773,10 +773,10 @@ const currentModeMessage = computed(() => {
   }
 
   if (!latestTrace.value) {
-    return usesHelloAgents.value
+    return usesLangGraph.value
       ? locale.value === "zh-CN"
-        ? "当前配置为 HelloAgents，但这条行程还没有成功执行记录。完成一次生成后，这里会显示每个 agent 实际调用的 endpoint、model 和状态。"
-        : "HelloAgents is configured, but this trip does not have a successful execution trace yet. After the next generation run, this panel will show the real endpoint, model, and status used by each agent."
+        ? "当前配置为 LangGraph，但这条行程还没有成功执行记录。完成一次生成或润色后，这里会显示每个角色实际调用的 endpoint、model 和状态。"
+        : "LangGraph is configured, but this trip does not have a successful execution trace yet. After the next generation or refinement run, this panel will show the endpoint, model, and status used by each role."
       : locale.value === "zh-CN"
         ? "这条行程还没有成功执行记录。完成一次生成或 refine 后，这里会显示最近一次实际执行结果。"
         : "This trip does not have a successful execution trace yet. After the next generation or refine run, this panel will show the latest actual execution result."
@@ -819,10 +819,10 @@ const currentModeMessage = computed(() => {
     : `The latest successful run recorded provider ${formatTraceProvider(latestTrace.value.provider)}.`
 })
 const noActiveJobMessage = computed(() => {
-  if (usesHelloAgents.value) {
+  if (usesLangGraph.value) {
     return locale.value === "zh-CN"
-      ? "当前没有进行中的任务。完成一次生成后，下方会显示最近一次实际 HelloAgents agent 执行明细。"
-      : "No active job is running. After the next generation run, the latest real HelloAgents agent execution details will appear below."
+      ? "当前没有进行中的任务。完成一次生成或润色后，下方会显示最近一次 LangGraph 角色执行明细。"
+      : "No active job is running. After the next generation or refinement run, the latest LangGraph role execution details will appear below."
   }
   return locale.value === "zh-CN"
     ? "当前没有进行中的任务。完成一次生成或 refine 后，下方会显示最近一次实际执行结果。"
@@ -2348,7 +2348,7 @@ onBeforeUnmount(() => {
           <TmButton variant="primary" :disabled="actionLocked || !canGenerate" :loading="generatePending" @click="generate">
             {{ generatePending ? t('common.generating') : t('common.generateItinerary') }}
           </TmButton>
-          <TmButton variant="secondary" :disabled="!hasItinerary || actionLocked || !canUseBrowserModel" @click="openRefineModal">
+          <TmButton variant="secondary" :disabled="!hasItinerary || actionLocked || !canUseModel" @click="openRefineModal">
             {{ copy.quickRefineTitle }}
           </TmButton>
           <TmButton variant="secondary" :disabled="!hasItinerary || communityActionLocked" :loading="communityPending" @click="openCommunityEditor(communityPublication ? 'edit' : 'create')">
@@ -3148,7 +3148,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="tm-detail__quick-actions">
-          <TmButton v-for="action in quickRefineActions" :key="action.label" variant="ghost" size="sm" :disabled="actionLocked || !canUseBrowserModel" @click="runPresetRefine(action)">
+          <TmButton v-for="action in quickRefineActions" :key="action.label" variant="ghost" size="sm" :disabled="actionLocked || !canUseModel" @click="runPresetRefine(action)">
             {{ action.label }}
           </TmButton>
         </div>
@@ -3162,7 +3162,7 @@ onBeforeUnmount(() => {
         />
         <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="refineError" compact />
         <div class="tm-detail__section-actions">
-          <TmButton variant="primary" :disabled="actionLocked || !canUseBrowserModel" :loading="refinePending" @click="submitCustomRefine">
+          <TmButton variant="primary" :disabled="actionLocked || !canUseModel" :loading="refinePending" @click="submitCustomRefine">
             {{ refinePending ? copy.refining : copy.customRefineSubmit }}
           </TmButton>
           <TmButton variant="ghost" :disabled="refinePending" @click="closeRefineModal">{{ communityCopy.cancelAction }}</TmButton>

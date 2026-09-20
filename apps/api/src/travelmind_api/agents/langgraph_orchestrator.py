@@ -11,14 +11,14 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
 from travelmind_api.agents.base import AgentRunStep, PlanningRequest, PlanningResult, RefinementContext
-from travelmind_api.agents.helloagents import (
-    HelloAgentsBrief,
-    HelloAgentsHotelRecommendation,
-    HelloAgentsOrchestrator,
-    HelloAgentsPoiGrounding,
-    HelloAgentsRoleConfig,
-    HelloAgentsTransportGuidance,
-    HelloAgentsWeatherGuidance,
+from travelmind_api.agents.planning_core import (
+    PlanningBrief,
+    HotelRecommendation,
+    PoiGrounding,
+    PlanningRoleConfig,
+    TransportGuidance,
+    WeatherGuidance,
+    PlanningCore,
 )
 from travelmind_api.agents.runtime import RoleProgressCallback, WorkflowRuntime
 from travelmind_api.agents.workflows.state import (
@@ -68,13 +68,11 @@ _ROLE_SEQUENCE = (
 _SEARCH_ROLES = {"poi_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
 
 
-class LangGraphOrchestrator(HelloAgentsOrchestrator):
-    """LangGraph execution over the existing, battle-tested travel rules.
+class LangGraphOrchestrator(PlanningCore):
+    """LangGraph execution over framework-neutral travel planning rules.
 
-    This transitional implementation inherits the deterministic payload,
-    evidence, validation, and result-building helpers. It deliberately does
-    not import or instantiate ``hello_agents.SimpleAgent``; every model call
-    goes through the framework-neutral ``RoleInvoker``.
+    Model calls go through ``RoleInvoker``; the inherited core contains only
+    product schemas, evidence handling, validation, and result assembly.
     """
 
     def __init__(
@@ -95,7 +93,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
         self._graph_checkpointer = checkpointer or InMemorySaver()
         self._workflow_runtime: WorkflowRuntime | None = None
         self._workflow_request: PlanningRequest | None = None
-        self._workflow_role_configs: dict[str, HelloAgentsRoleConfig] = {}
+        self._workflow_role_configs: dict[str, PlanningRoleConfig] = {}
         self._workflow_llm_configs: dict[str, LlmEndpointConfig] = {}
         self._workflow_role_locks: dict[tuple[str, str, str], Lock] = {}
         self._last_graph_state: TripGenerationState | None = None
@@ -391,7 +389,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
             errors.append(f"Expected {expected_days} day entries but received {len(payload.days)}")
         if state["scope"] == "day_plan" and state.get("day_index") is None:
             errors.append("day_index is required for day_plan refinement")
-        errors.extend(validate_timeline(payload, request, HelloAgentsTransportGuidance()))
+        errors.extend(validate_timeline(payload, request, TransportGuidance()))
         if errors and int(state.get("repair_count", 0)) >= 1:
             raise ValueError("Refined itinerary failed deterministic validation: " + "; ".join(errors))
         return {
@@ -600,19 +598,19 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
             "brief_parser",
             {"trip_request": state["trip_request"]},
         )
-        brief = parse_structured_response(result.content, HelloAgentsBrief)
+        brief = parse_structured_response(result.content, PlanningBrief)
         return {
             "planning_brief": brief.model_dump(mode="json"),
             "role_results": {"brief_parser": result.checkpoint_metadata()},
         }
 
     def research_pois(self, state: TripGenerationState) -> dict[str, Any]:
-        brief = HelloAgentsBrief.model_validate(state["planning_brief"])
+        brief = PlanningBrief.model_validate(state["planning_brief"])
         result, payload = self._invoke_workflow_role(
             "poi_specialist",
             self._build_poi_research_payload(self._request(), brief),
         )
-        grounding = parse_structured_response(result.content, HelloAgentsPoiGrounding)
+        grounding = parse_structured_response(result.content, PoiGrounding)
         return {
             "poi_payload": payload,
             "poi_grounding": grounding.model_dump(mode="json"),
@@ -621,12 +619,12 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
 
     def research_weather(self, state: TripGenerationState) -> dict[str, Any]:
         request = self._request()
-        brief = HelloAgentsBrief.model_validate(state["planning_brief"])
+        brief = PlanningBrief.model_validate(state["planning_brief"])
         result, payload = self._invoke_workflow_role(
             "weather_specialist",
             self._build_weather_research_payload(request, brief),
         )
-        weather = parse_structured_response(result.content, HelloAgentsWeatherGuidance)
+        weather = parse_structured_response(result.content, WeatherGuidance)
         weather.source_urls = list(
             dict.fromkeys(
                 [
@@ -643,13 +641,13 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
         }
 
     def join_initial_research(self, state: TripGenerationState) -> dict[str, Any]:
-        grounding = HelloAgentsPoiGrounding.model_validate(state["poi_grounding"])
-        weather = HelloAgentsWeatherGuidance.model_validate(state["weather_guidance"])
+        grounding = PoiGrounding.model_validate(state["poi_grounding"])
+        weather = WeatherGuidance.model_validate(state["weather_guidance"])
         self._validate_weather_date_coverage(weather, self._request())
         return {"poi_collection": self._build_poi_collection(grounding)}
 
     def research_hotels(self, state: TripGenerationState) -> dict[str, Any]:
-        brief = HelloAgentsBrief.model_validate(state["planning_brief"])
+        brief = PlanningBrief.model_validate(state["planning_brief"])
         result, payload = self._invoke_workflow_role(
             "hotel_specialist",
             self._build_hotel_research_payload(
@@ -658,7 +656,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
                 poi_collection=state["poi_collection"],
             ),
         )
-        hotel = parse_structured_response(result.content, HelloAgentsHotelRecommendation)
+        hotel = parse_structured_response(result.content, HotelRecommendation)
         return {
             "hotel_payload": payload,
             "hotel_recommendation": hotel.model_dump(mode="json"),
@@ -666,7 +664,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
         }
 
     def research_transport(self, state: TripGenerationState) -> dict[str, Any]:
-        brief = HelloAgentsBrief.model_validate(state["planning_brief"])
+        brief = PlanningBrief.model_validate(state["planning_brief"])
         result, payload = self._invoke_workflow_role(
             "transport_specialist",
             self._build_transport_research_payload(
@@ -675,7 +673,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
                 poi_collection=state["poi_collection"],
             ),
         )
-        transport = parse_structured_response(result.content, HelloAgentsTransportGuidance)
+        transport = parse_structured_response(result.content, TransportGuidance)
         return {
             "transport_payload": payload,
             "transport_guidance": transport.model_dump(mode="json"),
@@ -684,11 +682,11 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
 
     def verify_evidence(self, state: TripGenerationState) -> dict[str, Any]:
         request = self._request()
-        brief = HelloAgentsBrief.model_validate(state["planning_brief"])
-        poi_grounding = HelloAgentsPoiGrounding.model_validate(state["poi_grounding"])
-        weather = HelloAgentsWeatherGuidance.model_validate(state["weather_guidance"])
-        hotel = HelloAgentsHotelRecommendation.model_validate(state["hotel_recommendation"])
-        transport = HelloAgentsTransportGuidance.model_validate(state["transport_guidance"])
+        brief = PlanningBrief.model_validate(state["planning_brief"])
+        poi_grounding = PoiGrounding.model_validate(state["poi_grounding"])
+        weather = WeatherGuidance.model_validate(state["weather_guidance"])
+        hotel = HotelRecommendation.model_validate(state["hotel_recommendation"])
+        transport = TransportGuidance.model_validate(state["transport_guidance"])
         transport = self._sanitize_transport_service_candidates(transport, request)
 
         from travelmind_api.services.trip_image_enrichment import _resolve_tavily_image_search_config
@@ -814,9 +812,9 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
 
     def draft_itinerary(self, state: TripGenerationState) -> dict[str, Any]:
         request = self._request()
-        weather = HelloAgentsWeatherGuidance.model_validate(state["weather_guidance"])
-        hotel = HelloAgentsHotelRecommendation.model_validate(state["hotel_recommendation"])
-        transport = HelloAgentsTransportGuidance.model_validate(state["transport_guidance"])
+        weather = WeatherGuidance.model_validate(state["weather_guidance"])
+        hotel = HotelRecommendation.model_validate(state["hotel_recommendation"])
+        transport = TransportGuidance.model_validate(state["transport_guidance"])
         planner_payload = {
             "trip_request": state["trip_request"],
             "planning_brief": state["planning_brief"],
@@ -852,8 +850,8 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
     def validate_itinerary(self, state: TripGenerationState) -> dict[str, Any]:
         request = self._request()
         payload = LlmPlanningPayload.model_validate(state["final_payload"])
-        transport = HelloAgentsTransportGuidance.model_validate(state["transport_guidance"])
-        poi_grounding = HelloAgentsPoiGrounding.model_validate(state["poi_grounding"])
+        transport = TransportGuidance.model_validate(state["transport_guidance"])
+        poi_grounding = PoiGrounding.model_validate(state["poi_grounding"])
         payload = self._normalize_draft(payload, transport)
         try:
             self._validate_execution_constraints(
@@ -896,7 +894,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
             ),
         }
         result, _ = self._invoke_workflow_role("itinerary_planner", repair_payload)
-        transport = HelloAgentsTransportGuidance.model_validate(state["transport_guidance"])
+        transport = TransportGuidance.model_validate(state["transport_guidance"])
         payload = self._normalize_draft(parse_planning_response(result.content), transport)
         return {
             "final_payload": payload.model_dump(mode="json"),
@@ -908,10 +906,10 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
     def assemble_result(self, state: TripGenerationState) -> dict[str, Any]:
         request = self._request()
         payload = LlmPlanningPayload.model_validate(state["final_payload"])
-        poi_grounding = HelloAgentsPoiGrounding.model_validate(state["poi_grounding"])
-        weather = HelloAgentsWeatherGuidance.model_validate(state["weather_guidance"])
-        hotel = HelloAgentsHotelRecommendation.model_validate(state["hotel_recommendation"])
-        transport = HelloAgentsTransportGuidance.model_validate(state["transport_guidance"])
+        poi_grounding = PoiGrounding.model_validate(state["poi_grounding"])
+        weather = WeatherGuidance.model_validate(state["weather_guidance"])
+        hotel = HotelRecommendation.model_validate(state["hotel_recommendation"])
+        transport = TransportGuidance.model_validate(state["transport_guidance"])
         payload = self._normalize_draft(payload, transport)
         self._validate_execution_constraints(
             payload,
@@ -947,10 +945,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
         result.trace.provider = "langgraph"
         result.trace.workflow_id = self._runtime().run_id
         result.trace.license_notice = None
-        result.trace.notes = [
-            note.replace("HelloAgents", "LangGraph")
-            for note in result.trace.notes
-        ]
+        result.trace.notes = list(result.trace.notes)
         return {
             "planning_result": result.model_dump(mode="json"),
             "pipeline_notes": pipeline_notes,
@@ -959,7 +954,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
     def _normalize_draft(
         self,
         payload: LlmPlanningPayload,
-        transport: HelloAgentsTransportGuidance,
+        transport: TransportGuidance,
     ) -> LlmPlanningPayload:
         payload = self._mark_unverified_schedules_as_planning_windows(
             payload,
@@ -971,7 +966,7 @@ class LangGraphOrchestrator(HelloAgentsOrchestrator):
     def _build_pipeline_notes(
         self,
         state: TripGenerationState,
-        weather: HelloAgentsWeatherGuidance,
+        weather: WeatherGuidance,
         payload: LlmPlanningPayload,
     ) -> list[str]:
         request = self._request()

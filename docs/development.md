@@ -16,4 +16,4 @@
 
 ## License gate
 
-Do not tag or deploy a commercial release while the `HelloAgentsOrchestrator` adapter remains in use.
+Run the LangGraph replay quality gate and rollout drain audit before promoting a release. Application rollback after legacy-runtime removal uses the retained prior deployment version.

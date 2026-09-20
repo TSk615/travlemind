@@ -39,11 +39,6 @@ class PlanningBrief(BaseModel):
         return False
 
 
-# Compatibility name for callers that still import the old implementation's
-# schema. New workflow code uses the framework-neutral name above.
-HelloAgentsBrief = PlanningBrief
-
-
 def extract_json_payloads(content: str) -> list[dict[str, Any]]:
     candidate = str(content).strip()
     if not candidate:
@@ -104,4 +99,3 @@ def parse_structured_response(content: str, model_cls: type[ModelT]) -> ModelT:
             model_cls.__name__,
         )
     return valid_payloads[-1]
-

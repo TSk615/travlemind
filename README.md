@@ -21,7 +21,7 @@ The product brief targets a broader hybrid-stack monorepo. This repo currently r
 
 ## Local Development
 
-The fastest local closed loop uses the API in `inline` mode and the `stub` orchestrator. That path does not require Redis, Postgres, or `helloagents`.
+The fastest local closed loop uses the API in `inline` mode and the `stub` orchestrator. That path does not require Redis or Postgres.
 
 ### One-click start and stop (Windows)
 
@@ -39,7 +39,7 @@ Logs and process state are written under `.tmp\local-dev`. Stop every process st
 .\stop.cmd
 ```
 
-The default mode uses inline jobs and the stub agent, so Redis and the worker are not started. For ARQ mode, start Redis first and then run `start.cmd -ArqMode`. Other supported switches include `-SkipBridge`, `-SkipApi`, `-SkipWorker`, `-SkipWeb`, `-HelloAgents`, and custom `-BridgePort`, `-ApiPort`, or `-WebPort` values.
+The default mode uses inline jobs and the stub agent, so Redis and the worker are not started. For ARQ mode, start Redis first and then run `start.cmd -ArqMode`. Other supported switches include `-SkipBridge`, `-SkipApi`, `-SkipWorker`, `-SkipWeb`, `-LangGraph`, and custom `-BridgePort`, `-ApiPort`, or `-WebPort` values.
 
 ### 1. Install frontend dependencies
 
@@ -197,7 +197,7 @@ See [ci.yml](E:/travel/.github/workflows/ci.yml).
 For GrokSearch deployment details, see [groksearch-bridge-deploy.md](E:/travel/docs/groksearch-bridge-deploy.md).
 For non-Docker local setup, see [groksearch-local-setup.md](E:/travel/docs/groksearch-local-setup.md).
 
-## HelloAgents PoC Notice
+## Workflow runtime
 
-`helloagents` is only allowed here behind the internal orchestrator adapter boundary as a PoC integration target. Do not tag, market, or ship this repository as a commercial release while the `HelloAgentsOrchestrator` adapter remains in place, unless separate licensing review and replacement work have been completed first.
+Generation and refinement use the internal orchestrator contract. `langgraph` is the durable multi-role implementation; `standard` is the single-model fallback and `stub` supports deterministic local development. The former HelloAgents package is no longer a runtime dependency. Historical traces that name it remain readable.
 
