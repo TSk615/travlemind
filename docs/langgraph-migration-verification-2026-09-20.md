@@ -10,7 +10,8 @@
 - 生成与微调统一使用后端 LangGraph 工作流；浏览器编排器已删除。
 - 六角色生成图、微调图、一次修复、证据核验与结果装配已经接入中立业务核心。
 - 业务 Pydantic Schema 已从编排核心提取到 `services/planning/role_models.py`，API 探针、
-  脚本与测试均改用中立模块；结果转换、地图关联及最终 trace 装配已提取到
+  脚本与测试均改用中立模块；角色输入压缩位于 `services/planning/payloads.py`，POI 探针
+  不再实例化编排核心或调用其私有实现；结果转换、地图关联及最终 trace 装配已提取到
   `services/planning/result_builder.py`，工作流不再承载产品模型转换算法。
 - `WorkflowRun`、SQLite/PostgreSQL checkpointer、恢复指纹、取消、重试预算、版本冲突与幂等提交已经落地。
 - HTTP 请求总数和跨重试/协议回退的总截止时间在角色级硬限制；生产环境和 ARQ 模式使用

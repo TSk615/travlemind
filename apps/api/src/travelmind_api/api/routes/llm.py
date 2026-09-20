@@ -12,7 +12,6 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from travelmind_api.agents.planning_core import PlanningCore
 from travelmind_api.api.schemas.common import success_response
 from travelmind_api.api.schemas.llm import LlmConnectionTestRequest, LlmConnectionTestResponse, LlmModelsRequest, LlmProxyRequest
 from travelmind_api.core.config import get_settings
@@ -26,6 +25,7 @@ from travelmind_api.services.llm.config import default_base_url_for_protocol, no
 from travelmind_api.services.llm.models import fetch_llm_models
 from travelmind_api.services.llm.user_config import build_user_poi_role_overrides
 from travelmind_api.services.planning.role_models import PoiGrounding
+from travelmind_api.services.planning.payloads import build_role_prompt_payload
 from travelmind_api.services.search_connector import (
     ConfiguredSearchGateway,
     DEFAULT_IMAGE_INCLUDE_DOMAINS,
@@ -672,11 +672,7 @@ def _resolve_probe_max_tokens(payload: dict[str, Any]) -> int:
 
 def _collect_poi_probe_tool_results(
     payload: PoiSpecialistProbeRequest,
-    current_user: User,
-    input_payload: dict[str, Any],
-    orchestrator: PlanningCore,
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    del current_user, input_payload, orchestrator
     search_meta: dict[str, Any] = {
         "enabled": False,
         "requested": bool(payload.use_search),
@@ -696,13 +692,12 @@ def _collect_poi_probe_tool_results(
 def probe_poi_specialist(payload: PoiSpecialistProbeRequest, current_user: User = Depends(get_current_user)):
     llm_config = _resolve_proxy_config(payload, current_user)
     llm_config = llm_config.model_copy(update={"timeout_seconds": max(float(llm_config.timeout_seconds), 300.0)})
-    orchestrator = PlanningCore(None)
     input_payload = _build_poi_probe_input_payload(payload)
-    tool_results, search_meta, warnings = _collect_poi_probe_tool_results(payload, current_user, input_payload, orchestrator)
+    tool_results, search_meta, warnings = _collect_poi_probe_tool_results(payload)
     enriched_payload = dict(input_payload)
     if tool_results:
         enriched_payload["tool_results"] = tool_results
-    prompt_payload = orchestrator._build_role_prompt_payload(enriched_payload, role_name="poi_specialist")
+    prompt_payload = build_role_prompt_payload(enriched_payload, role_name="poi_specialist")
     prompt_payload_json = json.dumps(prompt_payload, ensure_ascii=False)
 
     prompt = build_poi_specialist_prompt()

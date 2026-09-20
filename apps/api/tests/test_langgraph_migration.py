@@ -121,6 +121,10 @@ def test_result_assembly_is_owned_by_framework_neutral_planning_service():
         PlanningCore._build_result_from_payload.__module__
         == "travelmind_api.services.planning.result_builder"
     )
+    assert (
+        PlanningCore._build_role_prompt_payload.__module__
+        == "travelmind_api.services.planning.payloads"
+    )
 
 
 def test_openai_compatible_role_invoker_preserves_citations_and_unknown_usage():
