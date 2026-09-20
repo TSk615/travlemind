@@ -261,6 +261,40 @@ def test_workflow_commit_is_idempotent_and_creates_one_image_job(client):
         assert image_jobs[0].id == first["followup_job_id"]
 
 
+def test_workflow_run_cannot_be_rebound_across_users(client):
+    from travelmind_api.core.database import SessionLocal
+    from travelmind_api.db.models import Trip
+    from travelmind_api.services.job_service import create_job
+    from travelmind_api.services.workflow_store import WorkflowRunError, bind_workflow_run
+
+    owner_user_id, trip_id = _register_and_create_trip(client)
+    _, run_id = _create_bound_run(owner_user_id, trip_id)
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={"name": "Other User", "email": "other-workflow@example.com", "password": "supersecure123"},
+    )
+    assert registration.status_code == 200, registration.text
+    other_user_id = registration.json()["data"]["id"]
+
+    with SessionLocal() as session:
+        trip = session.get(Trip, trip_id)
+        foreign_job = create_job(
+            session,
+            job_type="trip.generate",
+            owner_user_id=other_user_id,
+            trip_id=trip_id,
+            payload={"trip_id": trip_id, "workflow_run_id": run_id},
+            commit=False,
+        )
+        with pytest.raises(WorkflowRunError, match="ownership or trip association"):
+            bind_workflow_run(
+                session,
+                job=foreign_job,
+                trip=trip,
+                provider="langgraph",
+            )
+
+
 def test_retry_job_reuses_durable_run_without_legacy_checkpoint(client):
     from travelmind_api.core.database import SessionLocal
     from travelmind_api.db.models import JobRecord, WorkflowRun

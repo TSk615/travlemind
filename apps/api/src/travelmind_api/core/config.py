@@ -93,6 +93,9 @@ class Settings(BaseSettings):
             errors.append("TRAVELMIND_UPSTREAM_PRIVATE_URL_POLICY must be deny in production")
         if self.database_url.strip().lower().startswith("sqlite"):
             errors.append("TRAVELMIND_DATABASE_URL must use PostgreSQL in production")
+        checkpoint_url = str(self.workflow_checkpoint_url or self.database_url).strip().lower()
+        if not checkpoint_url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://")):
+            errors.append("TRAVELMIND_WORKFLOW_CHECKPOINT_URL must use PostgreSQL in production")
         if not self.csrf_enabled:
             errors.append("TRAVELMIND_CSRF_ENABLED must be true in production")
         if not self.rate_limit_enabled or self.rate_limit_backend != "redis":

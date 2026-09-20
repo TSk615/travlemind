@@ -71,3 +71,15 @@ def test_limiter_factory_uses_redis_for_arq_and_process_lock_for_inline():
         build_endpoint_concurrency_limiter(Settings(queue_mode="arq")),
         RedisEndpointConcurrencyLimiter,
     )
+    production = Settings(
+        environment="production",
+        queue_mode="inline",
+        jwt_secret="jwt-production-secret-with-at-least-32-characters",
+        credential_encryption_key="credential-production-secret-at-least-32-characters",
+        database_url="postgresql+psycopg://travelmind:secret@db.example/travelmind",
+        public_api_url="https://api.travelmind.example",
+        cors_origins=["https://travelmind.example"],
+        upstream_private_url_policy="deny",
+        rate_limit_backend="redis",
+    )
+    assert isinstance(build_endpoint_concurrency_limiter(production), RedisEndpointConcurrencyLimiter)

@@ -47,6 +47,15 @@ def test_production_rejects_insecure_defaults():
         Settings(environment="production")
 
 
+def test_production_rejects_process_local_workflow_checkpoint_store():
+    with pytest.raises(ValidationError, match="WORKFLOW_CHECKPOINT_URL must use PostgreSQL"):
+        _production_settings(workflow_checkpoint_url="sqlite:///./storage/checkpoints.db")
+
+    assert _production_settings(
+        workflow_checkpoint_url="postgresql://travelmind:secret@db.example/travelmind"
+    ).resolved_workflow_checkpoint_url.startswith("postgresql://")
+
+
 def test_production_cookie_policy_uses_secure_httponly_cookies():
     settings = _production_settings()
     response = Response()

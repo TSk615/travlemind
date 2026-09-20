@@ -12,15 +12,17 @@
 - 业务 Pydantic Schema 已从编排核心提取到 `services/planning/role_models.py`，API 探针、
   脚本与测试均改用中立模块。
 - `WorkflowRun`、SQLite/PostgreSQL checkpointer、恢复指纹、取消、重试预算、版本冲突与幂等提交已经落地。
-- HTTP 请求总数和跨重试/协议回退的总截止时间在角色级硬限制；多 worker 使用 Redis
-  共享端点/凭据限流，inline 模式在进程内共享。取消在模型请求前再次检查。
+- HTTP 请求总数和跨重试/协议回退的总截止时间在角色级硬限制；生产环境和 ARQ 模式使用
+  Redis 共享端点/凭据限流，本地 inline 模式在进程内共享。取消在模型请求前再次检查。
 - PostgreSQL checkpointer 初始化使用数据库 advisory lock，避免多个 Worker 首次启动时并发执行
-  checkpoint schema migration；Compose 显式给 API/worker 注入同一个 PostgreSQL checkpoint URL。
+  checkpoint schema migration；Compose 显式给 API/worker 注入同一个 PostgreSQL checkpoint URL，
+  生产配置拒绝 SQLite 等进程本地 checkpoint 存储。
 - trace 持久化角色请求标识、端点、协议、耗时、usage、实际重试/请求次数与缓存复用；
   恢复时按稳定 request ID 标记复用节点。回放脚本可按显式 token 单价计算已知费用，
   缺少 usage 时保持未知。
 - 首次生成/微调时间固定写入 Job payload，ARQ 自动重试和手动生成恢复复用相同时间，避免
   时间漂移改变 input fingerprint；用户主动创建的新 Job 则重新获取证据。
+- 恢复绑定会同时校验用户、行程和执行记录关联；跨用户复用已知 `run_id` 会被拒绝。
 - provider 灰度按 Job ID 稳定分桶，任务首次执行后固定 provider；回滚使用 `standard` 或保留部署版本。
 - 30 组受控时钟回放、协议矩阵和质量/延迟/费用门禁已经实现。
 - `hello-agents` 包、旧 orchestrator/LLM adapter、旧 prompt 模块、浏览器 planner 与旧专用脚本已经删除。
@@ -34,7 +36,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `287 passed, 2 skipped`（本机无 PostgreSQL） |
+| API 全量测试 | `289 passed, 2 skipped`（本机无 PostgreSQL） |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | 请求预算/截止时间、共享限流、恢复与 LangGraph 定向测试 | `61 passed` |
 | 前端单元测试 | `10 passed` |

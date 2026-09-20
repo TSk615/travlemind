@@ -122,6 +122,6 @@ class RedisEndpointConcurrencyLimiter:
 
 
 def build_endpoint_concurrency_limiter(settings: Settings) -> EndpointConcurrencyLimiter:
-    if str(settings.queue_mode or "").strip().lower() == "arq":
+    if settings.is_production or str(settings.queue_mode or "").strip().lower() == "arq":
         return RedisEndpointConcurrencyLimiter(settings.redis_url)
     return InProcessEndpointConcurrencyLimiter()
