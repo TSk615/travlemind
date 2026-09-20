@@ -14,6 +14,7 @@ from travelmind_api.services.llm.parser import LlmPlanningPayload, parse_plannin
 from travelmind_api.services.llm.parser import LlmBookingInfo
 from travelmind_api.services.llm.localization import planning_payload_needs_language_repair
 from travelmind_api.services.planning_details import TransportLeg, TransportServiceCandidate
+from travelmind_api.services.poi_operation_evidence import verify_poi_open_days
 from travelmind_api.services.search_connector import SearchServiceConfig
 from travelmind_api.services.transport_evidence import verify_transport_candidate_pages
 from travelmind_api.services.weather_evidence import has_unsupported_weather_condition, verify_daily_forecast_pages
@@ -64,6 +65,82 @@ def test_cross_day_clocks_survive_and_overlap_is_rejected():
     payload = parse_planning_response(json.dumps(raw))
     assert payload.days[0].items[0].end_time == "06:00"
     assert any("时间重叠" in error for error in validate_timeline(payload, request(), HelloAgentsTransportGuidance()))
+
+
+def test_poi_open_day_evidence_marks_non_holiday_monday_closed(monkeypatch):
+    poi = HelloAgentsResearchPoi(name="故宫博物院", source_urls=["https://www.dpm.org.cn/Visit.html"])
+    grounding = HelloAgentsPoiGrounding(featured_pois=[poi])
+    monkeypatch.setattr(
+        "travelmind_api.services.poi_operation_evidence.ConfiguredSearchGateway.call_operation",
+        lambda *_args, **_kwargs: {"results": [{
+            "url": "https://www.dpm.org.cn/Visit.html",
+            "title": "故宫博物院参观须知",
+            "raw_content": "故宫博物院除法定节假日外每周一闭馆。",
+        }]},
+    )
+    config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
+    verified = verify_poi_open_days(
+        grounding, start_date=date(2026, 9, 20), end_date=date(2026, 9, 22), search_config=config
+    )
+    assert any("2026-09-21" in note and "周一闭馆" in note for note in verified.featured_pois[0].evidence_notes)
+
+
+def test_poi_open_day_evidence_respects_known_public_holiday_exception(monkeypatch):
+    poi = HelloAgentsResearchPoi(name="示例博物馆", source_urls=["https://museum.example.org/visit"])
+    grounding = HelloAgentsPoiGrounding(featured_pois=[poi])
+    monkeypatch.setattr(
+        "travelmind_api.services.poi_operation_evidence.ConfiguredSearchGateway.call_operation",
+        lambda *_args, **_kwargs: {"results": [{
+            "url": "https://museum.example.org/visit",
+            "title": "示例博物馆开放时间",
+            "raw_content": "示例博物馆除法定节假日外每周一闭馆。",
+        }]},
+    )
+    config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
+    verified = verify_poi_open_days(
+        grounding, start_date=date(2026, 2, 16), end_date=date(2026, 2, 16), search_config=config
+    )
+    assert verified.featured_pois[0].evidence_notes == []
+
+
+def test_poi_open_day_evidence_discovers_official_page_when_guides_are_insufficient(monkeypatch):
+    poi = HelloAgentsResearchPoi(name="恭王府", source_urls=["https://travel.qunar.com/p-cs299914-beijing-jingdian"])
+    grounding = HelloAgentsPoiGrounding(featured_pois=[poi])
+
+    def fake_call(_self, operation, arguments):
+        if operation == "search":
+            return {"results": [{
+                "url": "https://ticket.pgm.org.cn/visit.html",
+                "title": "恭王府博物馆参观须知",
+                "content": "开放时间与门票预约",
+            }]}
+        return {"results": [{
+            "url": "https://ticket.pgm.org.cn/visit.html",
+            "title": "恭王府博物馆参观须知",
+            "raw_content": "恭王府博物馆除法定节假日外每周一闭馆。",
+        }]}
+
+    monkeypatch.setattr(
+        "travelmind_api.services.poi_operation_evidence.ConfiguredSearchGateway.call_operation", fake_call,
+    )
+    config = SearchServiceConfig(provider="tavily", transport="api", base_url="https://api.example.org", api_key="test")
+    verified = verify_poi_open_days(
+        grounding, start_date=date(2026, 9, 20), end_date=date(2026, 9, 22), search_config=config
+    )
+    verified_poi = verified.featured_pois[0]
+    assert "https://ticket.pgm.org.cn/visit.html" in verified_poi.source_urls
+    assert any("2026-09-21" in note and "周一闭馆" in note for note in verified_poi.evidence_notes)
+
+
+def test_planner_poi_collection_keeps_open_day_evidence():
+    poi = HelloAgentsResearchPoi(
+        name="故宫博物院",
+        evidence_notes=["开放日来源复核：2026-09-21（周一）落在周一闭馆规则内。"],
+        caveats=["须提前预约。"],
+    )
+    collection = HelloAgentsOrchestrator(None)._build_poi_collection(HelloAgentsPoiGrounding(featured_pois=[poi]))
+    assert "周一闭馆" in collection["pois"][0]["evidence_notes"][0]
+    assert collection["pois"][0]["caveats"] == ["须提前预约。"]
 
 
 def test_high_transport_budget_and_dated_ledger():
@@ -633,6 +710,24 @@ def test_long_station_wait_is_capped_without_reducing_return_buffer():
     assert (waiting.start_time, waiting.end_time) == ("14:45", "16:00")
     assert waiting.booking_info.transport_scope == "local"
     assert waiting.booking_info.duration_minutes_min == 75
+
+
+def test_station_wait_within_cap_is_still_reclassified_as_local_buffer():
+    payload = LlmPlanningPayload(summary="返程", days=[{"title": "返程", "items": [
+        {"type": "transport", "name": "酒店至北京西站", "start_time": "10:30", "end_time": "11:30",
+         "booking_info": {"transport_scope": "local", "duration_minutes_min": 30}},
+        {"type": "activity", "name": "北京西站安检检票与候车", "start_time": "11:30", "end_time": "12:30",
+         "booking_info": {"transport_scope": "return", "duration_minutes_min": 60}},
+        {"type": "transport", "name": "G305 北京西至广州南", "start_time": "12:30", "end_time": "20:13",
+         "booking_info": {"transport_scope": "return", "service_number": "G305", "duration_minutes_min": 463}},
+    ]}])
+    normalized = HelloAgentsOrchestrator(None)._normalize_departure_waiting_blocks(
+        payload,
+        HelloAgentsTransportGuidance(station_buffer_minutes=60),
+    )
+    waiting = normalized.days[0].items[1]
+    assert waiting.booking_info.transport_scope == "local"
+    assert waiting.booking_info.duration_minutes_min == 60
 
 
 def test_sparse_arrival_day_is_rejected_when_many_pois_are_available():

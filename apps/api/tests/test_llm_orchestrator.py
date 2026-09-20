@@ -3194,7 +3194,7 @@ def test_hotel_specialist_prompt_rejects_unsourced_concrete_hotel_names():
     assert "如果只有海外英文 OTA 页面，最多作为候选，不能直接定为最终推荐" in text
     assert "final_recommended_hotel 设为 null" in text
     assert "严禁为了满足字段而编造酒店名" in text
-    assert "hotel_candidates 输出 2-3 个来源充足的备选" in text
+    assert "hotel_candidates 输出 2-3 个来源充足的不同实体" in text
     assert "预算是上限和舒适度约束，不是越便宜越好" in text
     assert "不要因为低价选择质量信号弱的酒店" in text
     assert "你必须在 final_recommended_hotel 中选择一个具体酒店名称" not in text
@@ -3756,6 +3756,10 @@ def test_helloagents_poi_grounding_accepts_lightweight_top_pois_shape():
         "confidence": "high",
         "source_url": "https://example.test/dali-ancient-city",
         "source_urls": ["https://example.test/dali-ancient-city"],
+        "evidence_notes": [],
+        "caveats": [],
+        "booking_info": None,
+        "visit_requirements": None,
     }
 
 

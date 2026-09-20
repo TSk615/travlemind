@@ -46,6 +46,7 @@ from travelmind_api.services.budgeting import enrich_plan_with_budget
 from travelmind_api.services.execution_validation import has_closed_weekday_constraint, validate_timeline
 from travelmind_api.services.entity_identity import normalize_identity, entity_matches
 from travelmind_api.services.hotel_evidence import verify_hotel_pages
+from travelmind_api.services.poi_operation_evidence import verify_poi_open_days
 from travelmind_api.services.transport_evidence import verify_transport_candidate_pages
 from travelmind_api.services.weather_evidence import has_unsupported_weather_condition, verify_daily_forecast_pages
 from travelmind_api.services.planning_details import BookingDetails, HotelEvidence, TransportLeg, TransportServiceCandidate
@@ -1192,6 +1193,14 @@ class HelloAgentsOrchestrator(StubOrchestrator):
         weather = verify_daily_forecast_pages(weather, evidence_search_config)
         transport = verify_transport_candidate_pages(transport, evidence_search_config)
         hotel = verify_hotel_pages(hotel, evidence_search_config)
+        poi_grounding = verify_poi_open_days(
+            poi_grounding,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            search_config=evidence_search_config,
+        )
+        # Rebuild after extraction so the planner sees explicit closed-day evidence.
+        poi_collection = self._build_poi_collection(poi_grounding)
         hotel = self._sanitize_hotel_recommendation(
             hotel,
             destination=request.destination,
@@ -1292,6 +1301,12 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 "trip_request": trip_payload,
                 "planning_brief": brief.model_dump(mode="json"),
                 "poi_collection": planner_poi_collection,
+                "poi_scheduling_policy": {
+                    "closed_dates_are_date_specific": True,
+                    "open_dates_remain_eligible": True,
+                    "selection_remains_planner_discretion": True,
+                    "do_not_treat_one_closed_date_as_global_exclusion": True,
+                },
                 "weather": planner_weather,
                 "hotels": planner_hotels,
                 "transport": planner_transport,
@@ -1316,22 +1331,62 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                         llm_config=role_llm_configs[planner_role.role_name],
                         input_payload=planner_payload,
                     )
-                    self._record_checkpoint_raw_role(
-                        planner_role.role_name,
-                        planner_response,
-                        prompt_version=planner_role.prompt_version,
-                        model=role_llm_configs[planner_role.role_name].model,
-                    )
                 self._log_event("helloagents_planner_response_received", message="Planner response received.", response_chars=len(planner_response))
                 final_payload = parse_planning_response(planner_response)
                 final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request, transport)
                 final_payload = self._normalize_departure_waiting_blocks(final_payload, transport)
-                self._validate_execution_constraints(
-                    final_payload,
-                    request,
-                    transport,
-                    available_poi_count=len(poi_collection.get("pois", [])),
-                    poi_grounding=poi_grounding,
+                try:
+                    self._validate_execution_constraints(
+                        final_payload,
+                        request,
+                        transport,
+                        available_poi_count=len(poi_collection.get("pois", [])),
+                        poi_grounding=poi_grounding,
+                    )
+                except ValueError as validation_exc:
+                    if not str(validation_exc).startswith("行程可执行性校验失败："):
+                        raise
+                    repair_payload = {
+                        **planner_payload,
+                        "previous_itinerary": final_payload.model_dump(mode="json"),
+                        "validation_errors": [
+                            value.strip()
+                            for value in str(validation_exc).removeprefix("行程可执行性校验失败：").split("；")
+                            if value.strip()
+                        ],
+                        "repair_instruction": (
+                            "上一个完整行程未通过后端硬校验。只修正 validation_errors 指出的冲突，"
+                            "保持已核验班次、住宿和无冲突日程不变，并重新输出一份完整 JSON 行程。"
+                            "如果冲突是某个 POI 在特定日期闭馆，只禁止该 POI 出现在这个日期；"
+                            "其他开放日期仍按路线、兴趣、节奏和优先级正常参与选择，不得把单日闭馆解释为全程排除。"
+                        ),
+                    }
+                    self._log_event(
+                        "helloagents_planner_validation_repair_started",
+                        message="Planner draft failed deterministic checks; requesting one bounded repair.",
+                        validation_error=str(validation_exc),
+                    )
+                    planner_response = self._run_role(
+                        module=module,
+                        role_config=planner_role,
+                        llm_config=role_llm_configs[planner_role.role_name],
+                        input_payload=repair_payload,
+                    )
+                    final_payload = parse_planning_response(planner_response)
+                    final_payload = self._mark_unverified_schedules_as_planning_windows(final_payload, request, transport)
+                    final_payload = self._normalize_departure_waiting_blocks(final_payload, transport)
+                    self._validate_execution_constraints(
+                        final_payload,
+                        request,
+                        transport,
+                        available_poi_count=len(poi_collection.get("pois", [])),
+                        poi_grounding=poi_grounding,
+                    )
+                self._record_checkpoint_raw_role(
+                    planner_role.role_name,
+                    planner_response,
+                    prompt_version=planner_role.prompt_version,
+                    model=role_llm_configs[planner_role.role_name].model,
                 )
                 self._record_checkpoint_role(
                     planner_role.role_name,
@@ -2366,7 +2421,26 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 ],
                 limit=5,
             ),
+            "scheduling_policy": {
+                "closed_dates_are_date_specific": True,
+                "open_dates_remain_eligible": True,
+                "selection_remains_planner_discretion": True,
+                "do_not_treat_one_closed_date_as_global_exclusion": True,
+            },
         }
+
+    @staticmethod
+    def _extract_poi_closed_dates(notes: list[str]) -> list[str]:
+        """Expose date-specific closure evidence without making a POI globally unavailable."""
+        closed_dates: list[str] = []
+        for note in notes:
+            text = str(note or "").strip()
+            if not text or ("闭馆" not in text and "关闭" not in text):
+                continue
+            for value in re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", text):
+                if value not in closed_dates:
+                    closed_dates.append(value)
+        return closed_dates[:16]
 
     def _build_planner_weather_payload(self, weather: HelloAgentsWeatherGuidance, *, expected_days: int) -> dict[str, Any]:
         return {
@@ -2917,9 +2991,30 @@ class HelloAgentsOrchestrator(StubOrchestrator):
                 "confidence": poi.confidence or "low",
                 "source_url": source_urls[0] if source_urls else "",
                 "source_urls": source_urls[:3],
+                "evidence_notes": [str(item).strip() for item in poi.evidence_notes if str(item).strip()][:5],
+                "caveats": [str(item).strip() for item in poi.caveats if str(item).strip()][:5],
                 "booking_info": poi.booking_info.model_dump(mode="json") if poi.booking_info is not None else None,
                 "visit_requirements": poi.visit_requirements.model_dump(mode="json") if poi.visit_requirements is not None else None,
             }
+            closed_dates = self._extract_poi_closed_dates(
+                [
+                    *entry["evidence_notes"],
+                    *entry["caveats"],
+                    *(
+                        poi.booking_info.notes
+                        if poi.booking_info is not None and poi.booking_info.notes
+                        else []
+                    ),
+                    *(
+                        poi.visit_requirements.notes
+                        if poi.visit_requirements is not None and poi.visit_requirements.notes
+                        else []
+                    ),
+                ]
+            )
+            if closed_dates:
+                entry["closed_dates"] = closed_dates
+                entry["scheduling_note"] = "仅 closed_dates 所列日期不可安排；其他日期仍作为普通候选，由规划器按整体质量决定是否采用。"
             if self._is_food_poi(poi):
                 entry["highlights"] = [
                     *[str(item).strip() for item in poi.highlights if str(item).strip()],
@@ -4502,15 +4597,22 @@ class HelloAgentsOrchestrator(StubOrchestrator):
             ):
                 continue
             waiting_duration = waiting_end - waiting_start
+            if waiting_duration <= 0:
+                continue
+            # A station/airport security and waiting block is local departure
+            # buffer, never the intercity service itself. Reclassify it even
+            # when its duration is already within the configured cap so the
+            # route-duration validator does not compare a 60-minute wait with
+            # a multi-hour rail or flight leg.
+            if waiting.booking_info is not None:
+                waiting.booking_info.transport_scope = "local"
+                waiting.booking_info.duration_minutes_min = min(waiting_duration, waiting_cap)
             if waiting_duration <= waiting_cap:
                 continue
             new_waiting_start = departure_start - waiting_cap
             if new_waiting_start < 0:
                 continue
             waiting.start_time = f"{new_waiting_start // 60:02d}:{new_waiting_start % 60:02d}"
-            if waiting.booking_info is not None:
-                waiting.booking_info.transport_scope = "local"
-                waiting.booking_info.duration_minutes_min = waiting_cap
             note = f"车站候车按{waiting_cap}分钟安全缓冲编排，额外机动时间保留在此前，不计入候车时长。"
             if note not in waiting.note:
                 waiting.note = f"{waiting.note.strip()} {note}".strip()
