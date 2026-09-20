@@ -12,7 +12,11 @@ from fastapi import HTTPException, status
 
 from travelmind_api.agents.base import PlanningRequest, PlanningResult, RefinementContext
 from travelmind_api.agents.factory import build_orchestrator
-from travelmind_api.agents.provider import AGENT_PROVIDER_LANGGRAPH, normalize_agent_provider
+from travelmind_api.agents.provider import (
+    AGENT_PROVIDER_LANGGRAPH,
+    normalize_agent_provider,
+    select_agent_provider_for_new_job,
+)
 from travelmind_api.agents.runtime import WorkflowCancelled
 from travelmind_api.core.config import get_settings
 from travelmind_api.core.database import session_scope
@@ -364,6 +368,31 @@ def _resolve_agent_provider(user: User | None) -> str:
     return normalize_agent_provider(getattr(user, "llm_agent_provider", None), default=normalize_agent_provider(settings.agent_provider))
 
 
+def _resolve_job_agent_provider(*, user: User | None, job: JobRecord, existing_run: WorkflowRun | None) -> str:
+    """Return and persist the provider snapshot used by this Job.
+
+    Rollout switches apply only before the first execution. Retries keep the
+    provider recorded on the Job, while durable LangGraph runs additionally
+    enforce their own provider and graph-version invariants.
+    """
+
+    if existing_run is not None:
+        return existing_run.provider
+    payload = dict(job.payload_json or {})
+    provider_snapshot = str(payload.get("workflow_provider") or "").strip()
+    if provider_snapshot:
+        return normalize_agent_provider(provider_snapshot)
+    provider = select_agent_provider_for_new_job(
+        _resolve_agent_provider(user),
+        rollout_key=job.id,
+        langgraph_rollout_percent=settings.langgraph_rollout_percent,
+        fallback_provider=settings.langgraph_rollout_fallback_provider,
+    )
+    payload["workflow_provider"] = provider
+    job.payload_json = payload
+    return provider
+
+
 
 def _emit_agent_progress(job_id: str, role_key: str, role_title: str, role_description: str, progress_percent: int) -> None:
     _transition_job(
@@ -638,7 +667,7 @@ def _process_trip_generation(job: JobExecution) -> dict:
             or ""
         ).strip()
         existing_run = session.get(WorkflowRun, requested_run_id) if requested_run_id else None
-        provider = existing_run.provider if existing_run is not None else _resolve_agent_provider(user)
+        provider = _resolve_job_agent_provider(user=user, job=job_record, existing_run=existing_run)
         if provider in {"helloagents", "langgraph"}:
             missing_poi_fields = user_poi_role_override_missing_fields(user)
             if missing_poi_fields:
@@ -806,7 +835,7 @@ def _process_trip_refine(job: JobExecution) -> dict:
             or ""
         ).strip()
         existing_run = session.get(WorkflowRun, requested_run_id) if requested_run_id else None
-        provider = existing_run.provider if existing_run is not None else _resolve_agent_provider(user)
+        provider = _resolve_job_agent_provider(user=user, job=job_record, existing_run=existing_run)
         request = _build_request(trip, user)
         validate_trip_dates_for_generation(
             request.start_date,

@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     job_result_ttl_seconds: int = 86400
     worker_max_jobs: int = 8
     agent_provider: str = "standard"
+    langgraph_rollout_percent: int = Field(default=100, ge=0, le=100)
+    langgraph_rollout_fallback_provider: Literal["standard", "helloagents"] = "helloagents"
     log_level: str = "INFO"
     log_root: str | None = None
     export_root: str | None = None

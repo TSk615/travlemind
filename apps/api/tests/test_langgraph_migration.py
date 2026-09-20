@@ -18,7 +18,7 @@ from travelmind_api.agents.base import (
 from travelmind_api.agents.helloagents import HelloAgentsBrief, HelloAgentsOrchestrator
 from travelmind_api.agents.factory import build_orchestrator
 from travelmind_api.agents.langgraph_orchestrator import LangGraphOrchestrator
-from travelmind_api.agents.provider import normalize_agent_provider
+from travelmind_api.agents.provider import normalize_agent_provider, select_agent_provider_for_new_job
 from travelmind_api.agents.runtime import WorkflowCancelled, WorkflowRuntime
 from travelmind_api.agents.workflows.trip_generation import (
     TripGenerationDependencies,
@@ -219,6 +219,85 @@ def test_langgraph_provider_normalizes_and_factory_builds_new_orchestrator():
         agent_provider="langgraph",
     )
     assert isinstance(orchestrator, LangGraphOrchestrator)
+
+
+def test_langgraph_rollout_assignment_is_deterministic_and_honors_boundaries():
+    assert select_agent_provider_for_new_job(
+        "langgraph",
+        rollout_key="job-1",
+        langgraph_rollout_percent=0,
+        fallback_provider="helloagents",
+    ) == "helloagents"
+    assert select_agent_provider_for_new_job(
+        "langgraph",
+        rollout_key="job-1",
+        langgraph_rollout_percent=100,
+        fallback_provider="helloagents",
+    ) == "langgraph"
+    assert select_agent_provider_for_new_job(
+        "standard",
+        rollout_key="job-1",
+        langgraph_rollout_percent=100,
+        fallback_provider="helloagents",
+    ) == "standard"
+
+    assignments = [
+        select_agent_provider_for_new_job(
+            "langgraph",
+            rollout_key=f"job-{index}",
+            langgraph_rollout_percent=50,
+            fallback_provider="helloagents",
+        )
+        for index in range(100)
+    ]
+    assert assignments == [
+        select_agent_provider_for_new_job(
+            "langgraph",
+            rollout_key=f"job-{index}",
+            langgraph_rollout_percent=50,
+            fallback_provider="helloagents",
+        )
+        for index in range(100)
+    ]
+    assert {"langgraph", "helloagents"}.issubset(set(assignments))
+
+
+def test_partial_langgraph_rollout_requires_a_stable_job_key():
+    with pytest.raises(ValueError, match="rollout_key"):
+        select_agent_provider_for_new_job(
+            "langgraph",
+            rollout_key="",
+            langgraph_rollout_percent=50,
+            fallback_provider="standard",
+        )
+
+
+def test_job_provider_snapshot_survives_rollout_switch(monkeypatch):
+    import travelmind_api.jobs.handlers as handlers
+
+    job = SimpleNamespace(id="job-snapshot", payload_json={})
+    user = SimpleNamespace(llm_agent_provider="langgraph")
+    monkeypatch.setattr(
+        handlers,
+        "settings",
+        Settings(langgraph_rollout_percent=0, langgraph_rollout_fallback_provider="helloagents"),
+    )
+    first = handlers._resolve_job_agent_provider(user=user, job=job, existing_run=None)
+    monkeypatch.setattr(
+        handlers,
+        "settings",
+        Settings(langgraph_rollout_percent=100, langgraph_rollout_fallback_provider="helloagents"),
+    )
+    retry = handlers._resolve_job_agent_provider(user=user, job=job, existing_run=None)
+
+    assert first == "helloagents"
+    assert retry == first
+    assert job.payload_json["workflow_provider"] == "helloagents"
+
+
+def test_settings_rejects_invalid_langgraph_rollout_percentage():
+    with pytest.raises(ValueError, match="less than or equal to 100"):
+        Settings(langgraph_rollout_percent=101)
 
 
 def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monkeypatch):
