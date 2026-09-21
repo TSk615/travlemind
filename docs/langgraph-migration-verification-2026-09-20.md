@@ -67,7 +67,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 | 正确生产角色映射的 LangGraph 真实端点单例预检 | `1/1` 成功、零硬违规，约 `440.3s` |
 | 同配置保留部署单例对照 | `helloagents` 角色执行 `RuntimeError`，约 `378.3s`；非认证、配额、限流、超时或网络错误 |
 | 本次限流/截止时间修复定向测试 | `64 passed` |
-| 本次修复后的 API 本地全量回归 | `312 passed, 2 skipped`（仅缺少临时 PostgreSQL 环境） |
+| 本次修复后的 API 本地全量回归 | `314 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
 
 本次使用隔离的 Docker PostgreSQL 16 测试库设置 `TRAVELMIND_TEST_POSTGRES_URL`，完成
 upgrade → downgrade → upgrade，并验证 LangGraph checkpoint 跨 PostgreSQL 连接恢复且不重跑
