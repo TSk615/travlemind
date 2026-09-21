@@ -552,7 +552,12 @@ def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monke
     assert len(invocations) == 6
     assert next(call for call in invocations if call.role_name == "poi_specialist").max_request_attempts == 1
     assert next(call for call in invocations if call.role_name == "poi_specialist").endpoint.timeout_seconds > 299
-    assert all(call.endpoint.timeout_seconds > 119 for call in invocations if call.role_name != "poi_specialist")
+    assert next(call for call in invocations if call.role_name == "itinerary_planner").endpoint.timeout_seconds > 299
+    assert all(
+        call.endpoint.timeout_seconds > 119
+        for call in invocations
+        if call.role_name not in {"poi_specialist", "itinerary_planner"}
+    )
     assert checkpoint is not None
     assert checkpoint["repair_count"] == 0
     assert set(checkpoint["role_results"]) == set(calls)
@@ -572,6 +577,78 @@ def test_langgraph_orchestrator_runs_six_roles_without_helloagents_runtime(monke
     )
     assert next(run for run in result.trace.agent_runs if run.key == "brief_parser").cache_reused is True
     assert not any(run.cache_reused for run in result.trace.agent_runs if run.key != "brief_parser")
+
+
+def test_shared_endpoint_queue_wait_does_not_consume_role_request_budget(monkeypatch):
+    import travelmind_api.agents.langgraph_orchestrator as langgraph_module
+
+    clock = [1000.0]
+    limiter_timeouts: list[float] = []
+    invocations: list[RoleInvocation] = []
+
+    class WaitingLimiter:
+        @contextmanager
+        def acquire(self, _identity, *, timeout_seconds, cancellation_check=None):
+            limiter_timeouts.append(timeout_seconds)
+            if cancellation_check is not None:
+                cancellation_check()
+            clock[0] += 100.0
+            yield
+
+    class DelayedInvoker:
+        def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
+            invocations.append(invocation)
+            clock[0] += 119.0
+            return RoleInvocationResult(
+                request_id="llmreq-transport",
+                role_name=invocation.role_name,
+                content="{}",
+                model=invocation.endpoint.model,
+                provider_protocol=invocation.endpoint.provider_protocol,
+                wire_api=invocation.endpoint.wire_api,
+                endpoint_host="llm.example.test",
+                prompt_version=invocation.prompt_version,
+                latency_ms=119_000,
+                citations=[],
+                usage=None,
+            )
+
+    config = LlmConfig(
+        base_url="https://llm.example.test/v1",
+        api_key="shared-key",
+        model="Console/grok-4.20-0309-reasoning",
+        wire_api="responses",
+    )
+    orchestrator = LangGraphOrchestrator(
+        config,
+        maps_provider=StubMapsPoiProvider(),
+        role_invoker=DelayedInvoker(),
+        concurrency_limiter=WaitingLimiter(),
+    )
+    request = _request()
+    orchestrator._workflow_runtime = WorkflowRuntime(run_id="run-queue-budget")
+    orchestrator._workflow_request = request
+    orchestrator._workflow_role_configs = orchestrator._build_role_configs(request)
+    orchestrator._workflow_llm_configs = orchestrator._build_role_llm_configs()
+    weather_endpoint = orchestrator._effective_role_endpoint(
+        orchestrator._workflow_role_configs["weather_specialist"],
+        orchestrator._workflow_llm_configs["weather_specialist"],
+    )
+    assert orchestrator._role_queue_wait_timeout_seconds("weather_specialist", weather_endpoint) == pytest.approx(300.0)
+    monkeypatch.setattr(langgraph_module.time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(orchestrator, "_augment_payload_with_tool_results", lambda _role, payload: payload)
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_role_prompt_payload",
+        lambda payload, *, role_name: {"role": role_name, **payload},
+    )
+
+    result, _metadata = orchestrator._invoke_workflow_role("transport_specialist", {})
+
+    assert result.role_name == "transport_specialist"
+    assert limiter_timeouts == [pytest.approx(120.0)]
+    assert invocations[0].endpoint.timeout_seconds == pytest.approx(120.0)
+    assert clock[0] == pytest.approx(1219.0)
 
 
 def test_langgraph_orchestrator_repairs_one_invalid_draft(monkeypatch):

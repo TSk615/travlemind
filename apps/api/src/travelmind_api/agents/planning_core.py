@@ -246,6 +246,8 @@ class PlanningCore(PlanningPayloadMixin, PlanningResultBuilderMixin, StubOrchest
                 system_prompt=f"{planner_prompt.system_prompt} {language_instruction}{locale_clause}",
                 prompt_version=planner_prompt.version,
                 progress_percent=82,
+                min_timeout_seconds=300.0,
+                timeout_cap_seconds=420.0,
                 stream=True,
             ),
         }

@@ -16,6 +16,9 @@
 - `WorkflowRun`、SQLite/PostgreSQL checkpointer、恢复指纹、取消、重试预算、版本冲突与幂等提交已经落地。
 - HTTP 请求总数和跨重试/协议回退的总截止时间在角色级硬限制；生产环境和 ARQ 模式使用
   Redis 共享端点/凭据限流，本地 inline 模式在进程内共享。取消在模型请求前再次检查。
+- 搜索角色的共享限流排队预算与获锁后的请求预算分开计算，并共同形成有界的角色墙钟上限；
+  同一并行批次共享端点时，兄弟角色排队不会再吞掉后续角色的完整请求预算。最终 planner/refiner
+  使用 300 秒最小请求预算和 420 秒上限，以覆盖真实端点上的长结构化行程输出。
 - PostgreSQL checkpointer 初始化使用数据库 advisory lock，避免多个 Worker 首次启动时并发执行
   checkpoint schema migration；Compose 显式给 API/worker 注入同一个 PostgreSQL checkpoint URL，
   生产配置拒绝 SQLite 等进程本地 checkpoint 存储。
@@ -59,6 +62,10 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 | worker 启动恢复、心跳、任务执行及 ARQ 重试映射烟测 | `4 passed` |
 | 安装环境中 `hello_agents` 模块不存在 | 通过 |
 | Windows 本地启动脚本语法解析 | 通过 |
+| 正确生产角色映射的 LangGraph 真实端点单例预检 | `1/1` 成功、零硬违规，约 `440.3s` |
+| 同配置保留部署单例对照 | `helloagents` 角色执行 `RuntimeError`，约 `378.3s`；非认证、配额、限流、超时或网络错误 |
+| 本次限流/截止时间修复定向测试 | `64 passed` |
+| 本次修复后的 API 本地全量回归 | `310 passed, 2 skipped`（仅缺少临时 PostgreSQL 环境） |
 
 本次使用隔离的 Docker PostgreSQL 16 测试库设置 `TRAVELMIND_TEST_POSTGRES_URL`，完成
 upgrade → downgrade → upgrade，并验证 LangGraph checkpoint 跨 PostgreSQL 连接恢复且不重跑
@@ -71,8 +78,11 @@ upgrade → downgrade → upgrade，并验证 LangGraph checkpoint 跨 PostgreSQ
    `scripts/audit_workflow_rollout.py --require-drained`。必须得到
    `schema_ready_for_langgraph=true`、空 `schema_blockers`，且没有 legacy/unknown 阻塞任务。
 2. 使用专用测试凭据运行少量真实 Responses、Chat/Gemini/Claude/NewAPI/NeiAPI/Grok 样本，
-   再以保留部署生成的 baseline 执行完整 30 案例质量门禁。当前工作区未配置模型凭据，
-   因而没有伪造这项结果。
+   再以保留部署生成的 baseline 执行完整 30 案例质量门禁。2026-09-21 已使用原项目最近一套
+   完整生产角色映射完成 1 条 LangGraph 真实端点预检；完整协议样本、同配置保留部署 baseline、
+   30 条 candidate 和精确费用对比仍未完成。同案例的保留部署单例在角色执行阶段失败，已作为
+   baseline 诊断保留，但单例不能替代完整 baseline。只配置主模型、导致所有角色回退到同一模型的
+   早期诊断结果已标记为无效，不作为发布证据。
 3. 完成上述门禁后再逐级放量 5% → 25% → 50% → 100%，并按 runbook 观察成功率、硬约束、
    p95 延迟和费用。
 

@@ -35,6 +35,14 @@ uv run --project apps/api python scripts/run_workflow_replay.py --provider langg
 uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline .tmp/replay/baseline.json --candidate .tmp/replay/candidate.json --expected-baseline-provider helloagents --baseline-total-cost-usd <isolated-baseline-billing-total>
 ```
 
+回放脚本通过 `LlmConfig.from_env()` 装配模型。若生产账号为搜索角色保存了独立端点或模型，
+必须同时提供对应的 `TRAVELMIND_LLM_ROLE_<ROLE>_BASE_URL`、`API_KEY`、`MODEL`、
+`WIRE_API` 和 `PROVIDER_PROTOCOL`，其中 `<ROLE>` 为 `POI_SPECIALIST`、
+`WEATHER_SPECIALIST`、`HOTEL_SPECIALIST` 或 `TRANSPORT_SPECIALIST`。先在不调用网络的进程中
+打印角色到模型的映射并与生产 `build_user_poi_role_overrides()` 结果核对；不得只设置主模型后
+把所有角色隐式回退到同一模型。baseline 与 candidate 必须使用完全相同的角色映射，配置不一致的
+产物只能作为诊断，不能进入质量门禁。
+
 也可以用 `--input-cost-per-million` 和 `--output-cost-per-million` 显式传入本次端点价格。
 回放会汇总每个角色返回的 prompt/completion token；任一角色缺少 usage 时，该案例费用仍记为
 未知，不会错误地按零成本处理。费用缺失时质量门禁默认失败；只有在验证功能而非发布决策时才可传
@@ -45,8 +53,10 @@ uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline 
 `trace_usage`、`measured_total` 或仍为 `unknown`，发布证据应保留该字段。
 
 每个 LangGraph 角色默认最多发送 2 次 HTTP 请求，POI 角色最多 1 次；请求数和实际重试数
-分别写入 trace。角色截止时间跨预处理、共享限流等待、HTTP 重试和协议回退统一扣减；
-同步传输无法保证立刻中断，但超时响应不会继续进入结果提交。ARQ 的任务级最大尝试次数
+分别写入 trace。搜索角色的共享限流排队与模型请求分别使用有界预算，两者相加形成角色总墙钟
+上限；同一并行批次的角色共享端点时，排队预算至少覆盖同端点兄弟角色的最长请求预算，获锁后
+仍保留本角色完整的 HTTP 重试/协议回退预算。同步传输无法保证立刻中断，但超时响应不会继续
+进入结果提交。ARQ 的任务级最大尝试次数
 继续构成外层恢复上限，图节点不再额外叠加默认重试。
 默认配置下，普通角色跨 3 次 ARQ 尝试的理论上限是 6 次请求，POI 角色为 3 次；
 已 checkpoint 的成功节点不会重跑。

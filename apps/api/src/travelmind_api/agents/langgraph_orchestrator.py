@@ -71,6 +71,10 @@ _ROLE_SEQUENCE = (
     "itinerary_planner",
 )
 _SEARCH_ROLES = {"poi_specialist", "weather_specialist", "hotel_specialist", "transport_specialist"}
+_PARALLEL_SEARCH_ROLE_GROUPS = (
+    frozenset(("poi_specialist", "weather_specialist")),
+    frozenset(("hotel_specialist", "transport_specialist")),
+)
 
 
 class LangGraphOrchestrator(PlanningCore):
@@ -617,6 +621,39 @@ class LangGraphOrchestrator(PlanningCore):
             return endpoint
         return endpoint.model_copy(update={"timeout_seconds": timeout_seconds})
 
+    def _role_queue_wait_timeout_seconds(
+        self,
+        role_name: str,
+        effective_endpoint: LlmEndpointConfig,
+    ) -> float:
+        """Bound endpoint-lock waiting without consuming the request budget.
+
+        Search roles in one graph stage may deliberately share an endpoint and
+        credential, so the limiter serializes them.  The queue budget must at
+        least cover the longest matching sibling request; otherwise a valid
+        second response can be discarded merely because its sibling acquired
+        the slot first.  The request itself remains independently bounded by
+        ``effective_endpoint.timeout_seconds``.
+        """
+
+        queue_timeout = float(effective_endpoint.timeout_seconds)
+        identity = self._rate_limit_identity(effective_endpoint)
+        group = next(
+            (roles for roles in _PARALLEL_SEARCH_ROLE_GROUPS if role_name in roles),
+            frozenset(),
+        )
+        for sibling_name in group - {role_name}:
+            sibling_role = self._workflow_role_configs.get(sibling_name)
+            sibling_endpoint = self._workflow_llm_configs.get(sibling_name)
+            if sibling_role is None or sibling_endpoint is None:
+                continue
+            if not self._role_config_uses_search_capable_grok(sibling_name, sibling_endpoint):
+                continue
+            effective_sibling = self._effective_role_endpoint(sibling_role, sibling_endpoint)
+            if self._rate_limit_identity(effective_sibling) == identity:
+                queue_timeout = max(queue_timeout, float(effective_sibling.timeout_seconds))
+        return queue_timeout
+
     def _invoke_workflow_role(
         self,
         role_name: str,
@@ -633,9 +670,19 @@ class LangGraphOrchestrator(PlanningCore):
         )
         effective_endpoint = self._effective_role_endpoint(role_config, endpoint)
         started = time.perf_counter()
-        role_deadline = started + float(effective_endpoint.timeout_seconds)
         enriched_payload = self._augment_payload_with_tool_results(role_name, input_payload)
         prompt_payload = self._build_role_prompt_payload(enriched_payload, role_name=role_name)
+        uses_shared_limiter = role_name in _SEARCH_ROLES and self._role_config_uses_search_capable_grok(
+            role_name,
+            endpoint,
+        )
+        request_timeout_seconds = float(effective_endpoint.timeout_seconds)
+        queue_wait_timeout_seconds = (
+            self._role_queue_wait_timeout_seconds(role_name, effective_endpoint)
+            if uses_shared_limiter
+            else 0.0
+        )
+        role_deadline = started + queue_wait_timeout_seconds + request_timeout_seconds
         invocation = RoleInvocation(
             role_name=role_name,
             prompt_version=role_config.prompt_version,
@@ -655,15 +702,18 @@ class LangGraphOrchestrator(PlanningCore):
             endpoint=self._describe_endpoint(effective_endpoint),
             model=effective_endpoint.model,
             payload_keys=sorted(prompt_payload.keys()),
+            queue_wait_timeout_seconds=queue_wait_timeout_seconds,
+            request_timeout_seconds=request_timeout_seconds,
+            total_timeout_seconds=queue_wait_timeout_seconds + request_timeout_seconds,
         )
         try:
             remaining_seconds = role_deadline - time.perf_counter()
             if remaining_seconds <= 0:
                 raise TimeoutError(f"LangGraph role '{role_name}' exhausted its total deadline before the model request")
-            if role_name in _SEARCH_ROLES and self._role_config_uses_search_capable_grok(role_name, endpoint):
+            if uses_shared_limiter:
                 lock_context = self._concurrency_limiter.acquire(
                     self._rate_limit_identity(endpoint),
-                    timeout_seconds=remaining_seconds,
+                    timeout_seconds=min(queue_wait_timeout_seconds, remaining_seconds),
                     cancellation_check=runtime.check_cancelled,
                 )
             else:
@@ -673,7 +723,9 @@ class LangGraphOrchestrator(PlanningCore):
                 remaining_seconds = role_deadline - time.perf_counter()
                 if remaining_seconds <= 0:
                     raise TimeoutError(f"LangGraph role '{role_name}' exhausted its total deadline before the model request")
-                bounded_endpoint = effective_endpoint.model_copy(update={"timeout_seconds": remaining_seconds})
+                bounded_endpoint = effective_endpoint.model_copy(
+                    update={"timeout_seconds": min(request_timeout_seconds, remaining_seconds)}
+                )
                 result = self._role_invoker.invoke(replace(invocation, endpoint=bounded_endpoint))
                 if not result.content.strip():
                     raise RuntimeError(f"LangGraph role '{role_name}' returned an empty response")
