@@ -86,7 +86,7 @@ jobs:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --python 3.11 --frozen --project apps/worker
-      - run: uv run --project apps/worker python -c "import travelmind_worker.worker"
+      - run: uv run --project apps/worker python -m unittest discover -s apps/worker/tests -v
 
   docker:
     runs-on: ubuntu-latest

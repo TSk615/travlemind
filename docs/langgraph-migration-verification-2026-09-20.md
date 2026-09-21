@@ -52,7 +52,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 | 前端生产构建（`vue-tsc` + Vite） | 通过 |
 | API 源码与测试 `compileall` | 通过 |
 | API/worker `uv lock` 与 `uv sync --locked` | 通过 |
-| worker 导入及函数注册 | 通过 |
+| worker 启动恢复、心跳、任务执行及 ARQ 重试映射烟测 | `4 passed` |
 | 安装环境中 `hello_agents` 模块不存在 | 通过 |
 | Windows 本地启动脚本语法解析 | 通过 |
 
