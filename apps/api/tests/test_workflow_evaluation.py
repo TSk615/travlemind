@@ -174,6 +174,8 @@ def test_replay_quality_gate_accepts_explicit_isolated_billing_totals():
     assert report.passed is True
     assert report.baseline.total_cost_usd == 3.0
     assert report.candidate.total_cost_usd == 3.0
+    assert report.baseline.cost_source == "measured_total"
+    assert report.candidate.cost_source == "measured_total"
 
 
 @pytest.mark.parametrize("invalid_cost", [-0.01, float("nan"), float("inf")])
@@ -194,6 +196,8 @@ def test_replay_quality_gate_rejects_latency_and_cost_regressions():
     report = evaluate_replay_gate(cases, baseline, candidate)
 
     assert report.passed is False
+    assert report.baseline.cost_source == "trace_usage"
+    assert report.candidate.cost_source == "trace_usage"
     assert "candidate p95 latency regressed by more than the allowed ratio" in report.failures
     assert "candidate cost regressed by more than the allowed ratio" in report.failures
 

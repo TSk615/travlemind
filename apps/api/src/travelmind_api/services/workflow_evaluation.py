@@ -121,6 +121,7 @@ class ReplayMetrics:
     hard_violation_count: int
     p95_latency_ms: float
     total_cost_usd: float | None
+    cost_source: Literal["trace_usage", "measured_total", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -259,21 +260,24 @@ def summarize_observations(
     if total_cost_usd is not None and (not math.isfinite(total_cost_usd) or total_cost_usd < 0):
         raise ValueError("measured replay cost must be finite and non-negative")
     costs = [item.cost_usd for item in observations]
+    trace_cost_is_complete = bool(observations) and all(value is not None for value in costs)
+    if total_cost_usd is not None:
+        resolved_cost = round(total_cost_usd, 6)
+        cost_source: Literal["trace_usage", "measured_total", "unknown"] = "measured_total"
+    elif trace_cost_is_complete:
+        resolved_cost = round(sum(float(value) for value in costs if value is not None), 6)
+        cost_source = "trace_usage"
+    else:
+        resolved_cost = None
+        cost_source = "unknown"
     return ReplayMetrics(
         case_count=len(observations),
         success_rate=fmean(1.0 if item.success else 0.0 for item in observations) if observations else 0.0,
         mean_quality_score=fmean(item.quality_score for item in observations) if observations else 0.0,
         hard_violation_count=sum(len(item.hard_violations) for item in observations),
         p95_latency_ms=_p95([item.latency_ms for item in observations]),
-        total_cost_usd=(
-            round(total_cost_usd, 6)
-            if total_cost_usd is not None
-            else (
-                round(sum(float(value) for value in costs if value is not None), 6)
-                if all(value is not None for value in costs)
-                else None
-            )
-        ),
+        total_cost_usd=resolved_cost,
+        cost_source=cost_source,
     )
 
 

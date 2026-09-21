@@ -41,7 +41,8 @@ uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline 
 `--allow-missing-cost`。保留 HelloAgents 版本的 trace 没有 token usage 字段；完整 baseline 必须
 在隔离账号/密钥下执行，并将提供商账单中只属于该次 30 案例运行的精确总费用通过
 `--baseline-total-cost-usd` 传入。该值不能用估算值或零占位。少量真实端点预检可用 `--limit`，
-完整放量判断必须覆盖全部案例。
+完整放量判断必须覆盖全部案例。评估报告的 `cost_source` 会分别标记费用来自
+`trace_usage`、`measured_total` 或仍为 `unknown`，发布证据应保留该字段。
 
 每个 LangGraph 角色默认最多发送 2 次 HTTP 请求，POI 角色最多 1 次；请求数和实际重试数
 分别写入 trace。角色截止时间跨预处理、共享限流等待、HTTP 重试和协议回退统一扣减；
