@@ -54,7 +54,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 | API 全量测试 | `311 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
 | PostgreSQL Alembic 升降级与 checkpoint 跨连接恢复 | `3 passed` |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
-| 现有 SQLite 用户库副本 `0004` → `0005` 与排空审计 | schema 就绪、无阻塞 Job/Run |
+| 现有 SQLite 用户库备份、`0004` → `0005` 与排空审计 | 完整性正常、schema 就绪、无阻塞 Job/Run |
 | LangGraph、共享限流、恢复、存储与灰度定向测试 | `38 passed` |
 | 前端单元测试 | `10 passed` |
 | 前端生成/微调与鉴权 E2E（Chromium） | `4 passed` |
@@ -88,8 +88,8 @@ upgrade → downgrade → upgrade，并验证 LangGraph checkpoint 跨 PostgreSQ
 3. 完成上述门禁后再逐级放量 5% → 25% → 50% → 100%，并按 runbook 观察成功率、硬约束、
    p95 延迟和费用。
 
-本机现有持久化 SQLite 数据库仍停留在 `0005` 之前。只读排空审计显示没有活跃任务，
-但因缺少 `workflow_runs` 和 `job_records.workflow_run_id` 而返回不安全；验证过程没有擅自迁移
-这份用户数据。另取一次性副本完成 `0004` → `0005`，升级后的排空审计得到
+2026-09-21 经用户明确授权，先使用 SQLite 在线备份保存本机持久化数据库，再将原库从
+`0004_search_role_models` 升级到 `0005_workflow_runs`。升级后 `PRAGMA integrity_check` 返回
+`ok`，`workflow_runs` 与 `job_records.workflow_run_id` 均存在；排空审计得到
 `schema_ready_for_langgraph=true`、空 `schema_blockers`、零阻塞 Job/Run 和
-`safe_to_remove_legacy_runtime=true`；副本随后已从工作区移除。
+`safe_to_remove_legacy_runtime=true`。备份保留在忽略的运行时目录中，没有纳入 Git。

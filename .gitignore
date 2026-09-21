@@ -28,6 +28,7 @@ pytest-roots/
 storage/*.db
 storage/*.sqlite3
 storage/*.sqlite
+storage/backups/
 storage/exports/*
 !storage/exports/.gitkeep
 storage/.pytest_tmp/
