@@ -31,7 +31,9 @@
 - provider 灰度按 Job ID 稳定分桶，任务首次执行后固定 provider；回滚使用 `standard` 或保留部署版本。
 - 30 组受控时钟回放、协议矩阵和质量/延迟/费用门禁已经实现；门禁默认要求
   `retained-deployment` baseline 与 `langgraph` candidate，拒绝混合 provider 结果；
-  `day_plan` 案例会拒绝旧 scope 值，并把目标日之外的任何改动计为硬违规。
+  `day_plan` 案例会拒绝旧 scope 值，并把目标日之外的任何改动计为硬违规。保留
+  HelloAgents trace 没有 token usage 时，发布门禁只接受显式提供的隔离账单总费用，仍不会
+  把缺失费用当成零。
 - `hello-agents` 包、旧 orchestrator/LLM adapter、旧 prompt 模块、浏览器 planner 与旧专用脚本已经删除。
 - API 与 worker 锁文件均已移除 `hello-agents` 及其不再需要的传递依赖。
 
@@ -43,7 +45,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `302 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
+| API 全量测试 | `306 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
 | PostgreSQL Alembic 升降级与 checkpoint 跨连接恢复 | `3 passed` |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | 现有 SQLite 用户库副本 `0004` → `0005` 与排空审计 | schema 就绪、无阻塞 Job/Run |

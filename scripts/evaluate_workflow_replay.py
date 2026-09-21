@@ -21,6 +21,18 @@ def main() -> None:
     parser.add_argument("--allow-missing-cost", action="store_true")
     parser.add_argument("--expected-baseline-provider", default="retained-deployment")
     parser.add_argument("--expected-candidate-provider", default="langgraph")
+    parser.add_argument(
+        "--baseline-total-cost-usd",
+        type=float,
+        default=None,
+        help="Exact isolated billing total for a legacy baseline whose trace has no token usage.",
+    )
+    parser.add_argument(
+        "--candidate-total-cost-usd",
+        type=float,
+        default=None,
+        help="Exact isolated billing total when candidate trace usage is unavailable.",
+    )
     args = parser.parse_args()
     report = evaluate_replay_gate(
         load_replay_cases(args.cases),
@@ -29,6 +41,8 @@ def main() -> None:
         require_cost=not args.allow_missing_cost,
         expected_baseline_provider=args.expected_baseline_provider,
         expected_candidate_provider=args.expected_candidate_provider,
+        baseline_total_cost_usd=args.baseline_total_cost_usd,
+        candidate_total_cost_usd=args.candidate_total_cost_usd,
     )
     rendered = json.dumps(report.as_dict(), ensure_ascii=False, indent=2, sort_keys=True)
     if args.output:

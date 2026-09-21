@@ -155,6 +155,37 @@ def test_replay_quality_gate_rejects_hard_violation_and_missing_cost():
     assert "cost comparison is incomplete" in report.failures
 
 
+def test_replay_quality_gate_accepts_explicit_isolated_billing_totals():
+    cases = load_replay_cases(FIXTURE)
+    baseline = _observations(cases, "helloagents", latency_ms=1000, cost_usd=0.10)
+    candidate = _observations(cases, "langgraph", latency_ms=1000, cost_usd=0.10)
+    baseline = [item.model_copy(update={"cost_usd": None}) for item in baseline]
+
+    report = evaluate_replay_gate(
+        cases,
+        baseline,
+        candidate,
+        expected_baseline_provider="helloagents",
+        expected_candidate_provider="langgraph",
+        baseline_total_cost_usd=3.0,
+        candidate_total_cost_usd=3.0,
+    )
+
+    assert report.passed is True
+    assert report.baseline.total_cost_usd == 3.0
+    assert report.candidate.total_cost_usd == 3.0
+
+
+@pytest.mark.parametrize("invalid_cost", [-0.01, float("nan"), float("inf")])
+def test_replay_quality_gate_rejects_invalid_measured_cost(invalid_cost):
+    cases = load_replay_cases(FIXTURE)
+    baseline = _observations(cases, "helloagents", latency_ms=1000, cost_usd=0.10)
+    candidate = _observations(cases, "langgraph", latency_ms=1000, cost_usd=0.10)
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        evaluate_replay_gate(cases, baseline, candidate, baseline_total_cost_usd=invalid_cost)
+
+
 def test_replay_quality_gate_rejects_latency_and_cost_regressions():
     cases = load_replay_cases(FIXTURE)
     baseline = _observations(cases, "retained-deployment", latency_ms=1000, cost_usd=0.10)

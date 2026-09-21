@@ -251,7 +251,13 @@ def _p95(values: list[float]) -> float:
     return ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
 
 
-def summarize_observations(observations: list[ReplayObservation]) -> ReplayMetrics:
+def summarize_observations(
+    observations: list[ReplayObservation],
+    *,
+    total_cost_usd: float | None = None,
+) -> ReplayMetrics:
+    if total_cost_usd is not None and (not math.isfinite(total_cost_usd) or total_cost_usd < 0):
+        raise ValueError("measured replay cost must be finite and non-negative")
     costs = [item.cost_usd for item in observations]
     return ReplayMetrics(
         case_count=len(observations),
@@ -259,7 +265,15 @@ def summarize_observations(observations: list[ReplayObservation]) -> ReplayMetri
         mean_quality_score=fmean(item.quality_score for item in observations) if observations else 0.0,
         hard_violation_count=sum(len(item.hard_violations) for item in observations),
         p95_latency_ms=_p95([item.latency_ms for item in observations]),
-        total_cost_usd=(round(sum(float(value) for value in costs if value is not None), 6) if all(value is not None for value in costs) else None),
+        total_cost_usd=(
+            round(total_cost_usd, 6)
+            if total_cost_usd is not None
+            else (
+                round(sum(float(value) for value in costs if value is not None), 6)
+                if all(value is not None for value in costs)
+                else None
+            )
+        ),
     )
 
 
@@ -272,6 +286,8 @@ def evaluate_replay_gate(
     require_cost: bool = True,
     expected_baseline_provider: str | None = None,
     expected_candidate_provider: str | None = None,
+    baseline_total_cost_usd: float | None = None,
+    candidate_total_cost_usd: float | None = None,
 ) -> ReplayGateReport:
     validate_replay_case_set(cases)
     expected_ids = {case.id for case in cases}
@@ -307,8 +323,8 @@ def evaluate_replay_gate(
                 f"expected {expected_candidate_provider}, received {', '.join(sorted(candidate_providers)) or '<none>'}"
             )
 
-    baseline_metrics = summarize_observations(baseline)
-    candidate_metrics = summarize_observations(candidate)
+    baseline_metrics = summarize_observations(baseline, total_cost_usd=baseline_total_cost_usd)
+    candidate_metrics = summarize_observations(candidate, total_cost_usd=candidate_total_cost_usd)
     if candidate_metrics.hard_violation_count:
         failures.append(f"candidate has {candidate_metrics.hard_violation_count} hard-constraint violation(s)")
     if candidate_metrics.success_rate < baseline_metrics.success_rate:
