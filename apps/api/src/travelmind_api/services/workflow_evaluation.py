@@ -270,6 +270,8 @@ def evaluate_replay_gate(
     *,
     max_regression_ratio: float = 0.10,
     require_cost: bool = True,
+    expected_baseline_provider: str | None = None,
+    expected_candidate_provider: str | None = None,
 ) -> ReplayGateReport:
     validate_replay_case_set(cases)
     expected_ids = {case.id for case in cases}
@@ -277,6 +279,7 @@ def evaluate_replay_gate(
 
     for label, observations in (("baseline", baseline), ("candidate", candidate)):
         observed_ids = [item.case_id for item in observations]
+        providers = {str(item.provider).strip() for item in observations if str(item.provider).strip()}
         duplicates = sorted({case_id for case_id in observed_ids if observed_ids.count(case_id) > 1})
         if duplicates:
             failures.append(f"{label} contains duplicate cases: {', '.join(duplicates)}")
@@ -286,6 +289,23 @@ def evaluate_replay_gate(
             failures.append(f"{label} is missing cases: {', '.join(missing)}")
         if unexpected:
             failures.append(f"{label} contains unexpected cases: {', '.join(unexpected)}")
+        if len(providers) > 1:
+            failures.append(f"{label} contains multiple providers: {', '.join(sorted(providers))}")
+
+    if expected_baseline_provider:
+        baseline_providers = {str(item.provider).strip() for item in baseline}
+        if baseline_providers != {expected_baseline_provider}:
+            failures.append(
+                "baseline provider mismatch: "
+                f"expected {expected_baseline_provider}, received {', '.join(sorted(baseline_providers)) or '<none>'}"
+            )
+    if expected_candidate_provider:
+        candidate_providers = {str(item.provider).strip() for item in candidate}
+        if candidate_providers != {expected_candidate_provider}:
+            failures.append(
+                "candidate provider mismatch: "
+                f"expected {expected_candidate_provider}, received {', '.join(sorted(candidate_providers)) or '<none>'}"
+            )
 
     baseline_metrics = summarize_observations(baseline)
     candidate_metrics = summarize_observations(candidate)

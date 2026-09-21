@@ -19,12 +19,16 @@ def main() -> None:
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--output", default="")
     parser.add_argument("--allow-missing-cost", action="store_true")
+    parser.add_argument("--expected-baseline-provider", default="retained-deployment")
+    parser.add_argument("--expected-candidate-provider", default="langgraph")
     args = parser.parse_args()
     report = evaluate_replay_gate(
         load_replay_cases(args.cases),
         load_observations(args.baseline),
         load_observations(args.candidate),
         require_cost=not args.allow_missing_cost,
+        expected_baseline_provider=args.expected_baseline_provider,
+        expected_candidate_provider=args.expected_candidate_provider,
     )
     rendered = json.dumps(report.as_dict(), ensure_ascii=False, indent=2, sort_keys=True)
     if args.output:

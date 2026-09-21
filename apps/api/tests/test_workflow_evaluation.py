@@ -165,3 +165,24 @@ def test_replay_quality_gate_rejects_latency_and_cost_regressions():
     assert report.passed is False
     assert "candidate p95 latency regressed by more than the allowed ratio" in report.failures
     assert "candidate cost regressed by more than the allowed ratio" in report.failures
+
+
+def test_replay_quality_gate_rejects_provider_mismatch_and_mixed_provider_artifacts():
+    cases = load_replay_cases(FIXTURE)
+    baseline = _observations(cases, "standard", latency_ms=1000, cost_usd=0.10)
+    candidate = _observations(cases, "langgraph", latency_ms=1000, cost_usd=0.10)
+    candidate[0] = candidate[0].model_copy(update={"provider": "standard"})
+
+    report = evaluate_replay_gate(
+        cases,
+        baseline,
+        candidate,
+        expected_baseline_provider="retained-deployment",
+        expected_candidate_provider="langgraph",
+    )
+
+    assert report.passed is False
+    assert not any("baseline contains multiple providers" in item for item in report.failures)
+    assert any("baseline provider mismatch" in item for item in report.failures)
+    assert any("candidate contains multiple providers" in item for item in report.failures)
+    assert any("candidate provider mismatch" in item for item in report.failures)
