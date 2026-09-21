@@ -1,7 +1,8 @@
 # TravelMind AI：LangChain / LangGraph 迁移评估与计划
 
 评估日期：2026-09-20。实施状态：`codex/langchain-migration` 已完成 P0–P5 代码迁移与本地
-质量门禁；PostgreSQL、真实模型端点及生产灰度仍须按
+质量门禁，包括隔离 PostgreSQL 16 上的迁移和 checkpoint 恢复测试；目标数据库排空、
+真实模型端点及生产灰度仍须按
 [`langgraph-migration-verification-2026-09-20.md`](./langgraph-migration-verification-2026-09-20.md)
 完成外部验收。下文的“当前项目”和基线测试描述保留迁移前快照语义，用于解释方案来源。
 
