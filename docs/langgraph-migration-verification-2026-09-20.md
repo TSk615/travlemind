@@ -42,7 +42,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `298 passed, 2 skipped`（本机无 PostgreSQL） |
+| API 全量测试 | `299 passed, 2 skipped`（本机无 PostgreSQL；CI 缺少 PostgreSQL URL 会直接失败） |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | LangGraph、共享限流、恢复、存储与灰度定向测试 | `38 passed` |
 | 前端单元测试 | `10 passed` |

@@ -16,6 +16,11 @@ from travelmind_api.services.workflow_store import workflow_checkpointer
 POSTGRES_URL = os.getenv("TRAVELMIND_TEST_POSTGRES_URL", "").strip()
 
 
+def test_ci_postgres_gate_is_configured():
+    if os.getenv("CI", "").strip().lower() == "true":
+        assert POSTGRES_URL, "CI must provide TRAVELMIND_TEST_POSTGRES_URL for PostgreSQL gates"
+
+
 @pytest.mark.skipif(not POSTGRES_URL, reason="TRAVELMIND_TEST_POSTGRES_URL is not configured")
 def test_postgres_upgrade_downgrade_cycle():
     config = alembic_config(POSTGRES_URL)
