@@ -53,6 +53,47 @@ def test_trace_cost_uses_all_role_usage_and_missing_usage_stays_unknown():
     ) is None
 
 
+def test_trace_cost_rejects_invalid_prices():
+    trace = _trace_with_usage({"prompt_tokens": 1, "completion_tokens": 1})
+    for invalid_price in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite and non-negative"):
+            estimate_trace_cost_usd(
+                trace,
+                input_cost_per_million=invalid_price,
+                output_cost_per_million=1,
+            )
+
+
+def test_trace_cost_treats_invalid_usage_as_unknown():
+    for invalid_usage in (-1.0, float("nan"), float("inf")):
+        trace = _trace_with_usage(
+            {"prompt_tokens": invalid_usage, "completion_tokens": 1},
+        )
+        assert estimate_trace_cost_usd(
+            trace,
+            input_cost_per_million=1,
+            output_cost_per_million=1,
+        ) is None
+
+
+def test_replay_observation_rejects_non_finite_metrics():
+    valid = {
+        "case_id": "case-finite",
+        "provider": "langgraph",
+        "success": True,
+        "quality_score": 1.0,
+        "latency_ms": 1.0,
+        "cost_usd": 1.0,
+    }
+    for field, invalid_value in (
+        ("quality_score", float("nan")),
+        ("latency_ms", float("inf")),
+        ("cost_usd", float("inf")),
+    ):
+        with pytest.raises(ValueError):
+            ReplayObservation.model_validate({**valid, field: invalid_value})
+
+
 def _observations(cases, provider: str, *, latency_ms: float, cost_usd: float):
     return [
         ReplayObservation(

@@ -41,8 +41,9 @@ def estimate_trace_cost_usd(
 ) -> float | None:
     """Estimate known model cost; return unknown if any recorded role lacks usage."""
 
-    if input_cost_per_million < 0 or output_cost_per_million < 0:
-        raise ValueError("model token prices cannot be negative")
+    prices = (input_cost_per_million, output_cost_per_million)
+    if any(not math.isfinite(price) or price < 0 for price in prices):
+        raise ValueError("model token prices must be finite and non-negative")
     if not trace.agent_runs:
         return None
 
@@ -58,16 +59,23 @@ def estimate_trace_cost_usd(
             usage.get("output_tokens", usage.get("candidatesTokenCount")),
         )
         try:
-            prompt_tokens += float(raw_prompt)
-            completion_tokens += float(raw_completion)
+            parsed_prompt = float(raw_prompt)
+            parsed_completion = float(raw_completion)
         except (TypeError, ValueError):
             return None
+        if any(
+            not math.isfinite(value) or value < 0
+            for value in (parsed_prompt, parsed_completion)
+        ):
+            return None
+        prompt_tokens += parsed_prompt
+        completion_tokens += parsed_completion
 
-    return round(
+    estimated_cost = (
         prompt_tokens * input_cost_per_million / 1_000_000
-        + completion_tokens * output_cost_per_million / 1_000_000,
-        8,
+        + completion_tokens * output_cost_per_million / 1_000_000
     )
+    return round(estimated_cost, 8) if math.isfinite(estimated_cost) else None
 
 
 class ReplayDefinition(BaseModel):
@@ -107,9 +115,9 @@ class ReplayObservation(BaseModel):
     provider: str
     success: bool
     hard_violations: list[str] = Field(default_factory=list)
-    quality_score: float = Field(ge=0.0, le=1.0)
-    latency_ms: float = Field(ge=0.0)
-    cost_usd: float | None = Field(default=None, ge=0.0)
+    quality_score: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    latency_ms: float = Field(ge=0.0, allow_inf_nan=False)
+    cost_usd: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
     error: str | None = None
 
 

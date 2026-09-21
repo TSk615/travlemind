@@ -46,7 +46,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `308 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
+| API 全量测试 | `311 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
 | PostgreSQL Alembic 升降级与 checkpoint 跨连接恢复 | `3 passed` |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | 现有 SQLite 用户库副本 `0004` → `0005` 与排空审计 | schema 就绪、无阻塞 Job/Run |
