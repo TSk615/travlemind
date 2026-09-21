@@ -30,7 +30,9 @@ $env:TRAVELMIND_REPLAY_INPUT_COST_PER_MILLION = "<input-token-price>"
 $env:TRAVELMIND_REPLAY_OUTPUT_COST_PER_MILLION = "<output-token-price>"
 ## 在仍包含旧实现的保留部署 checkout 中运行该版本的脚本；产物 provider 为 helloagents。
 uv run --project apps/api python scripts/run_workflow_replay.py --provider helloagents --output <migration-checkout>/.tmp/replay/baseline.json --allow-network
-## 回到迁移 checkout，生成 LangGraph candidate。
+## 回到迁移 checkout；保持 baseline 使用的模型环境变量不变，为旧版产物补充脱敏配置指纹。
+uv run --project apps/api python scripts/stamp_workflow_replay_config.py --artifact .tmp/replay/baseline.json
+## 生成 LangGraph candidate；当前脚本会自动写入配置指纹。
 uv run --project apps/api python scripts/run_workflow_replay.py --provider langgraph --output .tmp/replay/candidate.json --allow-network
 uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline .tmp/replay/baseline.json --candidate .tmp/replay/candidate.json --expected-baseline-provider helloagents --baseline-total-cost-usd <isolated-baseline-billing-total>
 ```
@@ -42,6 +44,9 @@ uv run --project apps/api python scripts/evaluate_workflow_replay.py --baseline 
 打印角色到模型的映射并与生产 `build_user_poi_role_overrides()` 结果核对；不得只设置主模型后
 把所有角色隐式回退到同一模型。baseline 与 candidate 必须使用完全相同的角色映射，配置不一致的
 产物只能作为诊断，不能进入质量门禁。
+配置指纹覆盖六个角色的端点、凭据身份、模型、协议和 wire API，但产物只保存外层 SHA-256
+与不含端点/凭据的角色模型表。评估器默认拒绝任一产物缺少指纹或两边指纹不一致；不得手工复制
+另一次运行的指纹来绕过门禁。
 
 也可以用 `--input-cost-per-million` 和 `--output-cost-per-million` 显式传入本次端点价格。
 回放会汇总每个角色返回的 prompt/completion token；任一角色缺少 usage 时，该案例费用仍记为

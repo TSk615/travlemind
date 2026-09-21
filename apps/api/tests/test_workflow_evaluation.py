@@ -5,18 +5,23 @@ from pathlib import Path
 import pytest
 
 from travelmind_api.agents.base import AgentRunStep, AgentTrace
+from travelmind_api.services.llm.config import LlmConfig, LlmEndpointConfig
 from travelmind_api.services.workflow_evaluation import (
     REQUIRED_REPLAY_CATEGORIES,
     ReplayDefinition,
     ReplayObservation,
+    build_replay_artifact,
     estimate_trace_cost_usd,
     evaluate_replay_gate,
     hard_constraint_violations,
+    load_replay_artifact,
     load_replay_cases,
+    replay_configuration_fingerprint,
 )
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "langgraph-replay-cases.json"
+CONFIG_FINGERPRINT = "a" * 64
 
 
 def _trace_with_usage(*usage_rows):
@@ -109,6 +114,54 @@ def _observations(cases, provider: str, *, latency_ms: float, cost_usd: float):
     ]
 
 
+def _evaluate(cases, baseline, candidate, **kwargs):
+    kwargs.setdefault("baseline_configuration_fingerprint", CONFIG_FINGERPRINT)
+    kwargs.setdefault("candidate_configuration_fingerprint", CONFIG_FINGERPRINT)
+    return evaluate_replay_gate(cases, baseline, candidate, **kwargs)
+
+
+def test_replay_configuration_fingerprint_is_secret_safe_and_covers_every_route(tmp_path):
+    default = {
+        "base_url": "https://primary.example.test/v1",
+        "api_key": "primary-secret",
+        "model": "gpt-primary",
+        "wire_api": "responses",
+    }
+    poi = LlmEndpointConfig(
+        base_url="https://search.example.test/v1",
+        api_key="search-secret",
+        model="Console/grok-4.20-multi-agent-0309",
+        wire_api="responses",
+    )
+    config = LlmConfig(**default, role_overrides={"poi_specialist": poi})
+    fingerprint = replay_configuration_fingerprint(config)
+    assert fingerprint == replay_configuration_fingerprint(config.model_copy(deep=True))
+
+    for changed in (
+        config.model_copy(update={"model": "gpt-other"}),
+        config.model_copy(update={"api_key": "other-primary-secret"}),
+        config.model_copy(update={"base_url": "https://other.example.test/v1"}),
+        config.model_copy(
+            update={
+                "role_overrides": {
+                    "poi_specialist": poi.model_copy(update={"model": "Console/grok-other"})
+                }
+            }
+        ),
+    ):
+        assert replay_configuration_fingerprint(changed) != fingerprint
+
+    artifact = build_replay_artifact("langgraph", [], config)
+    path = tmp_path / "artifact.json"
+    rendered = artifact.model_dump_json()
+    path.write_text(rendered, encoding="utf-8")
+    assert "primary-secret" not in rendered
+    assert "search-secret" not in rendered
+    assert "primary.example.test" not in rendered
+    assert "search.example.test" not in rendered
+    assert load_replay_artifact(path).configuration_fingerprint == fingerprint
+
+
 def test_replay_fixture_has_thirty_controlled_cases_and_required_coverage():
     cases = load_replay_cases(FIXTURE)
     assert len(cases) == 30
@@ -173,7 +226,7 @@ def test_replay_quality_gate_accepts_equal_quality_within_ten_percent_limits():
     baseline = _observations(cases, "retained-deployment", latency_ms=1000, cost_usd=0.10)
     candidate = _observations(cases, "langgraph", latency_ms=1099, cost_usd=0.109)
 
-    report = evaluate_replay_gate(cases, baseline, candidate)
+    report = _evaluate(cases, baseline, candidate)
 
     assert report.passed is True
     assert report.failures == []
@@ -189,7 +242,7 @@ def test_replay_quality_gate_rejects_hard_violation_and_missing_cost():
         update={"hard_violations": ["closed POI scheduled"], "cost_usd": None}
     )
 
-    report = evaluate_replay_gate(cases, baseline, candidate)
+    report = _evaluate(cases, baseline, candidate)
 
     assert report.passed is False
     assert "candidate has 1 hard-constraint violation(s)" in report.failures
@@ -202,7 +255,7 @@ def test_replay_quality_gate_accepts_explicit_isolated_billing_totals():
     candidate = _observations(cases, "langgraph", latency_ms=1000, cost_usd=0.10)
     baseline = [item.model_copy(update={"cost_usd": None}) for item in baseline]
 
-    report = evaluate_replay_gate(
+    report = _evaluate(
         cases,
         baseline,
         candidate,
@@ -226,7 +279,7 @@ def test_replay_quality_gate_rejects_invalid_measured_cost(invalid_cost):
     candidate = _observations(cases, "langgraph", latency_ms=1000, cost_usd=0.10)
 
     with pytest.raises(ValueError, match="finite and non-negative"):
-        evaluate_replay_gate(cases, baseline, candidate, baseline_total_cost_usd=invalid_cost)
+        _evaluate(cases, baseline, candidate, baseline_total_cost_usd=invalid_cost)
 
 
 def test_replay_quality_gate_rejects_latency_and_cost_regressions():
@@ -234,7 +287,7 @@ def test_replay_quality_gate_rejects_latency_and_cost_regressions():
     baseline = _observations(cases, "retained-deployment", latency_ms=1000, cost_usd=0.10)
     candidate = _observations(cases, "langgraph", latency_ms=1200, cost_usd=0.12)
 
-    report = evaluate_replay_gate(cases, baseline, candidate)
+    report = _evaluate(cases, baseline, candidate)
 
     assert report.passed is False
     assert report.baseline.cost_source == "trace_usage"
@@ -249,7 +302,7 @@ def test_replay_quality_gate_rejects_provider_mismatch_and_mixed_provider_artifa
     candidate = _observations(cases, "langgraph", latency_ms=1000, cost_usd=0.10)
     candidate[0] = candidate[0].model_copy(update={"provider": "standard"})
 
-    report = evaluate_replay_gate(
+    report = _evaluate(
         cases,
         baseline,
         candidate,
@@ -262,3 +315,30 @@ def test_replay_quality_gate_rejects_provider_mismatch_and_mixed_provider_artifa
     assert any("baseline provider mismatch" in item for item in report.failures)
     assert any("candidate contains multiple providers" in item for item in report.failures)
     assert any("candidate provider mismatch" in item for item in report.failures)
+
+
+def test_replay_quality_gate_rejects_missing_and_mismatched_configuration_fingerprints():
+    cases = load_replay_cases(FIXTURE)
+    baseline = _observations(cases, "retained-deployment", latency_ms=1000, cost_usd=0.10)
+    candidate = _observations(cases, "langgraph", latency_ms=1000, cost_usd=0.10)
+
+    missing = evaluate_replay_gate(
+        cases,
+        baseline,
+        candidate,
+        baseline_configuration_fingerprint=None,
+        candidate_configuration_fingerprint="b" * 64,
+    )
+    assert missing.passed is False
+    assert "baseline configuration fingerprint is missing" in missing.failures
+
+    mismatched = evaluate_replay_gate(
+        cases,
+        baseline,
+        candidate,
+        baseline_configuration_fingerprint="a" * 64,
+        candidate_configuration_fingerprint="b" * 64,
+    )
+    assert mismatched.passed is False
+    assert "baseline and candidate configuration fingerprints do not match" in mismatched.failures
+    assert mismatched.configuration_match is False

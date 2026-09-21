@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 from travelmind_api.agents.base import AgentTrace, PlanningRequest, PlanningResult
 from travelmind_api.agents.workflows.trip_refinement import validate_refinement_target
 from travelmind_api.services.execution_validation import validate_timeline
+from travelmind_api.services.llm.config import LlmConfig
 from travelmind_api.services.llm.parser import LlmPlanningPayload
 
 
@@ -31,6 +33,45 @@ REQUIRED_REPLAY_CATEGORIES = frozenset(
         "no_upstream",
     }
 )
+REPLAY_ROLE_NAMES = (
+    "brief_parser",
+    "poi_specialist",
+    "weather_specialist",
+    "hotel_specialist",
+    "transport_specialist",
+    "itinerary_planner",
+)
+
+
+def replay_model_routes(config: LlmConfig) -> dict[str, dict[str, str]]:
+    """Return non-secret route metadata that makes replay artifacts auditable."""
+
+    return {
+        role_name: {
+            "model": endpoint.model,
+            "provider_protocol": endpoint.provider_protocol,
+            "wire_api": endpoint.wire_api,
+        }
+        for role_name in REPLAY_ROLE_NAMES
+        for endpoint in (config.config_for_role(role_name),)
+    }
+
+
+def replay_configuration_fingerprint(config: LlmConfig) -> str:
+    """Hash every route attribute, including credential identity, without exposing secrets."""
+
+    routes = {}
+    for role_name in REPLAY_ROLE_NAMES:
+        endpoint = config.config_for_role(role_name)
+        routes[role_name] = {
+            "base_url": endpoint.base_url.strip().rstrip("/").casefold(),
+            "credential_sha256": hashlib.sha256(endpoint.api_key.encode("utf-8")).hexdigest(),
+            "model": endpoint.model.strip(),
+            "provider_protocol": endpoint.provider_protocol,
+            "wire_api": endpoint.wire_api,
+        }
+    canonical = json.dumps(routes, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def estimate_trace_cost_usd(
@@ -121,6 +162,30 @@ class ReplayObservation(BaseModel):
     error: str | None = None
 
 
+class ReplayArtifact(BaseModel):
+    schema_version: int = 2
+    provider: str = Field(min_length=1)
+    configuration_fingerprint: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    model_routes: dict[str, dict[str, str]] = Field(default_factory=dict)
+    observations: list[ReplayObservation] = Field(default_factory=list)
+
+
+def build_replay_artifact(
+    provider: str,
+    observations: list[ReplayObservation],
+    config: LlmConfig,
+) -> ReplayArtifact:
+    return ReplayArtifact(
+        provider=provider,
+        configuration_fingerprint=replay_configuration_fingerprint(config),
+        model_routes=replay_model_routes(config),
+        observations=observations,
+    )
+
+
 @dataclass(frozen=True)
 class ReplayMetrics:
     case_count: int
@@ -138,6 +203,9 @@ class ReplayGateReport:
     failures: list[str]
     baseline: ReplayMetrics
     candidate: ReplayMetrics
+    baseline_configuration_fingerprint: str | None
+    candidate_configuration_fingerprint: str | None
+    configuration_match: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -145,6 +213,11 @@ class ReplayGateReport:
             "failures": list(self.failures),
             "baseline": asdict(self.baseline),
             "candidate": asdict(self.candidate),
+            "configuration": {
+                "baseline_fingerprint": self.baseline_configuration_fingerprint,
+                "candidate_fingerprint": self.candidate_configuration_fingerprint,
+                "matches": self.configuration_match,
+            },
         }
 
 
@@ -300,10 +373,27 @@ def evaluate_replay_gate(
     expected_candidate_provider: str | None = None,
     baseline_total_cost_usd: float | None = None,
     candidate_total_cost_usd: float | None = None,
+    baseline_configuration_fingerprint: str | None = None,
+    candidate_configuration_fingerprint: str | None = None,
+    require_configuration_match: bool = True,
 ) -> ReplayGateReport:
     validate_replay_case_set(cases)
     expected_ids = {case.id for case in cases}
     failures: list[str] = []
+    baseline_fingerprint = str(baseline_configuration_fingerprint or "").strip() or None
+    candidate_fingerprint = str(candidate_configuration_fingerprint or "").strip() or None
+    configuration_match = bool(
+        baseline_fingerprint
+        and candidate_fingerprint
+        and baseline_fingerprint == candidate_fingerprint
+    )
+    if require_configuration_match:
+        if baseline_fingerprint is None:
+            failures.append("baseline configuration fingerprint is missing")
+        if candidate_fingerprint is None:
+            failures.append("candidate configuration fingerprint is missing")
+        if baseline_fingerprint is not None and candidate_fingerprint is not None and not configuration_match:
+            failures.append("baseline and candidate configuration fingerprints do not match")
 
     for label, observations in (("baseline", baseline), ("candidate", candidate)):
         observed_ids = [item.case_id for item in observations]
@@ -360,10 +450,18 @@ def evaluate_replay_gate(
         failures=failures,
         baseline=baseline_metrics,
         candidate=candidate_metrics,
+        baseline_configuration_fingerprint=baseline_fingerprint,
+        candidate_configuration_fingerprint=candidate_fingerprint,
+        configuration_match=configuration_match,
     )
 
 
-def load_observations(path: str | Path) -> list[ReplayObservation]:
+def load_replay_artifact(path: str | Path) -> ReplayArtifact:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    rows = payload.get("observations") if isinstance(payload, dict) else payload
-    return [ReplayObservation.model_validate(item) for item in rows or []]
+    if isinstance(payload, list):
+        return ReplayArtifact(provider="unknown", observations=payload)
+    return ReplayArtifact.model_validate(payload)
+
+
+def load_observations(path: str | Path) -> list[ReplayObservation]:
+    return load_replay_artifact(path).observations

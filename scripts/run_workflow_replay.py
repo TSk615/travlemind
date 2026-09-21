@@ -14,6 +14,7 @@ from travelmind_api.core.config import Settings
 from travelmind_api.services.llm import LlmConfig
 from travelmind_api.services.workflow_evaluation import (
     ReplayObservation,
+    build_replay_artifact,
     estimate_trace_cost_usd,
     hard_constraint_violations,
     load_replay_cases,
@@ -114,7 +115,7 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(
-            {"provider": args.provider, "observations": [item.model_dump(mode="json") for item in observations]},
+            build_replay_artifact(args.provider, observations, llm_config).model_dump(mode="json"),
             ensure_ascii=False,
             indent=2,
         )

@@ -35,6 +35,8 @@
   Job 快照，已有 `WorkflowRun` 的 provider 优先于冲突的 Job 快照；回滚使用 `standard` 或保留部署版本。
 - 30 组受控时钟回放、协议矩阵和质量/延迟/费用门禁已经实现；门禁默认要求
   `retained-deployment` baseline 与 `langgraph` candidate，拒绝混合 provider 结果；
+  baseline/candidate 还必须携带一致的脱敏配置指纹，覆盖六角色端点、凭据身份、模型、协议及
+  wire API，防止不同角色路由的结果被错误比较；
   `day_plan` 案例会拒绝旧 scope 值，并把目标日之外的任何改动计为硬违规。保留
   HelloAgents trace 没有 token usage 时，发布门禁只接受显式提供的隔离账单总费用，仍不会
   把缺失费用当成零。
@@ -65,7 +67,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 | 正确生产角色映射的 LangGraph 真实端点单例预检 | `1/1` 成功、零硬违规，约 `440.3s` |
 | 同配置保留部署单例对照 | `helloagents` 角色执行 `RuntimeError`，约 `378.3s`；非认证、配额、限流、超时或网络错误 |
 | 本次限流/截止时间修复定向测试 | `64 passed` |
-| 本次修复后的 API 本地全量回归 | `310 passed, 2 skipped`（仅缺少临时 PostgreSQL 环境） |
+| 本次修复后的 API 本地全量回归 | `312 passed, 2 skipped`（仅缺少临时 PostgreSQL 环境） |
 
 本次使用隔离的 Docker PostgreSQL 16 测试库设置 `TRAVELMIND_TEST_POSTGRES_URL`，完成
 upgrade → downgrade → upgrade，并验证 LangGraph checkpoint 跨 PostgreSQL 连接恢复且不重跑

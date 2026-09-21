@@ -7,7 +7,7 @@ from pathlib import Path
 
 from travelmind_api.services.workflow_evaluation import (
     evaluate_replay_gate,
-    load_observations,
+    load_replay_artifact,
     load_replay_cases,
 )
 
@@ -34,15 +34,19 @@ def main() -> None:
         help="Exact isolated billing total when candidate trace usage is unavailable.",
     )
     args = parser.parse_args()
+    baseline = load_replay_artifact(args.baseline)
+    candidate = load_replay_artifact(args.candidate)
     report = evaluate_replay_gate(
         load_replay_cases(args.cases),
-        load_observations(args.baseline),
-        load_observations(args.candidate),
+        baseline.observations,
+        candidate.observations,
         require_cost=not args.allow_missing_cost,
         expected_baseline_provider=args.expected_baseline_provider,
         expected_candidate_provider=args.expected_candidate_provider,
         baseline_total_cost_usd=args.baseline_total_cost_usd,
         candidate_total_cost_usd=args.candidate_total_cost_usd,
+        baseline_configuration_fingerprint=baseline.configuration_fingerprint,
+        candidate_configuration_fingerprint=candidate.configuration_fingerprint,
     )
     rendered = json.dumps(report.as_dict(), ensure_ascii=False, indent=2, sort_keys=True)
     if args.output:
