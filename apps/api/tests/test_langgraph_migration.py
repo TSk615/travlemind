@@ -399,7 +399,16 @@ def test_partial_langgraph_rollout_requires_a_stable_job_key():
         )
 
 
-def test_job_provider_snapshot_survives_rollout_switch(monkeypatch):
+@pytest.mark.parametrize(
+    ("initial_percent", "next_percent", "expected_provider"),
+    [(0, 100, "standard"), (100, 0, "langgraph")],
+)
+def test_job_provider_snapshot_survives_rollout_switch(
+    monkeypatch,
+    initial_percent,
+    next_percent,
+    expected_provider,
+):
     import travelmind_api.jobs.handlers as handlers
 
     job = SimpleNamespace(id="job-snapshot", payload_json={})
@@ -407,18 +416,46 @@ def test_job_provider_snapshot_survives_rollout_switch(monkeypatch):
     monkeypatch.setattr(
         handlers,
         "settings",
-        Settings(langgraph_rollout_percent=0, langgraph_rollout_fallback_provider="standard"),
+        Settings(
+            langgraph_rollout_percent=initial_percent,
+            langgraph_rollout_fallback_provider="standard",
+        ),
     )
     first = handlers._resolve_job_agent_provider(user=user, job=job, existing_run=None)
     monkeypatch.setattr(
         handlers,
         "settings",
-        Settings(langgraph_rollout_percent=100, langgraph_rollout_fallback_provider="standard"),
+        Settings(
+            langgraph_rollout_percent=next_percent,
+            langgraph_rollout_fallback_provider="standard",
+        ),
     )
     retry = handlers._resolve_job_agent_provider(user=user, job=job, existing_run=None)
 
-    assert first == "standard"
+    assert first == expected_provider
     assert retry == first
+    assert job.payload_json["workflow_provider"] == expected_provider
+
+
+def test_existing_workflow_run_provider_wins_over_job_snapshot_and_rollout(monkeypatch):
+    import travelmind_api.jobs.handlers as handlers
+
+    job = SimpleNamespace(id="job-existing-run", payload_json={"workflow_provider": "standard"})
+    user = SimpleNamespace(llm_agent_provider="standard")
+    existing_run = SimpleNamespace(provider="langgraph")
+    monkeypatch.setattr(
+        handlers,
+        "settings",
+        Settings(langgraph_rollout_percent=0, langgraph_rollout_fallback_provider="standard"),
+    )
+
+    resolved = handlers._resolve_job_agent_provider(
+        user=user,
+        job=job,
+        existing_run=existing_run,
+    )
+
+    assert resolved == "langgraph"
     assert job.payload_json["workflow_provider"] == "standard"
 
 

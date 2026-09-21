@@ -28,7 +28,8 @@
 - 微调 scope/day_index 组合在 HTTP 路由与工作流入口双层校验，旧任务载荷或内部调用无法
   绕过范围约束后再触发模型请求。
 - 恢复绑定会同时校验用户、行程和执行记录关联；跨用户复用已知 `run_id` 会被拒绝。
-- provider 灰度按 Job ID 稳定分桶，任务首次执行后固定 provider；回滚使用 `standard` 或保留部署版本。
+- provider 灰度按 Job ID 稳定分桶，任务首次执行后固定 provider；双向灰度切换不会改变已有
+  Job 快照，已有 `WorkflowRun` 的 provider 优先于冲突的 Job 快照；回滚使用 `standard` 或保留部署版本。
 - 30 组受控时钟回放、协议矩阵和质量/延迟/费用门禁已经实现；门禁默认要求
   `retained-deployment` baseline 与 `langgraph` candidate，拒绝混合 provider 结果；
   `day_plan` 案例会拒绝旧 scope 值，并把目标日之外的任何改动计为硬违规。保留
@@ -45,7 +46,7 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `306 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
+| API 全量测试 | `308 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
 | PostgreSQL Alembic 升降级与 checkpoint 跨连接恢复 | `3 passed` |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | 现有 SQLite 用户库副本 `0004` → `0005` 与排空审计 | schema 就绪、无阻塞 Job/Run |
