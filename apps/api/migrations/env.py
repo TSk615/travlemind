@@ -40,6 +40,10 @@ def run_migrations_online() -> None:
         is_postgresql = connection.dialect.name == "postgresql"
         if is_postgresql:
             connection.execute(text("SELECT pg_advisory_lock(741852963)"))
+            # SQLAlchemy 2 starts an implicit transaction for the lock query.
+            # End it before Alembic opens its migration transaction; otherwise
+            # PostgreSQL rolls the migrated DDL back when this connection closes.
+            connection.commit()
         try:
             context.configure(
                 connection=connection,
@@ -52,6 +56,7 @@ def run_migrations_online() -> None:
         finally:
             if is_postgresql:
                 connection.execute(text("SELECT pg_advisory_unlock(741852963)"))
+                connection.commit()
 
 
 if context.is_offline_mode():

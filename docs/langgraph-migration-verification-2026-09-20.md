@@ -43,7 +43,8 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 
 | 检查 | 结果 |
 | --- | --- |
-| API 全量测试 | `300 passed, 2 skipped`（本机无 PostgreSQL；CI 缺少 PostgreSQL URL 会直接失败） |
+| API 全量测试 | `302 passed`（连接隔离的 PostgreSQL 16 测试库，无跳过项） |
+| PostgreSQL Alembic 升降级与 checkpoint 跨连接恢复 | `3 passed` |
 | SQLite 空库/旧库升级及 `0005` 降级重升 | 通过 |
 | LangGraph、共享限流、恢复、存储与灰度定向测试 | `38 passed` |
 | 前端单元测试 | `10 passed` |
@@ -55,24 +56,20 @@ prompt 版本和部分日志事件继续使用原有字符串，因为它们参�
 | 安装环境中 `hello_agents` 模块不存在 | 通过 |
 | Windows 本地启动脚本语法解析 | 通过 |
 
-API 全量测试中两个跳过项是 PostgreSQL Alembic 循环与 PostgreSQL LangGraph checkpoint
-跨连接恢复测试：本机未配置 `TRAVELMIND_TEST_POSTGRES_URL`，Docker daemon 与本地 5432
-端口也未运行。GitHub Actions 的 API job 已配置 PostgreSQL 16 service 和该环境变量，因此
-这两项属于 CI 强制门禁，而不是永久跳过测试。
+本次使用隔离的 Docker PostgreSQL 16 测试库设置 `TRAVELMIND_TEST_POSTGRES_URL`，完成
+upgrade → downgrade → upgrade，并验证 LangGraph checkpoint 跨 PostgreSQL 连接恢复且不重跑
+已成功节点。首次运行发现 advisory lock 查询触发的 SQLAlchemy 2 隐式事务会包住 Alembic
+迁移，导致连接关闭时回滚 DDL；迁移环境现已在加锁后显式提交，并在解锁后结束事务。
 
 ## 发布前必须完成的外部门禁
 
-1. 在一次性 PostgreSQL 测试库设置 `TRAVELMIND_TEST_POSTGRES_URL`，运行
-   `apps/api/tests/test_postgres_migrations.py`，确认迁移头为 `0005_workflow_runs`，完成
-   upgrade → downgrade → upgrade，并验证 LangGraph checkpoint 跨 PostgreSQL 连接恢复且不重跑
-   已成功节点。
-2. 在目标数据库先执行迁移，再运行
+1. 在目标数据库先执行迁移，再运行
    `scripts/audit_workflow_rollout.py --require-drained`。必须得到
    `schema_ready_for_langgraph=true`、空 `schema_blockers`，且没有 legacy/unknown 阻塞任务。
-3. 使用专用测试凭据运行少量真实 Responses、Chat/Gemini/Claude/NewAPI/NeiAPI/Grok 样本，
+2. 使用专用测试凭据运行少量真实 Responses、Chat/Gemini/Claude/NewAPI/NeiAPI/Grok 样本，
    再以保留部署生成的 baseline 执行完整 30 案例质量门禁。当前工作区未配置模型凭据，
    因而没有伪造这项结果。
-4. 完成上述门禁后再逐级放量 5% → 25% → 50% → 100%，并按 runbook 观察成功率、硬约束、
+3. 完成上述门禁后再逐级放量 5% → 25% → 50% → 100%，并按 runbook 观察成功率、硬约束、
    p95 延迟和费用。
 
 本机现有持久化 SQLite 数据库仍停留在 `0005` 之前。只读排空审计显示没有活跃任务，
