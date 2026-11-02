@@ -17,6 +17,8 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/", name: "home", component: HomeView },
+    // The isolated design preview is omitted entirely from production routes.
+    ...(import.meta.env.DEV ? [{ path: "/__preview/journey", name: "journey-preview", component: () => import("@/views/JourneyPreviewView.vue") }] : []),
     { path: "/login", name: "login", component: LoginView },
     { path: "/trips", name: "trips", component: TripsView, meta: { requiresAuth: true } },
     { path: "/trips/new", name: "trip-new", component: NewTripView, meta: { requiresAuth: true } },

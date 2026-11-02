@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue"
-import { useRouter } from "vue-router"
+import { useRoute, useRouter } from "vue-router"
 import type { TripPreferenceInput } from "@travelmind/shared-types"
 import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import StatePanel from "@/components/StatePanel.vue"
@@ -20,12 +20,14 @@ import { useAuthStore } from "@/stores/auth"
 const auth = useAuthStore()
 const isDemo = computed(() => Boolean(auth.user?.generation_quota))
 const router = useRouter()
+const route = useRoute()
+const initialPrompt = typeof route.query.prompt === "string" ? route.query.prompt.slice(0, 1600) : ""
 const submitting = ref(false)
 const generating = ref(false)
 const chatting = ref(false)
 const error = ref<string | null>(null)
-const mode = ref<"form" | "chat">("form")
-const chatInput = ref("")
+const mode = ref<"form" | "chat">(initialPrompt && !isDemo.value ? "chat" : "form")
+const chatInput = ref(initialPrompt)
 const chatMessages = ref<TripIntakeChatMessage[]>([])
 const readyToCreate = ref(false)
 const { locale, t } = useI18n()

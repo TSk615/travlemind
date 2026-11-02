@@ -82,7 +82,7 @@ test("logs in and returns to the requested trips page", async ({ page }) => {
   await page.locator('form button[type="submit"]').click()
 
   await expect(page).toHaveURL(/\/trips$/)
-  await expect(page.getByRole("heading", { name: "你的规划工作台" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "我的旅行" })).toBeVisible()
   expect(api.getLoginPayload()).toMatchObject({
     email: "traveler@example.com",
     password: "correct-horse-battery-staple"

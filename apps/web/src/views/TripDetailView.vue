@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue"
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import type {
   AgentRunStep,
@@ -16,6 +16,7 @@ import type {
 } from "@travelmind/shared-types"
 import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import PoiImage from "@/components/PoiImage.vue"
+import TripJourneyFlow from "@/components/TripJourneyFlow.vue"
 import StatePanel from "@/components/StatePanel.vue"
 import StatusPill from "@/components/StatusPill.vue"
 import TmButton from "@/components/ui/TmButton.vue"
@@ -658,6 +659,22 @@ const hasPendingItemImages = computed(() =>
   )
 )
 const shouldDisplayItinerary = computed(() => Boolean(trip.value?.itinerary))
+const itineraryView = ref<"flow" | "list">("flow")
+const isJourneyView = computed(() => shouldDisplayItinerary.value && itineraryView.value === "flow")
+async function showFullStop(stop: { dayIndex: number; itemId: string }) {
+  itineraryView.value = "list"
+  await nextTick()
+  const node = document.getElementById(`itinerary-stop-${stop.dayIndex}-${stop.itemId}`)
+  node?.scrollIntoView({ behavior: "auto", block: "center" })
+  node?.focus({ preventScroll: true })
+}
+async function editFromJourney() {
+  itineraryView.value = "list"
+  openItineraryEditor()
+  await nextTick()
+  document.getElementById("itinerary")?.scrollIntoView({ behavior: "auto", block: "start" })
+}
+
 const pendingImageDisplayTitle = computed(() => (locale.value === "zh-CN" ? "正在补充景点图片" : "Adding attraction images"))
 const pendingImageDisplayMessage = computed(() =>
   locale.value === "zh-CN"
@@ -909,7 +926,7 @@ const itineraryItemTypeOptions = computed(() => {
     label: formatItemType(value)
   }))
 })
-const budgetPanelTitle = computed(() => (locale.value === "zh-CN" ? "精准预算明细面板" : "Precise budget panel"))
+const budgetPanelTitle = computed(() => (locale.value === "zh-CN" ? "参考预算明细" : "Reference budget details"))
 const budgetPanelDescription = computed(() =>
   locale.value === "zh-CN"
     ? "汇总门票、餐饮、住宿、交通与其他成本，让你更直观看清预算占用与剩余空间。"
@@ -939,7 +956,7 @@ const budgetMetrics = computed(() => {
 
   return [
     { label: locale.value === "zh-CN" ? "预算上限" : "Budget cap", value: formatCurrency(budgetSummary.value.requested_budget) },
-    { label: locale.value === "zh-CN" ? "预计总花费" : "Estimated total", value: formatCurrency(budgetSummary.value.estimated_total) },
+    { label: locale.value === "zh-CN" ? (budgetSummary.value.incomplete ? "已计参考费用" : "预计总花费") : (budgetSummary.value.incomplete ? "Priced reference subtotal" : "Estimated total"), value: formatCurrency(budgetSummary.value.estimated_total) },
     {
       label: budgetSummary.value.over_budget > 0 ? (locale.value === "zh-CN" ? "超支" : "Over budget") : (locale.value === "zh-CN" ? "剩余预算" : "Remaining"),
       value: formatCurrency(budgetSummary.value.over_budget > 0 ? budgetSummary.value.over_budget : budgetSummary.value.remaining_budget)
@@ -1956,7 +1973,7 @@ async function collectGroundingDocs(): Promise<SearchDocument[]> {
       query,
       destination: trip.value.destination,
       manual_links: manualLinks.value
-        .split(/\r?\n|,/) 
+        .split(/\r?\n|,/)
         .map((value) => value.trim())
         .filter(Boolean)
     })
@@ -2327,7 +2344,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="tm-detail">
+  <div class="tm-detail tm-detail--portal" :class="{ 'tm-detail--journey': isJourneyView }">
     <StatePanel v-if="loading" kind="loading" :title="t('tripDetail.loadingTitle')" :message="t('tripDetail.loadingMessage')" />
     <StatePanel v-else-if="error" kind="error" :title="t('tripDetail.unavailableTitle')" :message="error" :action-label="t('common.retry')" @action="loadTrip(true)" />
 
@@ -2363,8 +2380,18 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
+      <div v-if="shouldDisplayItinerary" class="tm-detail__view-switch">
+        <div role="group" :aria-label="locale === 'zh-CN' ? '行程展示方式' : 'Itinerary display'">
+          <button type="button" :aria-pressed="isJourneyView" :disabled="itineraryEditorOpen" @click="itineraryView = 'flow'">{{ locale === 'zh-CN' ? '流动旅程' : 'Journey flow' }}</button>
+          <button type="button" :aria-pressed="!isJourneyView" @click="itineraryView = 'list'">{{ locale === 'zh-CN' ? '完整清单' : 'Full itinerary' }}</button>
+        </div>
+        <button v-if="isJourneyView" type="button" :disabled="actionLocked" @click="editFromJourney">{{ itineraryEditorCopy.editAction }} ↗</button>
+      </div>
+      <div v-if="isJourneyView && activeJob" class="tm-detail__journey-job" role="status">
+        <StatusPill :status="activeJob.status" /><span>{{ activeJob.stage_message || formatStage(activeJob.stage) }}</span><code>{{ activeJob.job_id }}</code><button type="button" @click="itineraryView = 'list'">{{ locale === 'zh-CN' ? '任务详情 ↗' : 'Job details ↗' }}</button>
+      </div>
       <!-- Overview metrics -->
-      <section v-if="shouldDisplayItinerary" id="overview" class="tm-detail__overview">
+      <section v-if="shouldDisplayItinerary && !isJourneyView" id="overview" class="tm-detail__overview">
         <p class="tm-detail__section-kicker">{{ copy.overviewKicker }}</p>
         <h2 class="tm-detail__section-title">{{ trip.itinerary?.summary }}</h2>
         <div class="tm-detail__metrics">
@@ -2373,11 +2400,11 @@ onBeforeUnmount(() => {
       </section>
 
       <!-- Anchor nav -->
-      <TmAnchorNav :items="anchorSections" />
+      <TmAnchorNav v-if="!isJourneyView" :items="anchorSections" />
 
       <!-- Status notices -->
-      <LlmStatusNotice compact />
-      <StatePanel v-if="isDebug" :kind="actualExecutionKind" :title="currentModeTitle" :message="currentModeMessage" compact />
+      <LlmStatusNotice v-if="!isJourneyView" compact />
+      <StatePanel v-if="isDebug && !isJourneyView" :kind="actualExecutionKind" :title="currentModeTitle" :message="currentModeMessage" compact />
       <StatePanel v-if="generateError" kind="error" :title="t('tripDetail.generationFailedTitle')" :message="generateError" compact />
       <StatePanel v-if="resumeGenerateError" kind="error" :title="copy.resumeGenerationFailedTitle" :message="resumeGenerateError" compact />
       <StatePanel v-if="cancelJobError" kind="error" :title="cancelJobFailedTitle" :message="cancelJobError" compact />
@@ -2390,8 +2417,11 @@ onBeforeUnmount(() => {
       <StatePanel v-if="communityError" kind="error" :title="communityCopy.title" :message="communityError" compact />
       <StatePanel v-if="communityNotice" kind="info" :title="communityCopy.title" :message="communityNotice" compact />
 
+      <TripJourneyFlow v-if="isJourneyView && trip.itinerary" :itinerary="trip.itinerary" :start-date="trip.start_date" @inspect="showFullStop" />
+      <details v-if="isJourneyView" class="tm-detail__journey-settings"><summary>{{ locale === 'zh-CN' ? '模型状态与设置' : 'Model status and settings' }}</summary><LlmStatusNotice compact /></details>
+
       <!-- Main body: single column -->
-      <div class="tm-detail__body">
+      <div v-show="!isJourneyView" class="tm-detail__body">
         <div class="tm-detail__main">
 
           <!-- Job status -->
@@ -2400,7 +2430,7 @@ onBeforeUnmount(() => {
               <div class="tm-detail__section-header">
                 <p class="tm-detail__section-kicker">{{ copy.currentJob }}</p>
                 <h2 class="tm-detail__section-title">{{ activeJob ? formatJobType(activeJob.type) : copy.noActiveJob }}</h2>
-                <p class="tm-detail__section-desc">{{ activeJob ? activeJob.job_id : noActiveJobMessage }}</p>
+                <p v-if="!isJourneyView" class="tm-detail__section-desc">{{ activeJob ? activeJob.job_id : noActiveJobMessage }}</p>
               </div>
               <div class="tm-detail__section-actions">
                 <TmButton v-if="canCancelActiveJob || cancelJobPending" variant="danger" size="sm" :disabled="!canCancelActiveJob" :loading="cancelJobPending" @click="cancelActiveJob">
@@ -2812,6 +2842,12 @@ onBeforeUnmount(() => {
                     <strong class="tm-detail__day-cost">{{ formatCurrency(day.total_cost) }}</strong>
                   </div>
                   <p class="tm-detail__day-summary">{{ day.summary }}</p>
+                  <section v-if="day.flexible_windows?.length" class="tm-detail__weather" aria-label="Flexible time windows">
+                    <span class="tm-detail__badge">{{ locale === "zh-CN" ? "自由与弹性时间" : "Flexible time" }}</span>
+                    <p v-for="(window, wi) in day.flexible_windows" :key="`${day.day_index}-flex-${wi}`">
+                      <strong>{{ window.start_time }}—{{ window.end_time }}</strong> · {{ window.note }}
+                    </p>
+                  </section>
 
                   <section v-if="day.weather" class="tm-detail__weather">
                     <span class="tm-detail__badge">{{ locale === "zh-CN" ? "天气" : "Weather" }}</span>
@@ -2846,7 +2882,7 @@ onBeforeUnmount(() => {
                   </section>
 
                   <ol class="tm-detail__items">
-                    <li v-for="item in day.items" :key="item.id" class="tm-detail__item">
+                    <li v-for="item in day.items" :id="`itinerary-stop-${day.day_index}-${item.id}`" :key="item.id" class="tm-detail__item" tabindex="-1">
                       <div class="tm-detail__item-time">
                         {{ item.start_time }} - {{ item.end_day_offset ? '+' + item.end_day_offset + '天 ' : '' }}{{ item.end_time }}
                         <span
@@ -3446,4 +3482,37 @@ onBeforeUnmount(() => {
   .tm-detail__refine-workbench { grid-template-columns: 1fr; }
   .tm-detail__refine-community-picker { grid-template-columns: 1fr; }
 }
+
+/* Journey mode is additive: the full booking/editor/debug workbench remains available. */
+.tm-detail--portal { --tm-moss: #46685c; --tm-clay: #77866d; --tm-paper: #f1f3ed; --tm-mist: #e8ede3; --tm-snow: #fbfcf7; --tm-tea: #2f443b; --tm-stone: #6c7c6d; --tm-font-display: "Portal Manrope", "Microsoft YaHei", sans-serif; }
+.tm-detail--journey { padding: 32px 38px 40px; border: 1px solid white; border-radius: 28px; background: radial-gradient(ellipse at 100% 0, #f7eadd88, transparent 40%), linear-gradient(145deg, #f6f7ef, #edf2e7); box-shadow: 0 20px 70px #52684d08; }
+.tm-detail--portal .tm-detail__title { margin: 8px 0 14px; font-size: 32px; font-weight: 400; line-height: 1.5; letter-spacing: -.04em; overflow-wrap: anywhere; }
+.tm-detail--portal .tm-detail__header-info { flex: 1 1 400px; min-width: 0; }
+.tm-detail--portal .tm-detail__header-actions { gap: 8px; padding-top: 8px; }
+.tm-detail--portal .tm-detail__header-actions :deep(.tm-btn) { min-height: 40px; padding: 10px 14px; font-size: 11px; box-shadow: none; }
+.tm-detail--portal .tm-detail__header-actions :deep(.tm-btn--primary) { background: #46685c; color: #fff; border-color: #46685c; }
+.tm-detail--portal .tm-detail__header-actions :deep(.tm-btn--danger) { color: #927269; background: transparent; border-color: #e0dcd1; }
+.tm-detail--portal .tm-detail__kicker { font-size: 10px; font-weight: 500; letter-spacing: .07em; }
+.tm-detail--portal .tm-detail__meta { gap: 8px 19px; font-size: 11px; line-height: 1.8; }
+.tm-detail__view-switch { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding-bottom: 12px; border-bottom: 1px solid #dce3da; }
+.tm-detail__view-switch > div { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid #fff; border-radius: 100px; background: #e9eee3; }
+.tm-detail__view-switch button, .tm-detail__journey-job button { min-height: 40px; padding: 10px 18px; border: 0; border-radius: 100px; background: transparent; color: #687d69; font-size: 11px; box-shadow: none; }
+.tm-detail__view-switch button[aria-pressed="true"] { background: #46685c; color: #fff; }
+.tm-detail__view-switch button:focus-visible { outline: 2px solid #46685c; outline-offset: 3px; }
+.tm-detail__journey-job { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 18px; padding: 10px 16px; border: 1px solid #d6dfcf; border-radius: 14px; background: #ffffff88; color: #6c7c6d; font-size: 11px; }
+.tm-detail__journey-job code { max-width: 100%; overflow-wrap: anywhere; font-size: 9px; }
+.tm-detail__journey-job button { margin-left: auto; }
+.tm-detail__journey-settings { margin-top: 28px; border-top: 1px solid #dce3da; color: #7b8b76; font-size: 11px; }
+.tm-detail__journey-settings summary { min-height: 44px; padding: 14px 0; cursor: pointer; }
+@media (max-width: 760px) {
+  .tm-detail--journey { padding: 24px 18px 28px; border-radius: 22px; }
+  .tm-detail--portal .tm-detail__header-info { flex-basis: auto; }
+  .tm-detail--portal .tm-detail__title { font-size: 25px; }
+  .tm-detail--portal .tm-detail__header-actions { width: 100%; padding-top: 0; }
+  .tm-detail--portal .tm-detail__header-actions :deep(.tm-btn) { flex: 1 1 auto; }
+  .tm-detail__view-switch { gap: 6px; }
+  .tm-detail__view-switch button { padding-inline: 12px; font-size: 10px; }
+  .tm-detail__view-switch > button { padding-inline: 4px; }
+}
+
 </style>

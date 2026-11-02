@@ -6,9 +6,9 @@ TravelMind AI 是一个全栈 AI 旅行规划项目：从目的地、日期、�
 
 [在线体验](https://travel.rainflow.foo) · [快速开始](#本地运行) · [架构说明](docs/architecture.md) · [文档导航](docs/README.md)
 
-![TravelMind 首页设计预览](docs/assets/home.png)
+![TravelMind 首页](docs/assets/home.png)
 
-> 首页及下方行程流图片为新界面的设计预览，不代表本次发布已替换线上全部界面。
+> 新版首页与旅行空间已上线。下方行程流截图使用演示数据，实际行程以账户内记录为准。
 
 ## 在线体验 · 5 次行程生成
 
