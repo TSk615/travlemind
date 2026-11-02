@@ -7,6 +7,13 @@ def planning_time_constraints(request, transport) -> dict:
         "flexible_windows_only_in_actual_gaps": True,
         "flexible_windows_must_not_overlap_items_or_each_other": True,
         "do_not_move_verified_services_or_invent_later_departures": True,
+        "exact_service_dates_and_clocks_bind_selected_sourced_service": True,
+        "route_summary_is_not_a_verified_service_timetable": True,
+        "schedule_allocation": {
+            "sum_of_meal_transfer_buffer_flexible_minutes_must_not_exceed_item_duration": True,
+            "buffer_minutes_is_additional_not_included_in_transfer_minutes": True,
+            "unknown_components_remain_null_not_invented": True,
+        },
     }
     generated = request.planning_generated_at
     if generated is None or request.start_date != generated.date():

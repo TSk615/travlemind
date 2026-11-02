@@ -660,6 +660,13 @@ class LangGraphOrchestrator(PlanningCore):
         input_payload: dict[str, Any],
     ) -> tuple[RoleInvocationResult, dict[str, Any]]:
         role_config = self._workflow_role_configs[role_name]
+        from travelmind_api.services.planner_slot_repair import prepare_slot_repair, SYSTEM_PROMPT as SLOT_REPAIR_SYSTEM_PROMPT
+
+        slot_repair = prepare_slot_repair(input_payload) if role_name == "itinerary_planner" else None
+        if slot_repair is not None:
+            input_payload = slot_repair.payload
+            role_config = replace(role_config, system_prompt=SLOT_REPAIR_SYSTEM_PROMPT,
+                                  prompt_version=role_config.prompt_version + ".slot-patch.v1")
         endpoint = self._workflow_llm_configs[role_name]
         runtime = self._runtime()
         runtime.emit_progress(
@@ -729,6 +736,12 @@ class LangGraphOrchestrator(PlanningCore):
                 result = self._role_invoker.invoke(replace(invocation, endpoint=bounded_endpoint))
                 if not result.content.strip():
                     raise RuntimeError(f"LangGraph role '{role_name}' returned an empty response")
+                if slot_repair is not None:
+                    merged, patch_audit = slot_repair.apply(result.content)
+                    patch_updates = {"content": json.dumps(merged, ensure_ascii=False)}
+                    if hasattr(result, "input_diagnostics"):
+                        patch_updates["input_diagnostics"] = {**result.input_diagnostics, "slot_repair": patch_audit}
+                    result = replace(result, **patch_updates)
         except Exception as exc:
             failure = get_role_invocation_failure_metadata(exc)
             self._log_event(

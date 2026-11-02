@@ -73,8 +73,11 @@ def validate_timeline(payload, request, transport) -> list[str]:
                     for leg in matching:
                         if leg.duration_minutes_min and end - start < leg.duration_minutes_min:
                             errors.append(f"{item.name} 短于交通专家线路耗时")
-                        if leg.arrival_date and leg.arrival_date != request.start_date + timedelta(days=index + item.end_day_offset):
-                            errors.append(f"{item.name} 到达日期与交通段不一致")
+                    from travelmind_api.services.transport_timing import service_timing_errors
+                    errors.extend(service_timing_errors(
+                        item, booking, transport, request.start_date + timedelta(days=index),
+                        request.start_date + timedelta(days=index + item.end_day_offset),
+                    ))
                     before = [other for other in day.items if other is not item
                               and other.end_time <= item.start_time and not other.end_day_offset]
                     if before:

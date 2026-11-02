@@ -674,6 +674,16 @@ def test_langgraph_orchestrator_repairs_one_invalid_draft(monkeypatch):
                     invalid = json.loads(content)
                     invalid["days"][0]["items"][1]["start_time"] = "10:30"
                     content = json.dumps(invalid)
+                elif invocation.input_payload.get("repair_mode") == "slot-patch.v1":
+                    # The fixture model follows the new local patch wire contract.
+                    reference = json.loads(content)
+                    updates = []
+                    for ref, allowed in invocation.input_payload["repair_contract"]["allowed_item_fields"].items():
+                        day, index = map(int, ref.removeprefix("d").split("i"))
+                        item = reference["days"][day - 1]["items"][index - 1]
+                        changes = {key: value for key, value in item.items() if key in allowed}
+                        updates.append({"item_ref": ref, "changes": changes})
+                    content = json.dumps({"item_updates": updates})
             return RoleInvocationResult(
                 request_id=f"llmreq-{invocation.role_name}-{planner_calls}",
                 role_name=invocation.role_name,
