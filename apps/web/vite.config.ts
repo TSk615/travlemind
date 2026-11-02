@@ -4,6 +4,8 @@ import vue from "@vitejs/plugin-vue"
 import tailwindcss from "@tailwindcss/vite"
 
 export default defineConfig({
+  // Isolate this UI's assets from legacy CDN entries that cached SPA fallback HTML at image URLs.
+  build: { assetsDir: "assets/portal-ui-v1" },
   plugins: [vue(), tailwindcss()],
   resolve: {
     alias: {
