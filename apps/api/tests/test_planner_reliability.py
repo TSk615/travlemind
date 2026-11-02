@@ -103,3 +103,31 @@ def test_json_mode_does_not_change_research_conversations(role,expected):
             return '{}'
     endpoint=LlmEndpointConfig(base_url='https://fixture.invalid/v1',api_key='fixture',model='fixture',provider_protocol='newapi')
     OpenAICompatibleRoleInvoker(client_factory=lambda config:Client()).invoke(RoleInvocation(role_name=role,prompt_version='fixture',system_prompt='planner',input_payload={},endpoint=endpoint))
+
+
+def test_real_graph_preserves_separate_budgets_across_validation_nodes(monkeypatch):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from travelmind_api.agents.workflows.trip_generation import build_trip_generation_graph
+    o, initial, calls = context(monkeypatch, ['{"days":[', json.dumps(plan(duplicate=True)), json.dumps(plan())])
+    noop = lambda state: {}
+    operations = SimpleNamespace(check_cancelled=lambda: None, parse_brief=noop,
+        research_pois=noop, research_weather=noop, join_initial_research=noop,
+        research_hotels=noop, research_transport=noop, verify_evidence=noop,
+        verify_selected_operations=noop, draft_itinerary=o.draft_itinerary,
+        validate_itinerary=o.validate_itinerary, repair_itinerary=o.repair_itinerary,
+        assemble_result=lambda state: {"planning_result": {"validated": not state['validation_errors']}})
+    graph = build_trip_generation_graph(operations, checkpointer=InMemorySaver())
+    final = graph.invoke(initial, config={"configurable": {"thread_id": "reliability-budget-integration"}})
+    assert final['planning_result']['validated'] is True
+    assert repair_counts(final) == (1, 1) and len(calls) == 3
+    assert len(final['planner_attempts']) == 3
+
+
+def test_duplicate_json_keys_are_rejected_without_checkpointing_raw_output(monkeypatch):
+    bad = '{"summary":"private-model-text", "summary":"conflict", "days":[]}'
+    o, state, calls = context(monkeypatch, [bad, json.dumps(plan())])
+    state.update(o.draft_itinerary(state))
+    assert state['planning_parse_error']['code'] == 'duplicate_key'
+    assert 'private-model-text' not in json.dumps(state)
+    state.update(o.validate_itinerary(state));state.update(o.repair_itinerary(state));state.update(o.validate_itinerary(state))
+    assert not state['validation_errors'] and len(calls) == 2
