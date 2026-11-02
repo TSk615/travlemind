@@ -184,7 +184,8 @@ test("generation remains recoverable after the originating page closes", async (
   const resumedPage = await context.newPage()
   await resumedPage.goto(durableUrl)
   await expect(resumedPage.getByRole("heading", { name: itinerary.summary })).toBeVisible()
-  await expect(resumedPage.getByText("job_generate_e2e", { exact: true })).toBeVisible()
+  await expect(resumedPage.getByText("job_generate_e2e", { exact: true })).toHaveCount(0)
+  await expect(resumedPage.getByRole("status").filter({ hasText: /^行程已生成$/ })).toBeVisible()
   expect(jobPolls).toBeGreaterThan(1)
 })
 
@@ -241,4 +242,37 @@ test("refinement submits a durable backend job and reloads the refined trip", as
 
   await expect(page.getByRole("heading", { name: "微调完成：第一天寺院安排保持不变。" })).toBeVisible()
   expect(refinePayload).toEqual({ instruction: "减少换乘，同时保留第一天安排", scope: "trip_plan" })
+})
+
+test("public progress shows Chinese steps only, even with debug query", async ({ context }) => {
+  await initializeContext(context)
+  let failed = false
+  const privateMessage = "Weather specialist: Uses the planner model to investigate with read-only MCP tools."
+  const privateError = "Planner output still invalid after the single shared repair: schema_validation_failed (log: /app/storage/logs/jobs/private.jsonl)"
+  await context.route("**/api/v1/**", async route => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === "/api/v1/me") return fulfill(route, user)
+    if (pathname === "/api/v1/settings/llm") return fulfill(route, settings)
+    if (pathname === "/api/v1/trips/trip_workflow_e2e") return fulfill(route, trip(false))
+    if (pathname === "/api/v1/jobs/job_private_progress") return fulfill(route, {
+      ...job("job_private_progress", "trip.generate", "running"),
+      status: failed ? "failed" : "running", stage: "route_planning",
+      stage_message: privateMessage, progress_percent: 52,
+      error_message: failed ? privateError : null,
+      timeline_json: [{ status: "running", stage: "route_planning", stage_message: privateMessage, progress_percent: 52, recorded_at: "2026-11-02T08:53:00Z" }]
+    })
+    return fulfill(route, null, 404)
+  })
+  const page = await context.newPage()
+  await page.goto("/trips/trip_workflow_e2e?jobId=job_private_progress&debug=1")
+  await expect(page.getByRole("status").filter({ hasText: "正在查询目的地天气" })).toBeVisible()
+  let text = await page.locator("body").innerText()
+  expect(text).not.toMatch(/Weather specialist|MCP tools|job_private_progress|任务诊断|时间线/)
+  expect(text).toContain("52%")
+  failed = true
+  await page.reload()
+  await expect(page.getByRole("status").filter({ hasText: "这次未能完成" })).toBeVisible()
+  text = await page.locator("body").innerText()
+  expect(text).not.toMatch(/schema_validation_failed|Planner output|storage\/logs|\.jsonl|Weather specialist|job_private_progress|任务诊断/)
+  expect(text).toContain("已保存的行程不会被覆盖")
 })

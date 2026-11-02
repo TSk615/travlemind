@@ -63,3 +63,6 @@ def test_build_env_template_mentions_required_keys():
     assert "TRAVELMIND_GROKSEARCH_COMMAND=grok-search" in template
     assert "GUDA_API_KEY=" in template
     assert "GROK_API_KEY=" in template
+    assert "EXA_API_KEY=" in template
+    assert "TRAVELMIND_GROKSEARCH_RUNNER_MODE=inprocess" in template
+    assert "TRAVELMIND_GROKSEARCH_BRIDGE_TIMEOUT_SECONDS=75" in template

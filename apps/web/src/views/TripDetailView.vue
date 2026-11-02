@@ -18,6 +18,9 @@ import LlmStatusNotice from "@/components/LlmStatusNotice.vue"
 import PoiImage from "@/components/PoiImage.vue"
 import TripJourneyFlow from "@/components/TripJourneyFlow.vue"
 import StatePanel from "@/components/StatePanel.vue"
+import JobProgressSummary from "@/components/JobProgressSummary.vue"
+import { jobPresentation, jobTitle, publicJobError } from "@/lib/jobPresentation"
+import { useAuthStore } from "@/stores/auth"
 import StatusPill from "@/components/StatusPill.vue"
 import TmButton from "@/components/ui/TmButton.vue"
 import TmMetricCard from "@/components/ui/TmMetricCard.vue"
@@ -58,11 +61,12 @@ const router = useRouter()
 const route = useRoute()
 const settingsStore = useLlmSettingsStore()
 const jobGuard = useJobGuardStore()
+const auth = useAuthStore()
 void settingsStore.bootstrap()
 
 const isDebug = computed(() => {
-  if (import.meta.env.DEV) {
-    return true
+  if (!auth.user?.is_admin) {
+    return false
   }
   const flag = route.query.debug
   if (Array.isArray(flag)) {
@@ -265,7 +269,7 @@ const zhCopy = {
   browserRefineMessage: "正在通过后端工作流结合服务端行程上下文进行微调。",
   browserSaved: "已回写到后端",
   browserSavedMessage: "生成后的行程已经写回当前 Trip 记录。",
-  resumeGenerationActionLabel: "从失败节点继续",
+  resumeGenerationActionLabel: "继续生成",
   resumeGenerationRunningLabel: "继续生成中...",
   resumeGenerationFailedTitle: "继续生成失败",
   directModeTitle: "后端持久规划",
@@ -314,9 +318,9 @@ const zhCopy = {
   timelineTitle: "时间线",
   timelineEmptyTitle: "时间线等待更新",
   timelineEmptyMessage: "当前任务推进时，新的阶段更新会显示在这里。",
-  briefKicker: "规划 Brief",
-  briefTitle: "行程输入快照",
-  briefDescription: "在再次 refine 之前，先复核当前规划器使用的结构化输入。",
+  briefKicker: "出行需求",
+  briefTitle: "本次出行安排",
+  briefDescription: "确认目的地、日期和偏好，方便继续调整行程。",
   destinationLabel: "目的地",
   datesLabel: "日期",
   budgetLabel: "预算",
@@ -383,7 +387,7 @@ const isJobRunning = computed(() => isJobActive(activeJob.value?.status))
 const canCancelActiveJob = computed(() => Boolean(activeJob.value && isJobRunning.value))
 const actionLocked = computed(() => generatePending.value || resumeGeneratePending.value || refinePending.value || exportPending.value || deletePending.value || itinerarySavePending.value || isJobRunning.value)
 const imageEnrichInProgress = computed(() => activeJob.value?.type === "trip.image_enrich" && isJobRunning.value)
-const canRetryImageEnrichment = computed(() => Boolean(hasItinerary.value && !imageEnrichPending.value && !imageEnrichInProgress.value))
+const canRetryImageEnrichment = computed(() => Boolean(hasItinerary.value && !actionLocked.value && !imageEnrichPending.value && !imageEnrichInProgress.value && !auth.user?.generation_quota))
 const canUseModel = computed(() => settingsStore.loaded && settingsStore.isConfigured)
 const canGenerate = computed(() => settingsStore.loaded && settingsStore.isConfigured)
 const canResumeGeneration = computed(() =>
@@ -412,7 +416,7 @@ const anchorSections = computed(() => {
   const sections = [
     { id: "overview", label: locale.value === "zh-CN" ? "概览" : "Overview" },
     { id: "job", label: locale.value === "zh-CN" ? "任务" : "Job" },
-    { id: "brief", label: "Brief" },
+    { id: "brief", label: locale.value === "zh-CN" ? "出行需求" : "Travel brief" },
     { id: "itinerary", label: locale.value === "zh-CN" ? "行程" : "Itinerary" }
   ]
   if (isDebug.value) {
@@ -835,16 +839,8 @@ const currentModeMessage = computed(() => {
     ? `最近一次成功执行记录的 provider 为 ${formatTraceProvider(latestTrace.value.provider)}。`
     : `The latest successful run recorded provider ${formatTraceProvider(latestTrace.value.provider)}.`
 })
-const noActiveJobMessage = computed(() => {
-  if (usesLangGraph.value) {
-    return locale.value === "zh-CN"
-      ? "当前没有进行中的任务。完成一次生成或润色后，下方会显示最近一次 LangGraph 角色执行明细。"
-      : "No active job is running. After the next generation or refinement run, the latest LangGraph role execution details will appear below."
-  }
-  return locale.value === "zh-CN"
-    ? "当前没有进行中的任务。完成一次生成或 refine 后，下方会显示最近一次实际执行结果。"
-    : "No active job is running. After the next generation or refine run, the latest actual execution result will appear below."
-})
+const noActiveJobMessage = computed(() => "准备好出行信息后，点击生成即可开始；离开页面后仍会继续处理。")
+
 const executionMetrics = computed(() => {
   if (!latestTrace.value) {
     return []
@@ -1481,7 +1477,7 @@ function formatJobType(value?: string | null): string {
   if (value === "trip.generate") {
     return locale.value === "zh-CN" ? "生成行程" : "Itinerary generation"
   }
-  return copy.value.jobTypes[value] ?? value
+  return jobTitle(value)
 }
 
 function formatItemType(value?: string | null): string {
@@ -1910,13 +1906,9 @@ async function pollJob(jobId: string, kind: "generate" | "refine" | "export" | "
       }
       await loadTrip(false)
       if (activeJob.value.status === "failed") {
-        const message =
-          activeJob.value.error_message?.trim()
-          || (kind === "generate"
-            ? t("tripDetail.generationFailedTitle")
-            : kind === "image_enrich"
-              ? (locale.value === "zh-CN" ? "景点补图失败" : "Image enrichment failed")
-              : t("tripDetail.exportFailedTitle"))
+        const message = isDebug.value
+          ? (activeJob.value.error_message?.trim() || "任务未完成")
+          : jobPresentation(activeJob.value).detail
         if (kind === "generate") {
           generateError.value = message
         } else if (kind === "refine") {
@@ -2319,7 +2311,7 @@ watch(
       jobId: currentJob.job_id,
       type: currentJob.type,
       status: currentJob.status,
-      stageMessage: currentJob.stage_message ?? null
+      stageMessage: jobPresentation(currentJob).label
     })
   },
   { immediate: true }
@@ -2388,7 +2380,7 @@ onBeforeUnmount(() => {
         <button v-if="isJourneyView" type="button" :disabled="actionLocked" @click="editFromJourney">{{ itineraryEditorCopy.editAction }} ↗</button>
       </div>
       <div v-if="isJourneyView && activeJob" class="tm-detail__journey-job" role="status">
-        <StatusPill :status="activeJob.status" /><span>{{ activeJob.stage_message || formatStage(activeJob.stage) }}</span><code>{{ activeJob.job_id }}</code><button type="button" @click="itineraryView = 'list'">{{ locale === 'zh-CN' ? '任务详情 ↗' : 'Job details ↗' }}</button>
+        <JobProgressSummary :job="activeJob" compact /><button type="button" @click="itineraryView = 'list'">查看处理进度 ↗</button>
       </div>
       <!-- Overview metrics -->
       <section v-if="shouldDisplayItinerary && !isJourneyView" id="overview" class="tm-detail__overview">
@@ -2403,14 +2395,14 @@ onBeforeUnmount(() => {
       <TmAnchorNav v-if="!isJourneyView" :items="anchorSections" />
 
       <!-- Status notices -->
-      <LlmStatusNotice v-if="!isJourneyView" compact />
+      <LlmStatusNotice v-if="isDebug && !isJourneyView" compact />
       <StatePanel v-if="isDebug && !isJourneyView" :kind="actualExecutionKind" :title="currentModeTitle" :message="currentModeMessage" compact />
-      <StatePanel v-if="generateError" kind="error" :title="t('tripDetail.generationFailedTitle')" :message="generateError" compact />
-      <StatePanel v-if="resumeGenerateError" kind="error" :title="copy.resumeGenerationFailedTitle" :message="resumeGenerateError" compact />
-      <StatePanel v-if="cancelJobError" kind="error" :title="cancelJobFailedTitle" :message="cancelJobError" compact />
-      <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="refineError" compact />
-      <StatePanel v-if="exportError" kind="error" :title="t('tripDetail.exportFailedTitle')" :message="exportError" compact />
-      <StatePanel v-if="imageEnrichError" kind="error" :title="copy.enrichImagesActionLabel" :message="imageEnrichError" compact />
+      <StatePanel v-if="generateError" kind="error" :title="t('tripDetail.generationFailedTitle')" :message="isDebug ? generateError : publicJobError(generateError)" compact />
+      <StatePanel v-if="resumeGenerateError" kind="error" :title="copy.resumeGenerationFailedTitle" :message="isDebug ? resumeGenerateError : publicJobError(resumeGenerateError)" compact />
+      <StatePanel v-if="cancelJobError" kind="error" :title="cancelJobFailedTitle" :message="isDebug ? cancelJobError : publicJobError(cancelJobError)" compact />
+      <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="isDebug ? refineError : publicJobError(refineError)" compact />
+      <StatePanel v-if="exportError" kind="error" :title="t('tripDetail.exportFailedTitle')" :message="isDebug ? exportError : publicJobError(exportError)" compact />
+      <StatePanel v-if="imageEnrichError" kind="error" :title="copy.enrichImagesActionLabel" :message="isDebug ? imageEnrichError : publicJobError(imageEnrichError)" compact />
       <StatePanel v-if="itinerarySaveError" kind="error" :title="itineraryEditorCopy.saveFailedTitle" :message="itinerarySaveError" compact />
       <StatePanel v-if="itinerarySaveNotice" kind="info" :title="itineraryEditorCopy.saveAction" :message="itinerarySaveNotice" compact />
       <StatePanel v-if="deleteError" kind="error" :title="deleteTripFailedTitle" :message="deleteError" compact />
@@ -2418,7 +2410,7 @@ onBeforeUnmount(() => {
       <StatePanel v-if="communityNotice" kind="info" :title="communityCopy.title" :message="communityNotice" compact />
 
       <TripJourneyFlow v-if="isJourneyView && trip.itinerary" :itinerary="trip.itinerary" :start-date="trip.start_date" @inspect="showFullStop" />
-      <details v-if="isJourneyView" class="tm-detail__journey-settings"><summary>{{ locale === 'zh-CN' ? '模型状态与设置' : 'Model status and settings' }}</summary><LlmStatusNotice compact /></details>
+      <details v-if="isDebug && isJourneyView" class="tm-detail__journey-settings"><summary>{{ locale === 'zh-CN' ? '模型状态与设置' : 'Model status and settings' }}</summary><LlmStatusNotice compact /></details>
 
       <!-- Main body: single column -->
       <div v-show="!isJourneyView" class="tm-detail__body">
@@ -2430,7 +2422,7 @@ onBeforeUnmount(() => {
               <div class="tm-detail__section-header">
                 <p class="tm-detail__section-kicker">{{ copy.currentJob }}</p>
                 <h2 class="tm-detail__section-title">{{ activeJob ? formatJobType(activeJob.type) : copy.noActiveJob }}</h2>
-                <p v-if="!isJourneyView" class="tm-detail__section-desc">{{ activeJob ? activeJob.job_id : noActiveJobMessage }}</p>
+                <p v-if="isDebug" class="tm-detail__section-desc">{{ activeJob ? activeJob.job_id : noActiveJobMessage }}</p>
               </div>
               <div class="tm-detail__section-actions">
                 <TmButton v-if="canCancelActiveJob || cancelJobPending" variant="danger" size="sm" :disabled="!canCancelActiveJob" :loading="cancelJobPending" @click="cancelActiveJob">
@@ -2439,7 +2431,7 @@ onBeforeUnmount(() => {
                 <TmButton v-if="canResumeGeneration || resumeGeneratePending" variant="primary" size="sm" :disabled="!canResumeGeneration" :loading="resumeGeneratePending" @click="resumeFailedGeneration">
                   {{ resumeGeneratePending ? copy.resumeGenerationRunningLabel : copy.resumeGenerationActionLabel }}
                 </TmButton>
-                <TmButton variant="ghost" size="sm" :disabled="!canRetryImageEnrichment" :loading="imageEnrichPending" @click="retryImageEnrichment">
+                <TmButton v-if="hasItinerary && !isJobRunning && !auth.user?.generation_quota" variant="ghost" size="sm" :disabled="!canRetryImageEnrichment" :loading="imageEnrichPending" @click="retryImageEnrichment">
                   {{ imageEnrichPending ? copy.enrichImagesActionRunningLabel : copy.enrichImagesActionLabel }}
                 </TmButton>
               </div>
@@ -2447,6 +2439,9 @@ onBeforeUnmount(() => {
               <StatePanel v-if="!activeJob" kind="info" :title="copy.noActiveJob" :message="noActiveJobMessage" compact />
 
               <template v-else>
+                <JobProgressSummary :job="activeJob" />
+                <details v-if="isDebug" class="tm-detail__diagnostics">
+                  <summary>任务诊断（仅供调试）</summary>
                 <div class="tm-detail__metrics">
                   <TmMetricCard :label="copy.stageLabel" :value="formatStage(activeJob.stage)" />
                   <TmMetricCard :label="copy.progressLabel" :value="formatProgress(activeJob.progress_percent, activeJob.status)" />
@@ -2522,6 +2517,7 @@ onBeforeUnmount(() => {
                     </li>
                   </ol>
                 </div>
+                </details>
               </template>
             </TmAuroraPanel>
           </section>
@@ -3196,7 +3192,7 @@ onBeforeUnmount(() => {
           :rows="4"
           @update:model-value="(v: string) => customRefineInstruction = v"
         />
-        <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="refineError" compact />
+        <StatePanel v-if="refineError" kind="error" :title="copy.quickRefineTitle" :message="isDebug ? refineError : publicJobError(refineError)" compact />
         <div class="tm-detail__section-actions">
           <TmButton variant="primary" :disabled="actionLocked || !canUseModel" :loading="refinePending" @click="submitCustomRefine">
             {{ refinePending ? copy.refining : copy.customRefineSubmit }}

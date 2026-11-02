@@ -784,6 +784,9 @@ class LangGraphOrchestrator(PlanningCore):
             self._build_poi_research_payload(self._request(), brief),
         )
         grounding = parse_structured_response(result.content, PoiGrounding)
+        from travelmind_api.services.poi_research_guard import ensure_usable_poi_research
+
+        ensure_usable_poi_research(grounding)
         return {
             "poi_payload": payload,
             "poi_grounding": grounding.model_dump(mode="json"),
@@ -994,7 +997,10 @@ class LangGraphOrchestrator(PlanningCore):
         weather = WeatherGuidance.model_validate(state["weather_guidance"])
         hotel = HotelRecommendation.model_validate(state["hotel_recommendation"])
         transport = TransportGuidance.model_validate(state["transport_guidance"])
+        from travelmind_api.services.planning_time_constraints import planning_time_constraints
+
         planner_payload = {
+            "time_constraints": planning_time_constraints(request, transport),
             "trip_request": state["trip_request"],
             "planning_brief": state["planning_brief"],
             "poi_collection": self._build_planner_poi_collection_payload(state["poi_collection"]),

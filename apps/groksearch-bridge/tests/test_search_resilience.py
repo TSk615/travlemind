@@ -226,3 +226,31 @@ def test_concurrent_requests_have_independent_failure_state():
     bad, good = asyncio.run(run())
     assert bad["search_provider"] == "exa" and good["content"] == "healthy answer"
     assert calls == ["bad"]
+
+@pytest.mark.parametrize("status", [401, 429, 500, 302])
+def test_exa_http_failures_are_not_successful_results(status):
+    import httpx
+    from travelmind_groksearch_bridge.search_resilience import search_exa
+    calls = []
+    def handle(request):
+        calls.append(str(request.url))
+        return httpx.Response(status, headers={"Location": "https://untrusted.example/steal"}, json={"results": []})
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(search_exa("query", "test-key", transport=httpx.MockTransport(handle)))
+    assert calls == ["https://api.exa.ai/search"]
+
+
+def test_exa_timeout_returns_explicit_failure_within_request_deadline():
+    from travelmind_groksearch_bridge.search_resilience import install_search_fallback
+    module = fake_server()
+    cancelled = []
+    async def exa(*args, **kwargs):
+        try:
+            await asyncio.sleep(60)
+        finally:
+            cancelled.append(True)
+    install_search_fallback(module, exa_api_key="test", exa_search=exa, exa_timeout_seconds=.01)
+    async def run():
+        return await asyncio.wait_for(module.web_search("query"), .2)
+    assert asyncio.run(run())["error"] == "search_unavailable"
+    assert cancelled == [True]

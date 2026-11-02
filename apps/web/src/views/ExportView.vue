@@ -3,6 +3,9 @@ import { computed, onBeforeUnmount, ref, watch } from "vue"
 import type { ExportArtifact, JobTimelineEntry } from "@travelmind/shared-types"
 import { useRoute } from "vue-router"
 import StatePanel from "@/components/StatePanel.vue"
+import JobProgressSummary from "@/components/JobProgressSummary.vue"
+import { jobPresentation, jobTitle, publicJobError } from "@/lib/jobPresentation"
+import { useAuthStore } from "@/stores/auth"
 import StatusPill from "@/components/StatusPill.vue"
 import { api, getErrorMessage, type JobRecord } from "@/lib/api"
 import { formatDateTime } from "@/lib/format"
@@ -10,6 +13,8 @@ import { isJobActive } from "@/lib/jobStatus"
 import { useI18n } from "@/lib/useI18n"
 
 const route = useRoute()
+const auth = useAuthStore()
+const isDebug = computed(() => auth.user?.is_admin && ["1", "true"].includes(String(route.query.debug ?? "")))
 const job = ref<JobRecord | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
@@ -287,7 +292,7 @@ onBeforeUnmount(() => {
       v-else-if="loadError"
       kind="error"
       :title="t('exportView.unavailableTitle')"
-      :message="loadError"
+      :message="isDebug ? loadError : publicJobError(loadError, '暂时无法查看导出进度，请稍后重试。')"
       :action-label="t('common.retry')"
       @action="retry"
     />
@@ -295,10 +300,13 @@ onBeforeUnmount(() => {
     <article v-else-if="job" class="panel panel-stack">
       <div>
         <p class="kicker">{{ t('exportView.kicker') }}</p>
-        <h1>{{ formatJobType(job.type) }}</h1>
-        <p class="muted">{{ job.job_id }}</p>
+        <h1>{{ jobTitle(job.type) }}</h1>
+        <p v-if="isDebug" class="muted">{{ job.job_id }}</p>
       </div>
 
+      <JobProgressSummary :job="job" />
+      <details v-if="isDebug">
+        <summary>任务诊断（仅供调试）</summary>
       <div class="inline-actions" style="align-items: center;">
         <StatusPill :status="job.status" />
         <span class="muted">{{ t('common.updatedAt', { value: formatDateTime(job.updated_at) }) }}</span>
@@ -329,11 +337,12 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      </details>
       <StatePanel
         v-if="pollError"
         kind="error"
         :title="t('exportView.refreshFailedTitle')"
-        :message="pollError"
+        :message="isDebug ? pollError : publicJobError(pollError, '进度暂时无法更新，请稍后刷新查看。')"
         compact
       />
 
@@ -349,11 +358,11 @@ onBeforeUnmount(() => {
         v-else-if="job.status === 'failed'"
         kind="error"
         :title="t('exportView.failedTitle')"
-        :message="job.error_message ?? t('exportView.failedTitle')"
+        :message="isDebug ? (job.error_message ?? t('exportView.failedTitle')) : jobPresentation(job).detail"
         compact
       />
 
-      <div class="panel-subsection">
+      <div v-if="isDebug" class="panel-subsection">
         <div class="inline-actions" style="justify-content: space-between; align-items: center;">
           <h2>{{ copy.timelineTitle }}</h2>
           <span class="muted">{{ jobTimeline.length }}</span>
@@ -408,7 +417,7 @@ onBeforeUnmount(() => {
             </a>
           </div>
         </div>
-        <ul v-if="resultMetadataEntries.length" class="result-list">
+        <ul v-if="isDebug && resultMetadataEntries.length" class="result-list">
           <li v-for="[key, value] in resultMetadataEntries" :key="key">{{ key }}: {{ formatResultValue(value) }}</li>
         </ul>
         <div class="inline-actions" style="margin-top: 18px;">

@@ -7,6 +7,7 @@ import { portalAssets } from "@/lib/portalAssets"
 import { useAuthStore } from "@/stores/auth"
 import { useJobGuardStore } from "@/stores/jobGuard"
 import TmToast from "@/components/ui/TmToast.vue"
+import { jobPresentation } from "@/lib/jobPresentation"
 
 const route = useRoute()
 const router = useRouter()
@@ -45,7 +46,7 @@ const studioQuery = computed({
 const backgroundJob = computed(() => jobGuard.activeJob)
 const showBackgroundJobBanner = computed(() => Boolean(backgroundJob.value) &&
   !(route.name === "trip-detail" && String(route.params.id ?? "") === backgroundJob.value?.tripId))
-const backgroundJobLabel = computed(() => backgroundJob.value?.stageMessage?.trim() || "行程任务正在后台执行…")
+const backgroundJobLabel = computed(() => backgroundJob.value ? jobPresentation({ type: backgroundJob.value.type, status: backgroundJob.value.status, stage_message: backgroundJob.value.stageMessage }).label : "正在处理行程，请稍候")
 
 function navigateToJob() {
   const job = backgroundJob.value
