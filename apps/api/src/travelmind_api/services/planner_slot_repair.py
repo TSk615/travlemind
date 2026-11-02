@@ -185,6 +185,11 @@ def prepare_slot_repair(payload: dict[str, Any]) -> SlotRepairContract | None:
         if not isinstance(ref, str) or ref not in slots:
             raise SlotRepairError("unknown_repair_target")
         fields = _CLOCK_FIELDS if target.get("dependent_transfer") else _FIELDS
+        explicit = target.get("allowed_fields")
+        if explicit is not None:
+            if not isinstance(explicit,list) or not explicit or any(not isinstance(f,str) or f not in fields for f in explicit):
+                raise SlotRepairError("invalid_allowed_fields")
+            fields = frozenset(explicit)
         allowed[ref] = allowed.get(ref, frozenset()) | fields
     window_days = payload.get("repair_flexible_window_days", [])
     if not isinstance(window_days, list) or any(type(d) is not int or not 1 <= d <= len(days) for d in window_days):

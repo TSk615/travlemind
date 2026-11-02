@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from travelmind_api.services.llm.config import LlmEndpointConfig
 
 
-TRIP_GENERATION_GRAPH_VERSION = "trip-generation.reliable-v2"
+TRIP_GENERATION_GRAPH_VERSION = "trip-generation.reliable-v3"
 TRIP_GENERATION_STATE_SCHEMA_VERSION = 1
 TRIP_REFINEMENT_GRAPH_VERSION = "trip-refinement.v1"
 TRIP_REFINEMENT_STATE_SCHEMA_VERSION = 1

@@ -93,3 +93,24 @@ def duplicate_visit_constraints(payload: dict[str, Any]) -> list[dict[str, Any]]
             else:
                 seen.setdefault(key, (di, ref))
     return conflicts
+
+
+def hard_repair_targets(targets, errors, reviews):
+    """Soft observations never grant permission to retime unrelated items."""
+    hard = [r for r in reviews if r.get("hard") and r.get("code") not in {"flexible_window_invalid", "flexible_window_overlap"}]
+    text = "；".join([*errors, *[str(r.get("item_name") or "")+"："+str(r.get("message") or "") for r in hard]])
+    result=[];previous_anchor=False
+    for target in targets:
+        relevant = bool(target.get("item_name") and target["item_name"] in text)
+        if target.get("dependent_transfer"):
+            if previous_anchor:result.append(dict(target))
+            continue
+        previous_anchor=False
+        if not relevant:continue
+        item_issues=[r for r in hard if r.get("item_ref")==target.get("item_ref")]
+        value=dict(target)
+        if item_issues and all(r.get("code")=="time_allocation_conflict" for r in item_issues):
+            value["allowed_fields"]=["schedule_intent"]
+        else:previous_anchor=True
+        result.append(value)
+    return result

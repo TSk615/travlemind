@@ -199,9 +199,9 @@ def build_trip_generation_graph(
 
     def route_after_validation(state: TripGenerationState) -> str:
         from travelmind_api.services.planner_reliability import can_repair
+        # Never risk a valid draft merely to rewrite soft/unknown observations.
         if not state.get("validation_errors"):
-            if not state.get("repair_hints") or not can_repair(state, "semantic"):
-                return "result_assembly"
+            return "result_assembly"
         if not can_repair(state):
             raise ValueError("Planner repair budget exhausted before validated result")
         return "itinerary_repair"

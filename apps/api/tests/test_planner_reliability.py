@@ -163,3 +163,21 @@ def test_strict_patch_field_operations_preserve_unaffected_fields():
         contract.apply(json.dumps({'item_operations':[{'item_ref':'d1i1','field':'name','value':'a'},{'item_ref':'d1i1','field':'name','value':'b'}]}))
     with pytest.raises(SlotRepairError,match='unauthorized_operation'):
         contract.apply(json.dumps({'item_operations':[{'item_ref':'d2i1','field':'name','value':'a'}]}))
+
+
+def test_only_hard_conflicts_grant_slot_permissions():
+    from travelmind_api.services.planner_reliability import hard_repair_targets
+    targets=[{"item_ref":"d1i1","item_name":"进站候车"},{"item_ref":"d1i2","item_name":"列车","dependent_transfer":True},{"item_ref":"d3i1","item_name":"市内转场"}]
+    review=[{"hard":True,"code":"flexible_window_overlap","item_ref":"d3i1","item_name":"市内转场","message":"留白重叠"}]
+    assert hard_repair_targets(targets,["留白重叠"],review)==[]
+    review=[{"hard":True,"code":"time_allocation_conflict","item_ref":"d1i1","item_name":"进站候车","message":"分钟超出"}]
+    permitted=hard_repair_targets(targets,["进站候车分钟超出"],review)
+    assert permitted==[{"item_ref":"d1i1","item_name":"进站候车","allowed_fields":["schedule_intent"]}]
+
+
+def test_explicit_field_permissions_cannot_retime_existing_slot():
+    from travelmind_api.services.planner_slot_repair import prepare_slot_repair,SlotRepairError
+    contract=prepare_slot_repair({"previous_itinerary":plan(),"repair_targets":[{"item_ref":"d1i1","allowed_fields":["note"]}]})
+    assert contract.allowed['d1i1']==frozenset({'note'})
+    with pytest.raises(SlotRepairError,match='unauthorized_operation'):
+        contract.apply(json.dumps({"item_operations":[{"item_ref":"d1i1","field":"end_time","value":"10:00"}]}))
