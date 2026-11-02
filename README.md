@@ -122,6 +122,8 @@ uv run --project apps/api pytest apps/api/tests -q
 
 这是持续迭代的个人项目，不是票务交易平台。自适应行程微调实验默认关闭，并且不在生产环境启用；相关实验记录不代表已经上线的能力。临时测试产物、原始供应商响应、数据库、个人凭据和本地调试截图不作为发布内容上传。
 
+- [失败自动退次与中文提示验收（2026-11-03）](docs/failure-refund-acceptance-2026-11-03.md)
+
 ### 搜索失败兜底
 
 Grok 搜索超时、报错或缺少可用来源时，bridge 会自动改用 Exa，保留标题、链接和正文摘要，并继续合并已有来源。需要在服务端配置 `EXA_API_KEY`；Key 不下发到网页。搜索和规划是两条独立链路，搜索兜底不代表行程一定生成成功。详细配置、超时和失败处理见 [GrokSearch 与 Exa 配置说明](docs/groksearch-local-setup.md)。
