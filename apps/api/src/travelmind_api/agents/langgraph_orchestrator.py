@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from travelmind_api.services.planner_reliability import can_repair, repair_update, repair_counts, decode_plan, attempt_metadata, duplicate_visit_constraints
+from travelmind_api.services.planner_recovery import combined_planner_metadata
 import time
 from contextlib import nullcontext
 from dataclasses import replace
@@ -1036,16 +1038,24 @@ class LangGraphOrchestrator(PlanningCore):
             "output_schema": PLANNING_OUTPUT_SCHEMA,
         }
         result, _ = self._invoke_workflow_role("itinerary_planner", planner_payload)
-        payload = self._normalize_draft(parse_planning_response(result.content), transport)
+        payload, parse_error = decode_plan(self, result, transport)
         return {
             "planner_payload": planner_payload,
-            "final_payload": payload.model_dump(mode="json"),
+            "final_payload": payload,
+            "planning_parse_error": parse_error,
+            "planner_attempts": [attempt_metadata(result, parse_error)],
             "validation_errors": [],
-            "repair_count": 0,
+            "repair_count": 0, "format_repair_count": 0, "semantic_repair_count": 0,
             "role_results": {"itinerary_planner": result.checkpoint_metadata()},
         }
 
     def validate_itinerary(self, state: TripGenerationState) -> dict[str, Any]:
+        if state.get("planning_parse_error"):
+            error = state["planning_parse_error"]
+            if not can_repair(state, "format"):
+                from travelmind_api.services.llm.parser import PlanningResponseParseError
+                raise PlanningResponseParseError("Planner repair budget exhausted (format): " + error["code"])
+            return {"validation_errors": ["JSON/schema output rejected: " + error["code"]]}
         request = self._request()
         payload = LlmPlanningPayload.model_validate(state["final_payload"])
         transport = TransportGuidance.model_validate(state["transport_guidance"])
@@ -1063,8 +1073,8 @@ class LangGraphOrchestrator(PlanningCore):
             message = str(exc)
             if not message.startswith("行程可执行性校验失败："):
                 raise
-            if int(state.get("repair_count", 0)) >= 1:
-                raise
+            if not can_repair(state, "semantic"):
+                raise ValueError("Planner repair budget exhausted (semantic): " + message) from exc
             errors = [
                 value.strip()
                 for value in message.removeprefix("行程可执行性校验失败：").split("；")
@@ -1080,12 +1090,16 @@ class LangGraphOrchestrator(PlanningCore):
         }
 
     def repair_itinerary(self, state: TripGenerationState) -> dict[str, Any]:
+        counters = repair_update(state)
+        repair_kind = "format" if state.get("planning_parse_error") else "semantic"
         repair_payload = {
             **state["planner_payload"],
             "previous_itinerary": state["final_payload"],
+            "duplicate_visit_constraints": duplicate_visit_constraints(state["final_payload"]),
+            "output_format_error": state.get("planning_parse_error"),
             "validation_errors": list(state["validation_errors"]),
             "repair_instruction": (
-                "上一个完整行程未通过后端硬校验。只修正 validation_errors 指出的冲突，"
+                "若 output_format_error 非空，根据原始候选和证据输出完整唯一 JSON 对象；否则只修正 validation_errors 指出的硬冲突。"
                 "保持已核验班次、住宿和无冲突日程不变，并重新输出一份完整 JSON 行程。"
                 "如果冲突是某个 POI 在特定日期闭馆，只禁止该 POI 出现在这个日期；"
                 "其他开放日期仍按路线、兴趣、节奏和优先级正常参与选择，不得把单日闭馆解释为全程排除。"
@@ -1093,10 +1107,12 @@ class LangGraphOrchestrator(PlanningCore):
         }
         result, _ = self._invoke_workflow_role("itinerary_planner", repair_payload)
         transport = TransportGuidance.model_validate(state["transport_guidance"])
-        payload = self._normalize_draft(parse_planning_response(result.content), transport)
+        payload, parse_error = decode_plan(self, result, transport)
         return {
-            "final_payload": payload.model_dump(mode="json"),
-            "repair_count": int(state.get("repair_count", 0)) + 1,
+            "final_payload": payload,
+            "planning_parse_error": parse_error,
+            "planner_attempts": [*state.get("planner_attempts", []), attempt_metadata(result, parse_error, kind=repair_kind)],
+            **counters,
             "validation_errors": [],
             "role_results": {"itinerary_planner": result.checkpoint_metadata()},
         }
@@ -1124,7 +1140,7 @@ class LangGraphOrchestrator(PlanningCore):
                 planner_role,
                 self._workflow_llm_configs["itinerary_planner"],
                 self._summarize_itinerary(payload.summary, payload.days, payload.risks),
-                invocation_metadata=state.get("role_results", {}).get("itinerary_planner"),
+                invocation_metadata=combined_planner_metadata(state.get("planner_attempts", []), state.get("role_results", {}).get("itinerary_planner")),
             )
         )
         pipeline_notes = self._build_pipeline_notes(state, weather, payload)

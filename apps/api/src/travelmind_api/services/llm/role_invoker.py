@@ -89,11 +89,15 @@ class OpenAICompatibleRoleInvoker:
 
     def invoke(self, invocation: RoleInvocation) -> RoleInvocationResult:
         client = self._client_factory(invocation.endpoint)
+        # Only the final planner is constrained; research/tool conversations keep
+        # their existing protocols. Unsupported protocols are not modified.
+        client.json_object_mode = (invocation.role_name == "itinerary_planner"
+                                   and str(invocation.endpoint.provider_protocol).lower() in {"openai", "newapi"})
         client.request_attempt_limit = max(int(invocation.max_request_attempts), 1)
         client.request_deadline_seconds = float(invocation.endpoint.timeout_seconds)
         request_id = generate_identifier("llmreq")
         messages = [
-            {"role": "system", "content": invocation.system_prompt},
+            {"role": "system", "content": invocation.system_prompt + ("\n只输出一个完整的 JSON 对象，不输出 Markdown 或额外解释。" if client.json_object_mode else "")},
             {
                 "role": "user",
                 "content": json.dumps(dict(invocation.input_payload), ensure_ascii=False),

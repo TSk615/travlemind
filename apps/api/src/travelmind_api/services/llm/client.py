@@ -39,6 +39,7 @@ class OpenAICompatibleClient:
         # Search-capable gateways may return citations alongside assistant text.
         # Keep the metadata available to callers without changing the long-standing
         # create_chat_completion() string return type.
+        self.json_object_mode = False
         self.last_citations: list[str] = []
         self.last_usage: dict[str, Any] | None = None
         self.last_retry_count = 0
@@ -231,6 +232,8 @@ class OpenAICompatibleClient:
                 payload["stream"] = stream
             if max_tokens is not None:
                 payload["max_output_tokens"] = max_tokens
+            if self.json_object_mode:
+                payload["text"] = {"format": {"type": "json_object"}}
             return payload
 
         payload = {
@@ -244,6 +247,8 @@ class OpenAICompatibleClient:
             ],
             "temperature": temperature,
         }
+        if self.json_object_mode:
+            payload["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if stream is not None:

@@ -198,10 +198,12 @@ def build_trip_generation_graph(
     builder.add_edge("itinerary_planner", "execution_validation")
 
     def route_after_validation(state: TripGenerationState) -> str:
+        from travelmind_api.services.planner_reliability import can_repair
         if not state.get("validation_errors"):
-            return "result_assembly"
-        if int(state.get("repair_count", 0)) >= 1:
-            raise ValueError("Itinerary still failed deterministic validation after one repair")
+            if not state.get("repair_hints") or not can_repair(state, "semantic"):
+                return "result_assembly"
+        if not can_repair(state):
+            raise ValueError("Planner repair budget exhausted before validated result")
         return "itinerary_repair"
 
     builder.add_conditional_edges(

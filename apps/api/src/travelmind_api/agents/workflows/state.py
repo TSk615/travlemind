@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from travelmind_api.services.llm.config import LlmEndpointConfig
 
 
-TRIP_GENERATION_GRAPH_VERSION = "trip-generation.v1"
+TRIP_GENERATION_GRAPH_VERSION = "trip-generation.reliable-v2"
 TRIP_GENERATION_STATE_SCHEMA_VERSION = 1
 TRIP_REFINEMENT_GRAPH_VERSION = "trip-refinement.v1"
 TRIP_REFINEMENT_STATE_SCHEMA_VERSION = 1
@@ -39,7 +39,11 @@ class TripGenerationState(TypedDict, total=False):
     hotel_recommendation: dict[str, Any]
     transport_guidance: dict[str, Any]
     final_payload: dict[str, Any]
+    planning_parse_error: dict[str, Any] | None
+    planner_attempts: list[dict[str, Any]]
     validation_errors: list[str]
+    format_repair_count: int
+    semantic_repair_count: int
     repair_count: int
     agent_runs: list[dict[str, Any]]
     pipeline_notes: list[str]
