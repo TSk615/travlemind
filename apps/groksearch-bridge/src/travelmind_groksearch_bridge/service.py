@@ -65,6 +65,7 @@ class InProcessGrokSearchRunner:
             "TAVILY_ENABLED",
             "TAVILY_API_URL",
             "TAVILY_API_KEY",
+            "EXA_API_KEY",
             "FIRECRAWL_API_URL",
             "FIRECRAWL_API_KEY",
         )
@@ -77,6 +78,13 @@ class InProcessGrokSearchRunner:
             from .responses_provider import install_responses_provider
 
             install_responses_provider(server_module)
+        from .search_resilience import install_search_fallback
+
+        install_search_fallback(
+            server_module,
+            exa_api_key=get_env("EXA_API_KEY") or "",
+            primary_timeout_seconds=float(get_env("TRAVELMIND_GROKSEARCH_PRIMARY_TIMEOUT_SECONDS") or "40"),
+        )
         self._server_module = server_module
         self._initialized_result: dict[str, Any] | None = None
 
