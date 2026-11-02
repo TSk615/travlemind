@@ -268,7 +268,15 @@ export interface ItineraryDayWeather {
   field_evidence?: Record<string, EvidenceStatus>
 }
 
+export interface FlexibleWindow {
+  start_time: string
+  end_time: string
+  purpose: "free_time" | "meal_break" | "rest" | "station_buffer" | "contingency"
+  note: string
+}
+
 export interface ItineraryDay {
+  flexible_windows?: FlexibleWindow[]
   day_index: number
   title: string
   summary: string
@@ -486,6 +494,7 @@ export interface SearchSettings {
   has_api_key: boolean
   timeout_seconds: number
   xhs_source_enabled: boolean
+  xhs_available?: boolean
   configured: boolean
 }
 
