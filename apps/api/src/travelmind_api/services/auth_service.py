@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from travelmind_api.agents.provider import AGENT_PROVIDER_STANDARD, is_supported_agent_provider, normalize_agent_provider
-from travelmind_api.api.schemas.auth import LoginRequest, RegisterRequest, UserResponse
+from travelmind_api.api.schemas.auth import GenerationQuotaResponse, LoginRequest, RegisterRequest, UserResponse
 from travelmind_api.api.schemas.settings import (
     AgentSettingsResponse,
     ImageSettingsResponse,
@@ -185,7 +185,7 @@ def mask_api_key(api_key: str | None) -> str | None:
 
 
 def is_admin_user(user: User, settings: Settings) -> bool:
-    return user.email.strip().lower() in settings.normalized_admin_emails
+    return user.generation_quota is None and user.email.strip().lower() in settings.normalized_admin_emails
 
 
 def ensure_user_active(user: User) -> None:
@@ -197,6 +197,7 @@ def ensure_user_active(user: User) -> None:
 
 
 def serialize_user(user: User, settings: Settings | None = None) -> UserResponse:
+    quota = user.generation_quota
     return UserResponse(
         id=user.id,
         email=user.email,
@@ -205,6 +206,9 @@ def serialize_user(user: User, settings: Settings | None = None) -> UserResponse
         locale=user.locale,
         created_at=user.created_at,
         is_admin=is_admin_user(user, settings) if settings is not None else False,
+        generation_quota=GenerationQuotaResponse(
+            limit=quota.generation_limit, used=quota.used, remaining=max(0, quota.generation_limit - quota.used)
+        ) if quota else None,
     )
 
 

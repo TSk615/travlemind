@@ -15,7 +15,10 @@ import TmProgressTrack from "@/components/ui/TmProgressTrack.vue"
 import { api, getErrorMessage } from "@/lib/api"
 import type { TripIntakeChatMessage } from "@/lib/api"
 import { useI18n } from "@/lib/useI18n"
+import { useAuthStore } from "@/stores/auth"
 
+const auth = useAuthStore()
+const isDemo = computed(() => Boolean(auth.user?.generation_quota))
 const router = useRouter()
 const submitting = ref(false)
 const generating = ref(false)
@@ -387,7 +390,7 @@ async function submitAndGenerate() {
 
     <!-- Toolbar -->
     <div class="tm-workbench__toolbar">
-      <TmSegmentedSwitch :options="modeOptions" :model-value="mode" @update:model-value="activateMode" />
+      <TmSegmentedSwitch v-if="!isDemo" :options="modeOptions" :model-value="mode" @update:model-value="activateMode" />
       <div class="tm-workbench__toolbar-actions">
         <TmButton variant="ghost" size="sm" @click="restoreStarterDraft">{{ copy.starter }}</TmButton>
         <TmButton variant="ghost" size="sm" @click="clearDraft">{{ copy.clear }}</TmButton>

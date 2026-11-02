@@ -45,6 +45,10 @@ export const useAuthStore = defineStore("auth", {
         this.bootstrapping = false
       }
     },
+    async refreshUser() {
+      // Quota refresh failures must not sign an otherwise valid session out.
+      try { this.user = await api.me() } catch { /* Refresh on next navigation. */ }
+    },
     async login(email: string, password: string) {
       this.pending = true
       this.error = null

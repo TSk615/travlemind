@@ -2,8 +2,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import CheckConstraint, Date, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from travelmind_api.core.credentials import EncryptedCredential
 from travelmind_api.core.database import Base
@@ -49,6 +49,25 @@ class User(Base):
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+    generation_quota: Mapped["GenerationQuota | None"] = relationship(
+        lazy="selectin", uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class GenerationQuota(Base):
+    """An opt-in, persistent allowance; ordinary accounts have no quota row."""
+
+    __tablename__ = "generation_quotas"
+    __table_args__ = (
+        CheckConstraint("generation_limit >= 0", name="ck_generation_quota_limit"),
+        CheckConstraint("used >= 0 AND used <= generation_limit", name="ck_generation_quota_used"),
+    )
+
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    generation_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class XhsAccountSession(Base):

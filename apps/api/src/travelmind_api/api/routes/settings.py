@@ -16,7 +16,14 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 @router.get("/llm")
 def get_llm_settings(current_user: User = Depends(get_current_user), settings: Settings = Depends(get_settings)):
-    return success_response(serialize_runtime_settings(current_user, settings).model_dump(mode="json"))
+    runtime = serialize_runtime_settings(current_user, settings)
+    if current_user.generation_quota is not None:
+        # Even key prefixes/suffixes and secret lengths need not be public.
+        runtime.agent.api_key_masked = "configured" if runtime.agent.has_api_key else None
+        runtime.agent.poi_api_key_masked = "configured" if runtime.agent.poi_has_api_key else None
+        runtime.search.api_key_masked = "configured" if runtime.search.has_api_key else None
+        runtime.image.api_key_masked = "configured" if runtime.image.has_api_key else None
+    return success_response(runtime.model_dump(mode="json"))
 
 
 @router.put("/llm")

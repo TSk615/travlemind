@@ -1,0 +1,21 @@
+<VirtualHost *:80>
+    ServerName __APP_DOMAIN__
+    Redirect permanent / https://__APP_DOMAIN__/
+    CustomLog /dev/null combined
+    ErrorLog /var/log/httpd/travelmind-error.log
+</VirtualHost>
+<VirtualHost *:443>
+    ServerName __APP_DOMAIN__
+    SSLEngine on
+    SSLCertificateFile /opt/travelmind/shared/tls/api.pem
+    SSLCertificateKeyFile /opt/travelmind/shared/tls/api.key
+    SSLProtocol -all +TLSv1.2 +TLSv1.3
+    ProxyRequests Off
+    ProxyPreserveHost On
+    RequestHeader set X-Forwarded-Proto "https"
+    AllowEncodedSlashes NoDecode
+    ProxyPass "/" "http://127.0.0.1:18080/" nocanon connectiontimeout=5 timeout=900 upgrade=websocket
+    ProxyPassReverse "/" "http://127.0.0.1:18080/"
+    CustomLog /dev/null combined
+    ErrorLog /var/log/httpd/travelmind-error.log
+</VirtualHost>

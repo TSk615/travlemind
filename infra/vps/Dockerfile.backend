@@ -1,0 +1,28 @@
+FROM ghcr.io/astral-sh/uv:0.9.26 AS uv
+FROM python:3.11-slim AS build
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_NO_PROGRESS=1
+WORKDIR /app
+COPY apps/api/pyproject.toml apps/api/uv.lock /app/apps/api/
+RUN uv sync --frozen --no-dev --project /app/apps/api --no-install-project
+ENV TIKTOKEN_CACHE_DIR=/app/tokenizer-cache
+RUN /app/apps/api/.venv/bin/python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
+COPY apps/api /app/apps/api
+RUN uv sync --frozen --no-dev --project /app/apps/api
+COPY apps/worker/src /app/apps/worker/src
+COPY scripts/audit_workflow_rollout.py /app/scripts/audit_workflow_rollout.py
+
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PATH=/app/apps/api/.venv/bin:$PATH \
+    PYTHONPATH=/app/apps/api/src:/app/apps/worker/src \
+    HOME=/app/storage \
+    TIKTOKEN_CACHE_DIR=/app/tokenizer-cache
+WORKDIR /app
+RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin travelmind
+COPY --from=build /app /app
+# Build contexts may be prepared by a root-only deployment launcher. Runtime
+# UID 10001 must still be able to read/traverse packaged application source.
+RUN chmod -R a+rX /app/apps/api /app/apps/worker /app/scripts
+USER 10001:10001
+CMD ["uvicorn", "travelmind_api.main:app", "--host", "127.0.0.1", "--port", "18000", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]

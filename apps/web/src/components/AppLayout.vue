@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue"
+import { computed, watch } from "vue"
 import { RouterLink, useRoute } from "vue-router"
 import { brand } from "@travelmind/ui"
 import { useI18n } from "@/lib/useI18n"
@@ -54,6 +54,12 @@ const currentSection = computed(() => {
 function navigateToJob() {
   // handled by RouterLink in template
 }
+watch(() => route.fullPath, () => {
+  if (auth.user?.generation_quota) void auth.refreshUser()
+})
+watch(() => jobGuard.activeJob?.jobId, () => {
+  if (auth.user?.generation_quota) void auth.refreshUser()
+})
 </script>
 
 <template>
@@ -106,6 +112,10 @@ function navigateToJob() {
         <span></span><span></span><span></span>
       </button>
     </header>
+    <div v-if="auth.user?.generation_quota" class="tm-demo-quota" role="status">
+      公开体验账户 · 剩余 {{ auth.user.generation_quota.remaining }} / {{ auth.user.generation_quota.limit }} 次
+      · 所有访客共享；重新生成、AI 调整和手动重试均计次。请勿填写个人隐私，已有行程对其他访客可见。
+    </div>
 
     <!-- Background job toast -->
     <TmToast
@@ -125,6 +135,8 @@ function navigateToJob() {
 </template>
 
 <style scoped>
+.tm-demo-quota { padding: 12px 24px; background: #eef5ee; color: #244b39; border-bottom: 1px solid #d4e2d5; font-size: 13px; line-height: 1.7; }
+
 .tm-app-shell {
   min-height: 100vh;
   padding: var(--tm-space-6);

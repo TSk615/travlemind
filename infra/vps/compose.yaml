@@ -1,0 +1,166 @@
+name: travelmind
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+
+x-app-env: &app-env
+  TRAVELMIND_ENVIRONMENT: production
+  TRAVELMIND_DATABASE_URL: postgresql+psycopg://travelmind:${POSTGRES_PASSWORD:?required}@127.0.0.1:15432/travelmind
+  TRAVELMIND_WORKFLOW_CHECKPOINT_URL: postgresql://travelmind:${POSTGRES_PASSWORD:?required}@127.0.0.1:15432/travelmind
+  TRAVELMIND_REDIS_URL: redis://:${REDIS_PASSWORD:?required}@127.0.0.1:16379/0
+  TRAVELMIND_JWT_SECRET: ${JWT_SECRET:?required}
+  TRAVELMIND_CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?required}
+  TRAVELMIND_PUBLIC_API_URL: https://${APP_DOMAIN:?required}
+  TRAVELMIND_CORS_ORIGINS: '["https://${APP_DOMAIN:?required}"]'
+  TRAVELMIND_COOKIE_SECURE: "true"
+  TRAVELMIND_CSRF_ENABLED: "true"
+  TRAVELMIND_RATE_LIMIT_ENABLED: "true"
+  TRAVELMIND_RATE_LIMIT_BACKEND: redis
+  TRAVELMIND_QUEUE_MODE: arq
+  TRAVELMIND_AGENT_PROVIDER: langgraph
+  TRAVELMIND_LANGGRAPH_ROLLOUT_PERCENT: "100"
+  TRAVELMIND_WORKER_MAX_JOBS: "2"
+  TRAVELMIND_ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+  TRAVELMIND_JOB_TIMEOUT_SECONDS: "900"
+  TRAVELMIND_UPSTREAM_PRIVATE_URL_POLICY: deny
+  TRAVELMIND_UPSTREAM_URL_ALLOWED_HOSTS: groksearch-bridge
+  TRAVELMIND_SEARCH_EVIDENCE_MODE: mcp
+  TRAVELMIND_GROKSEARCH_BRIDGE_TIMEOUT_SECONDS: "120"
+  TRAVELMIND_SEARCH_SERVICE_PROVIDER: groksearch
+  TRAVELMIND_SEARCH_SERVICE_TRANSPORT: mcp
+  TRAVELMIND_GROKSEARCH_BRIDGE_BASE_URL: http://groksearch-bridge:18085/mcp
+  TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY: ${BRIDGE_API_KEY:?required}
+  TRAVELMIND_EXPORT_ROOT: /app/storage/exports
+  TRAVELMIND_IMAGE_ROOT: /app/storage/images
+  TRAVELMIND_LOG_ROOT: /app/storage/logs
+  TRAVELMIND_XHS_CRAWLER_ENABLED: "false"
+
+x-backend: &backend
+  image: travelmind-backend:${RELEASE_TAG:?required}
+  network_mode: host
+  restart: unless-stopped
+  environment: *app-env
+  env_file:
+    - path: ${DEPLOY_ROOT:?required}/shared/backend-providers.env
+      format: raw
+  extra_hosts: ["groksearch-bridge:127.0.0.1"]
+  volumes: ["${DEPLOY_ROOT:?required}/shared/storage:/app/storage"]
+  logging: *logging
+  security_opt: ["no-new-privileges:true"]
+  stop_grace_period: 60s
+  mem_limit: 768m
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: travelmind
+      POSTGRES_USER: travelmind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      PGPORT: "15432"
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=15432", "-c", "shared_buffers=64MB", "-c", "max_connections=80"]
+    volumes: ["${DEPLOY_ROOT:?required}/shared/postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 15432 -U travelmind -d travelmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+    mem_limit: 512m
+
+  redis:
+    image: redis:7-alpine
+    user: "10002:10002"
+    network_mode: host
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ${DEPLOY_ROOT:?required}/shared/redis:/data
+      - ${DEPLOY_ROOT:?required}/shared/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ${DEPLOY_ROOT:?required}/shared/redis-password:/run/secrets/redis-password:ro
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(cat /run/secrets/redis-password) redis-cli -h 127.0.0.1 -p 16379 ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+    mem_limit: 128m
+
+  api:
+    <<: *backend
+    build:
+      context: ../..
+      dockerfile: infra/vps/Dockerfile.backend
+      network: host
+      entitlements: [network.host]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "travelmind_worker.worker"]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "arq", "--check", "travelmind_worker.worker.WorkerSettings"]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+
+  groksearch-bridge:
+    image: travelmind-bridge:${RELEASE_TAG:?required}
+    build:
+      context: ../..
+      dockerfile: infra/vps/Dockerfile.bridge
+      network: host
+      entitlements: [network.host]
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - path: ${DEPLOY_ROOT:?required}/shared/providers.env
+        format: raw
+    environment:
+      TRAVELMIND_GROKSEARCH_BRIDGE_API_KEY: ${BRIDGE_API_KEY:?required}
+      TRAVELMIND_GROKSEARCH_RUNNER_MODE: inprocess
+    volumes: ["${DEPLOY_ROOT:?required}/shared/bridge:/app/storage"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18085/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 384m
+
+  web:
+    image: travelmind-web:${RELEASE_TAG:?required}
+    build:
+      context: ../..
+      dockerfile: infra/vps/Dockerfile.web
+      network: host
+      entitlements: [network.host]
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/var/cache/nginx, /var/run, /tmp]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18080/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m

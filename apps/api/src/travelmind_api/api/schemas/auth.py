@@ -16,6 +16,12 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class GenerationQuotaResponse(BaseModel):
+    limit: int
+    used: int
+    remaining: int
+
+
 class UserResponse(BaseModel):
     id: str
     email: str
@@ -24,6 +30,7 @@ class UserResponse(BaseModel):
     locale: str
     created_at: datetime
     is_admin: bool = False
+    generation_quota: GenerationQuotaResponse | None = None
 
 
 class LogoutResponse(BaseModel):

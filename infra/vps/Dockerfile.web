@@ -1,0 +1,18 @@
+FROM node:24-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json /app/
+COPY apps/web/package.json /app/apps/web/package.json
+COPY packages/config/package.json /app/packages/config/package.json
+COPY packages/ui/package.json /app/packages/ui/package.json
+COPY packages/shared-types/package.json /app/packages/shared-types/package.json
+RUN npm ci --no-audit --no-fund
+COPY apps/web /app/apps/web
+COPY packages /app/packages
+ENV VITE_API_BASE_URL=""
+RUN npm run build --workspace @travelmind/web
+
+FROM nginx:1.30.5-alpine
+COPY infra/vps/web.conf /etc/nginx/nginx.conf
+COPY --from=build /app/apps/web/dist /usr/share/nginx/html
+ENTRYPOINT ["nginx"]
+CMD ["-g", "daemon off;"]

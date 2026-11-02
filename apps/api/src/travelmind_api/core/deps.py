@@ -29,6 +29,23 @@ def get_current_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "user_not_found", "message": "User not found"})
     ensure_user_active(user)
+    if user.generation_quota is not None:
+        # Demo credentials are deliberately public. Deny direct paid-tool access
+        # and provider reconfiguration; generation/refinement go through the ledger.
+        path = request.url.path.removeprefix(settings.api_prefix).rstrip("/")
+        blocked = (
+            path.startswith(("/llm", "/search", "/account/xhs"))
+            or (path.startswith("/settings") and request.method != "GET")
+            or (path.startswith("/images") and request.method != "GET")
+            or (path.startswith("/community") and request.method != "GET")
+            or path == "/trips/intake/chat"
+            or path.endswith("/images/enrich")
+        )
+        if blocked:
+            raise HTTPException(status_code=403, detail={
+                "code": "demo_action_forbidden",
+                "message": "共享体验账户仅开放表单创建、行程生成与查看；模型配置和独立工具调用不可用。",
+            })
     return user
 
 

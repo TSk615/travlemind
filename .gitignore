@@ -53,3 +53,10 @@ storage/images/
 storage/xhs-crawler/
 __debug_trip.py
 __trip_test.txt
+
+# Local experiments, generated audits and provider responses are not release assets.
+/output/
+/tmp/
+/tool-output/
+*.pem
+*.key

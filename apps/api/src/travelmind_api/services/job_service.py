@@ -16,6 +16,7 @@ from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import session_scope
 from travelmind_api.core.security import generate_identifier
 from travelmind_api.db.models import JobRecord
+from travelmind_api.services.generation_quota import consume_generation_quota, lock_generation_quota
 
 
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
@@ -118,6 +119,8 @@ def create_job(
     max_attempts: int | None = None,
     commit: bool = True,
 ) -> JobRecord:
+    metered = job_type in {"trip.generate", "trip.refine"}
+    limited = lock_generation_quota(session, owner_user_id) if metered else False
     normalized_idempotency_key = str(idempotency_key or "").strip()[:128] or None
     if normalized_idempotency_key:
         existing = (
@@ -130,7 +133,12 @@ def create_job(
             .one_or_none()
         )
         if existing is not None:
+            if limited and commit:
+                session.commit()
             return existing
+
+    if limited:
+        consume_generation_quota(session, owner_user_id)
 
     now = _utcnow()
     normalized_payload = dict(payload)

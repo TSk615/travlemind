@@ -30,6 +30,7 @@ export interface User {
   locale: string
   created_at: string
   is_admin: boolean
+  generation_quota?: { limit: number; used: number; remaining: number } | null
 }
 
 export interface XhsBindingStatus {
