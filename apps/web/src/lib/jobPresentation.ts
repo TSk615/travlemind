@@ -92,6 +92,7 @@ export function publicJobError(error: unknown, fallback = "这次处理未能完
     expired_trip_start_date: "出发日期已过期，请调整日期后重新生成。",
     same_day_planning_window_closed: "当天已没有足够的生成和出发准备时间，请把开始日期改为明天或之后，再生成行程。",
     invalid_trip_dates: "结束日期不能早于开始日期，请修改出行日期。",
+    planning_duplicate_poi: "同一景点被重复安排到不同日期，行程未通过质量检查。这次没有生成可用行程，请联系维护者排查，不必反复点击继续生成。",
     planning_validation_failed: "生成的行程未通过完整性检查，未保存为正式行程。请重新生成；如果仍然失败，请联系维护者。",
     job_failed: "这次处理未能完成，已有行程仍保留。请稍后重试或联系维护者。",
     job_resume_repair_exhausted: "这次任务无法从旧进度继续，请重新生成行程。这次请求不会扣次。",

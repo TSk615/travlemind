@@ -62,11 +62,19 @@ def extract_workflow_run_id(job: JobRecord) -> str | None:
 
 
 def checkpoint_repair_exhausted(job: JobRecord) -> bool:
-    """A terminal shared-repair failure cannot succeed by resuming that node."""
+    """Do not replay terminal parsing/validation failures as recoverable jobs.
+
+    A terminal execution-validation exception is raised only after the repair
+    budget is spent (or during final assembly). Replaying that saved node cannot
+    create a new draft and used to charge users for the same inevitable failure.
+    """
     message = str(job.error_message or "").casefold()
     return any(marker in message for marker in (
         "planner output still invalid after the single shared repair",
         "planner repair budget exhausted",
+        "planner slot repair rejected",
+        "itinerary still failed deterministic validation after one repair",
+        "行程可执行性校验失败：",
     ))
 
 

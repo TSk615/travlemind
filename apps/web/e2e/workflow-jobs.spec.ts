@@ -322,3 +322,26 @@ test("generation rejected before queue shows safe actionable date reason", async
   await expect(page.getByText(/当天已没有足够的生成和出发准备时间/)).toBeVisible()
   expect(await page.locator("body").innerText()).not.toContain("private /app/log")
 })
+
+
+test("terminal duplicate POI failure explains rejection without offering a futile resume", async ({ context }) => {
+  await initializeContext(context)
+  await context.route("**/api/v1/**", async route => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === "/api/v1/me") return fulfill(route, { ...user, generation_quota: { limit: 5, used: 0, remaining: 5 } })
+    if (pathname === "/api/v1/settings/llm") return fulfill(route, settings)
+    if (pathname === "/api/v1/trips/trip_workflow_e2e") return fulfill(route, trip(false))
+    if (pathname === "/api/v1/jobs/job_duplicate_poi") return fulfill(route, {
+      ...job("job_duplicate_poi", "trip.generate", "running"), status: "failed", can_resume: false,
+      public_error_code: "planning_duplicate_poi", quota_refunded: true,
+      error_message: '行程可执行性校验失败：POI“汕头小公园开埠区”在第 1 天和第 3 天重复 (log: /app/storage/logs/jobs/private.jsonl)'
+    })
+    return fulfill(route, null, 404)
+  })
+  const page = await context.newPage()
+  await page.goto("/trips/trip_workflow_e2e?jobId=job_duplicate_poi")
+  await expect(page.getByText(/同一景点被重复安排到不同日期/).first()).toBeVisible()
+  await expect(page.getByRole("button", { name: "继续生成", exact: true })).toHaveCount(0)
+  await expect(page.getByRole("status").filter({ hasText: "公开体验账户" })).toContainText("5 / 5")
+  expect(await page.locator("body").innerText()).not.toMatch(/private.jsonl|storage\/logs/)
+})

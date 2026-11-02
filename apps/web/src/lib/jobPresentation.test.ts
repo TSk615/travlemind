@@ -57,3 +57,13 @@ describe("失败原因与退次说明", () => {
     expect(publicJobError("当天已没有足够 secret")).not.toContain("secret")
   })
 })
+
+
+it("跨天重复景点显示具体中文原因且保留已退次说明", () => {
+  const view = jobPresentation({ status: "failed", public_error_code: "planning_duplicate_poi", quota_refunded: true })
+  expect(view.detail).toContain("同一景点被重复安排到不同日期")
+  expect(view.detail).toContain("不必反复点击继续生成")
+  expect(view.detail).toContain("额度已退回")
+  expect(publicJobError(view.detail)).toBe(view.detail)
+  expect(view.detail).not.toMatch(/POI|jsonl|storage/)
+})
