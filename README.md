@@ -122,6 +122,7 @@ uv run --project apps/api pytest apps/api/tests -q
 
 这是持续迭代的个人项目，不是票务交易平台。自适应行程微调实验默认关闭，并且不在生产环境启用；相关实验记录不代表已经上线的能力。临时测试产物、原始供应商响应、数据库、个人凭据和本地调试截图不作为发布内容上传。
 
+- [生成链路稳定性修复与真实验收（2026-11-03）](docs/generation-reliability-acceptance-2026-11-03.md)
 - [失败自动退次与中文提示验收（2026-11-03）](docs/failure-refund-acceptance-2026-11-03.md)
 
 ### 搜索失败兜底
