@@ -93,6 +93,8 @@ class OpenAICompatibleRoleInvoker:
         # their existing protocols. Unsupported protocols are not modified.
         client.json_object_mode = (invocation.role_name == "itinerary_planner"
                                    and str(invocation.endpoint.provider_protocol).lower() in {"openai", "newapi"})
+        client.structured_output_schema = (invocation.input_payload.get("structured_output_schema")
+                                           if client.json_object_mode else None)
         client.request_attempt_limit = max(int(invocation.max_request_attempts), 1)
         client.request_deadline_seconds = float(invocation.endpoint.timeout_seconds)
         request_id = generate_identifier("llmreq")

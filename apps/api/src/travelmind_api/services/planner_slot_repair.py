@@ -18,7 +18,7 @@ VERSION = "slot-patch.v1"
 _FIELDS = frozenset({"type", "name", "start_time", "end_time", "end_day_offset", "location", "score", "note", "visit_intent", "schedule_intent", "booking_info", "visit_requirements"})
 _CLOCK_FIELDS = frozenset({"start_time", "end_time", "end_day_offset"})
 SYSTEM_PROMPT = """你是行程局部修复器。只输出一个符合 repair_contract 的 JSON 对象，禁止 Markdown、解释、重复字段或整份行程。
-输出结构只有 item_updates、day_updates，以及获得明确授权时的 lodging_costs。item_updates 每项为 {"item_ref":"服务器标识","changes":{"需要修改的字段":新值}}，同一 item_ref 只出现一次。
+输出结构只有 item_operations、day_updates，以及获得明确授权时的 lodging_costs。item_operations 每项为 {"item_ref":"服务器标识","field":"字段名","value":新值}。同一个项目可改多个字段，但同一 item_ref+field 只能出现一次；不要重写不变字段。
 不修改的字段不要输出；nested booking_info / schedule_intent 等字段如需修改，应返回该字段的完整对象，不能同时重复该字段。不要重写 days、summary 或无关地点。
 先解决 validation_errors 中硬冲突，再处理有授权的提示。changes 的时间与 schedule_intent 分配必须一致：用餐、转场、缓冲、自由活动分钟之和不得超过项目实际跨度；buffer_minutes 不是转场内部可重复累计的备注。
 保留真实班次、日期、来源和不确定性。没有有据可依的可行班次时不能编造或把参考路线说成已经确认。只有被授权的项目可以改动；dependent_transfer 项目只允许改起止时间和跨日偏移。
@@ -82,6 +82,22 @@ class SlotRepairContract:
 
     def apply(self, content: str) -> tuple[dict[str, Any], dict[str, Any]]:
         patch = _read(content)
+        if "item_operations" in patch:
+            if set(patch) - {"item_operations", "day_updates", "lodging_costs"} or not isinstance(patch["item_operations"], list):
+                raise SlotRepairError("invalid_operations")
+            grouped = {}
+            for op in patch["item_operations"]:
+                if not isinstance(op, dict) or set(op) != {"item_ref", "field", "value"}:
+                    raise SlotRepairError("invalid_operation")
+                ref, field = op["item_ref"], op["field"]
+                if not isinstance(ref, str) or not isinstance(field, str) or ref not in self.allowed or field not in self.allowed[ref]:
+                    raise SlotRepairError("unauthorized_operation")
+                changes = grouped.setdefault(ref, {})
+                if field in changes:
+                    raise SlotRepairError("duplicate_operation")
+                changes[field] = op["value"]
+            patch = {**{k:v for k,v in patch.items() if k != "item_operations"}, "item_updates":[{"item_ref":r,"changes":c} for r,c in grouped.items()]}
+
         if not patch or set(patch) - {"item_updates", "day_updates", "lodging_costs"}:
             raise SlotRepairError("unexpected_patch_fields")
         updates = patch.get("item_updates", [])
@@ -182,9 +198,8 @@ def prepare_slot_repair(payload: dict[str, Any]) -> SlotRepairContract | None:
     wire["repair_contract"] = {"version": VERSION, "allowed_item_fields": {ref: sorted(fields) for ref, fields in allowed.items()},
                                "allowed_window_days": sorted(set(window_days)), "allow_lodging_costs": allow_lodging,
                                "unchanged_fields_are_server_preserved": True}
-    wire["output_schema"] = {"type": "object", "additionalProperties": False,
-        "properties": {"item_updates": {"type": "array", "items": {"item_ref": "allowed server item reference", "changes": "object containing only allowed fields"}},
-                       "day_updates": {"type": "array", "items": {"day_index": "allowed day index", "flexible_windows": "complete window list"}},
-                       **({"lodging_costs": "complete authorized lodging_costs list"} if allow_lodging else {})}}
-    wire["repair_instruction"] = "只输出局部补丁，不输出完整行程。不改的字段省略，每个 item_ref 只出现一次。合并后仍会执行原有完整结构与可执行性校验。"
+    from travelmind_api.services.planner_output_schema import slot_operation_schema
+    wire["structured_output_schema"] = slot_operation_schema(allowed, frozenset(window_days), allow_lodging)
+    wire["output_schema"] = wire["structured_output_schema"]
+    wire["repair_instruction"] = "只输出符合 structured_output_schema 的 JSON 局部字段操作：item_operations 每项只修改一个 item_ref 的一个 field，value 为新值。没有变化的字段不要输出；day_updates 没有授权日期时必须为空数组。不重写整份行程，同一 item_ref+field 不重复；合并后仍执行完整结构与可执行性校验。"
     return SlotRepairContract(deepcopy(original), wire, slots, allowed, frozenset(window_days), allow_lodging)

@@ -131,3 +131,35 @@ def test_duplicate_json_keys_are_rejected_without_checkpointing_raw_output(monke
     assert 'private-model-text' not in json.dumps(state)
     state.update(o.validate_itinerary(state));state.update(o.repair_itinerary(state));state.update(o.validate_itinerary(state))
     assert not state['validation_errors'] and len(calls) == 2
+
+
+@pytest.mark.parametrize('wire',['responses','chat_completions'])
+def test_strict_schema_wins_over_json_mode(wire):
+    c=OpenAICompatibleClient(LlmEndpointConfig(base_url='https://fixture.invalid/v1',api_key='fixture',model='fixture'))
+    c.json_object_mode=True;c.structured_output_schema={'type':'object','properties':{},'required':[],'additionalProperties':False}
+    payload=c._build_text_payload(messages=[],temperature=0,max_tokens=None,wire_api=wire)
+    fmt=payload['text']['format'] if wire=='responses' else payload['response_format']['json_schema']
+    assert fmt['strict'] is True and fmt['schema']==c.structured_output_schema
+
+
+def test_strict_patch_field_operations_preserve_unaffected_fields():
+    from travelmind_api.services.planner_slot_repair import prepare_slot_repair,SlotRepairError
+    original=plan()
+    contract=prepare_slot_repair({'previous_itinerary':original,'repair_targets':[{'item_ref':'d1i1'}]})
+    schema=contract.payload['structured_output_schema']
+    def check(node):
+        if isinstance(node,dict):
+            if node.get('type')=='object':
+                assert node['additionalProperties'] is False
+                assert set(node['required'])==set(node['properties'])
+            for value in node.values():check(value)
+        if isinstance(node,list):
+            for value in node:check(value)
+    check(schema)
+    merged,audit=contract.apply(json.dumps({'item_operations':[{'item_ref':'d1i1','field':'name','value':'新景点'},{'item_ref':'d1i1','field':'note','value':'有来源的候选'}],'day_updates':[]}))
+    assert merged['days'][0]['items'][0]['name']=='新景点'
+    assert merged['days'][1:]==original['days'][1:]
+    with pytest.raises(SlotRepairError,match='duplicate_operation'):
+        contract.apply(json.dumps({'item_operations':[{'item_ref':'d1i1','field':'name','value':'a'},{'item_ref':'d1i1','field':'name','value':'b'}]}))
+    with pytest.raises(SlotRepairError,match='unauthorized_operation'):
+        contract.apply(json.dumps({'item_operations':[{'item_ref':'d2i1','field':'name','value':'a'}]}))
