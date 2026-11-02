@@ -12,7 +12,7 @@ from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import SessionLocal, get_db
 from travelmind_api.core.deps import get_current_user
 from travelmind_api.db.models import User, WorkflowRun
-from travelmind_api.services.job_service import TERMINAL_JOB_STATUSES, cancel_job, create_job, dispatch_job, extract_resume_checkpoint, extract_workflow_run_id, get_job, serialize_job
+from travelmind_api.services.job_service import TERMINAL_JOB_STATUSES, checkpoint_repair_exhausted, cancel_job, create_job, dispatch_job, extract_resume_checkpoint, extract_workflow_run_id, get_job, serialize_job
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -50,6 +50,14 @@ def retry_failed_job_endpoint(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "job_not_failed", "message": "Only failed jobs can be retried from the last failed node."},
+        )
+    if checkpoint_repair_exhausted(job):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "job_resume_repair_exhausted",
+                "message": "这次任务的修复次数已用完，无法从旧进度继续。请重新生成行程；此次请求不会扣减体验次数。",
+            },
         )
     checkpoint = extract_resume_checkpoint(job)
     workflow_run_id = extract_workflow_run_id(job)

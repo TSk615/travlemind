@@ -60,6 +60,15 @@ def extract_workflow_run_id(job: JobRecord) -> str | None:
     return str(job.workflow_run_id or payload.get("workflow_run_id") or "").strip() or None
 
 
+def checkpoint_repair_exhausted(job: JobRecord) -> bool:
+    """A terminal shared-repair failure cannot succeed by resuming that node."""
+    message = str(job.error_message or "").casefold()
+    return any(marker in message for marker in (
+        "planner output still invalid after the single shared repair",
+        "planner repair budget exhausted",
+    ))
+
+
 def _resume_metadata(job: JobRecord) -> dict[str, Any]:
     checkpoint = extract_resume_checkpoint(job)
     workflow_run_id = extract_workflow_run_id(job)
@@ -70,6 +79,7 @@ def _resume_metadata(job: JobRecord) -> dict[str, Any]:
             job.status == "failed"
             and job.type == "trip.generate"
             and (checkpoint or workflow_run_id)
+            and not checkpoint_repair_exhausted(job)
         ),
         "resume_from_job_id": str(payload.get("resume_from_job_id") or "").strip() or None,
         "resume_failed_role": str(
