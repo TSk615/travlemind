@@ -127,7 +127,11 @@ def test_expired_trip_and_late_same_day_rejected_before_charge_or_queue(client, 
     user = _demo(client, monkeypatch)
     trip = _create_trip(client).json()["data"]["id"]
     fixed = datetime(2030, 5, 1, 23, 45, tzinfo=timezone(timedelta(hours=8)))
-    monkeypatch.setattr("travelmind_api.services.trip_service.datetime", type("Clock", (), {"now": staticmethod(lambda: fixed)}))
+    from travelmind_api.services.trip_service import validate_trip_dates_for_generation
+    # Freeze the business instant, not the host-local astimezone conversion.
+    # This exercises the real validator identically on UTC CI and UTC+08 hosts.
+    monkeypatch.setattr("travelmind_api.services.trip_service.validate_trip_dates_for_generation",
+                        lambda start, end: validate_trip_dates_for_generation(start, end, now=fixed))
     for start, code in [(fixed.date(), "same_day_planning_window_closed"), (fixed.date()-timedelta(days=1), "expired_trip_start_date")]:
         with SessionLocal() as s:
             j = s.get(Trip, trip)
