@@ -276,3 +276,49 @@ test("public progress shows Chinese steps only, even with debug query", async ({
   expect(text).not.toMatch(/schema_validation_failed|Planner output|storage\/logs|\.jsonl|Weather specialist|job_private_progress|任务诊断/)
   expect(text).toContain("已保存的行程不会被覆盖")
 })
+
+
+test("failed generation explains the date and refreshes refunded quota without navigation", async ({ context }) => {
+  await initializeContext(context)
+  let failed = false
+  await context.route("**/api/v1/**", async route => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === "/api/v1/me") return fulfill(route, { ...user, generation_quota: { limit: 5, used: failed ? 0 : 1, remaining: failed ? 5 : 4 } })
+    if (pathname === "/api/v1/settings/llm") return fulfill(route, settings)
+    if (pathname === "/api/v1/trips/trip_workflow_e2e") return fulfill(route, trip(false))
+    if (pathname === "/api/v1/jobs/job_refund_e2e") return fulfill(route, {
+      ...job("job_refund_e2e", "trip.generate", "running"),
+      status: failed ? "failed" : "running",
+      public_error_code: failed ? "same_day_planning_window_closed" : null,
+      quota_refunded: failed,
+      error_message: failed ? "private exception (log: /app/storage/secret.jsonl)" : null
+    })
+    return fulfill(route, null, 404)
+  })
+  const page = await context.newPage()
+  await page.goto("/trips/trip_workflow_e2e?jobId=job_refund_e2e")
+  const banner = page.getByRole("status").filter({ hasText: "公开体验账户" })
+  await expect(banner).toContainText("4 / 5")
+  failed = true
+  await expect(banner).toContainText("5 / 5", { timeout: 15000 })
+  await expect(page.getByText(/当天已没有足够的生成和出发准备时间/).first()).toBeVisible()
+  await expect(page.getByText(/本次未扣次数/).first()).toBeVisible()
+  expect(await page.locator("body").innerText()).not.toMatch(/private exception|secret.jsonl/)
+})
+
+test("generation rejected before queue shows safe actionable date reason", async ({ context }) => {
+  await initializeContext(context)
+  await context.route("**/api/v1/**", async route => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === "/api/v1/me") return fulfill(route, { ...user, generation_quota: { limit: 5, used: 0, remaining: 5 } })
+    if (pathname === "/api/v1/settings/llm") return fulfill(route, settings)
+    if (pathname === "/api/v1/trips/trip_workflow_e2e") return fulfill(route, trip(false))
+    if (pathname.endsWith("/generate")) return route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify(envelope(null, { code: "same_day_planning_window_closed", message: "private /app/log" })) })
+    return fulfill(route, null, 404)
+  })
+  const page = await context.newPage()
+  await page.goto("/trips/trip_workflow_e2e")
+  await page.getByRole("button", { name: "生成行程", exact: true }).first().click()
+  await expect(page.getByText(/当天已没有足够的生成和出发准备时间/)).toBeVisible()
+  expect(await page.locator("body").innerText()).not.toContain("private /app/log")
+})

@@ -41,3 +41,19 @@ describe("面向用户的中文任务进度", () => {
     expect(publicJobError({ code: "expired_trip_start_date" })).toContain("调整日期")
   })
 })
+
+
+describe("失败原因与退次说明", () => {
+  it("日期原因可以穿过重复格式化，且显示已退额度", () => {
+    const view = jobPresentation({ status: "failed", type: "trip.generate", public_error_code: "same_day_planning_window_closed", quota_refunded: true })
+    expect(view.detail).toContain("明天或之后")
+    expect(view.detail).toContain("额度已退回")
+    expect(publicJobError(view.detail)).toBe(view.detail)
+  })
+  it("未退款时绝不承诺已退回，未知服务端原因不回显", () => {
+    const view = jobPresentation({ status: "failed", public_error_code: "api_key=secret /app/log", quota_refunded: false })
+    expect(view.detail).not.toMatch(/secret|api_key|已退回/)
+    expect(publicJobError({ code: "same_day_planning_window_closed" })).toContain("开始日期")
+    expect(publicJobError("当天已没有足够 secret")).not.toContain("secret")
+  })
+})

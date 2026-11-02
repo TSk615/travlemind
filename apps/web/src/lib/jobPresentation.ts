@@ -3,6 +3,8 @@ export interface JobPresentationInput {
   status?: string | null
   stage?: string | null
   stage_message?: string | null
+  public_error_code?: string | null
+  quota_refunded?: boolean
   progress_percent?: number | null
 }
 
@@ -53,7 +55,8 @@ export function jobPresentation(job: JobPresentationInput) {
     progress = 100
   } else if (job.status === "failed") {
     label = "这次未能完成"
-    detail = job.type === "export.pdf" ? "攻略暂时无法导出，原行程仍然保留。请稍后再试。" : "这次处理没有完成，已保存的行程不会被覆盖。可以稍后重试，或联系维护者。"
+    detail = publicJobError({ code: job.public_error_code }, job.type === "export.pdf" ? "攻略暂时无法导出，原行程仍然保留。请稍后再试。" : "这次处理没有完成，已保存的行程不会被覆盖。可以稍后重试，或联系维护者。")
+    if (job.quota_refunded) detail += " 本次未扣次数，预占的 1 次体验额度已退回。"
   } else if (job.status === "cancelled") {
     label = "已停止处理"
     detail = "已保存的内容仍然保留。需要时可以重新开始。"
@@ -87,7 +90,19 @@ export function publicJobError(error: unknown, fallback = "这次处理未能完
     not_authenticated: "登录已失效，请重新登录。",
     invalid_token: "登录已失效，请重新登录。",
     expired_trip_start_date: "出发日期已过期，请调整日期后重新生成。",
+    same_day_planning_window_closed: "当天已没有足够的生成和出发准备时间，请把开始日期改为明天或之后，再生成行程。",
+    invalid_trip_dates: "结束日期不能早于开始日期，请修改出行日期。",
+    planning_validation_failed: "生成的行程未通过完整性检查，未保存为正式行程。请重新生成；如果仍然失败，请联系维护者。",
+    job_failed: "这次处理未能完成，已有行程仍保留。请稍后重试或联系维护者。",
+    job_resume_repair_exhausted: "这次任务无法从旧进度继续，请重新生成行程。这次请求不会扣次。",
     job_resume_checkpoint_missing: "这次暂时无法继续生成，请联系维护者。"
+  }
+  // Call sites may already hold an allowlisted message. Preserve only exact
+  // known copy (optionally with our fixed refund suffix), never arbitrary text.
+  if (typeof error === "string") {
+    const suffix = " 本次未扣次数，预占的 1 次体验额度已退回。"
+    const base = error.endsWith(suffix) ? error.slice(0, -suffix.length) : error
+    if (Object.values(messages).includes(base)) return error
   }
   return messages[code] ?? fallback
 }

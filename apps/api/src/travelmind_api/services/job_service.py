@@ -9,14 +9,15 @@ from arq.connections import RedisSettings, create_pool
 from fastapi import BackgroundTasks
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from travelmind_api.api.schemas.jobs import JobResponse
 from travelmind_api.core.config import Settings, get_settings
 from travelmind_api.core.database import session_scope
 from travelmind_api.core.security import generate_identifier
-from travelmind_api.db.models import JobRecord
-from travelmind_api.services.generation_quota import consume_generation_quota, lock_generation_quota
+from travelmind_api.db.models import GenerationQuotaCharge, JobRecord, Trip
+from travelmind_api.services.generation_quota import consume_generation_quota, lock_generation_quota, refund_failed_generation
+from travelmind_api.services.job_public_error import public_job_error_code
 
 
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
@@ -99,6 +100,8 @@ def ensure_job_record_schema(session: Session) -> None:
 
 def serialize_job(job: JobRecord) -> JobResponse:
     resume_metadata = _resume_metadata(job)
+    session = object_session(job)
+    charge = session.get(GenerationQuotaCharge, job.id) if session is not None else None
     return JobResponse(
         job_id=job.id,
         status=job.status,
@@ -115,6 +118,8 @@ def serialize_job(job: JobRecord) -> JobResponse:
         timeline_json=job.timeline_json or [],
         result=job.result_json,
         error_message=job.error_message,
+        public_error_code=public_job_error_code(job.status, job.error_message),
+        quota_refunded=bool(charge is not None and charge.refunded_at is not None),
     )
 
 
@@ -147,6 +152,14 @@ def create_job(
                 session.commit()
             return existing
 
+    if job_type == "trip.generate" and trip_id:
+        # Reject an impossible saved date before reserving a credit or queueing.
+        # Idempotent repeats above must still return their original receipt.
+        from travelmind_api.services.trip_service import validate_trip_dates_for_generation
+        trip = session.get(Trip, trip_id)
+        if trip is not None:
+            validate_trip_dates_for_generation(trip.start_date, trip.end_date)
+
     if limited:
         consume_generation_quota(session, owner_user_id)
 
@@ -174,6 +187,10 @@ def create_job(
     )
     _append_timeline_entry(job, now)
     session.add(job)
+    if limited:
+        # Flush the job first so FK enforcement is valid on every database.
+        session.flush()
+        session.add(GenerationQuotaCharge(job_id=job.id, user_id=owner_user_id, created_at=now))
     if not commit:
         session.flush()
         return job
@@ -243,6 +260,11 @@ def update_job_state(
     job = session.query(JobRecord).filter(JobRecord.id == job_id).one_or_none()
     if not job:
         return None
+    if status in TERMINAL_JOB_STATUSES and job.type in {"trip.generate", "trip.refine"}:
+        if lock_generation_quota(session, job.owner_user_id):
+            # A concurrent worker may have finished/refunded since this session read.
+            session.flush()
+            session.refresh(job)
     if skip_if_terminal and job.status in TERMINAL_JOB_STATUSES:
         return job
 
@@ -274,6 +296,8 @@ def update_job_state(
     job.updated_at = now
     _append_timeline_entry(job, now)
     session.add(job)
+    if job.status == "failed":
+        refund_failed_generation(session, job)
     return job
 
 
@@ -326,11 +350,11 @@ def recover_stale_jobs(*, stale_after_seconds: int) -> list[str]:
         now = _utcnow()
         for job in stale_jobs:
             if job.attempt_count >= job.max_attempts:
-                job.status = "failed"
-                job.stage = "failed"
-                job.stage_message = "Job exceeded its maximum attempts after a stale worker lock."
-                job.error_message = job.stage_message
-                job.finished_at = now
+                message = "Job exceeded its maximum attempts after a stale worker lock."
+                update_job_state(session, job.id, status="failed", stage="failed",
+                                 stage_message=message, error_message=message,
+                                 set_finished=True, skip_if_terminal=True)
+                continue
             else:
                 job.status = "retrying"
                 job.stage = "retry_wait"

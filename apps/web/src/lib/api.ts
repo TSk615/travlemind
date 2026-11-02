@@ -86,7 +86,10 @@ export interface TripExportPayload {
   formats?: string[]
 }
 
-export interface JobRecord extends ExportJob {}
+export interface JobRecord extends ExportJob {
+  public_error_code?: string | null
+  quota_refunded?: boolean
+}
 
 export interface LlmConnectionTestResponse {
   provider_protocol: LlmProviderProtocol

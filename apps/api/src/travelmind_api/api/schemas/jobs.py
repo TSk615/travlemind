@@ -42,3 +42,5 @@ class JobResponse(BaseModel):
     timeline_json: list[JobTimelineEntry] = Field(default_factory=list)
     result: dict[str, Any] | None = None
     error_message: str | None = None
+    public_error_code: str | None = None
+    quota_refunded: bool = False

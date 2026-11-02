@@ -1897,6 +1897,7 @@ async function pollJob(jobId: string, kind: "generate" | "refine" | "export" | "
       return
     }
     if (isTerminalJobStatus(activeJob.value.status)) {
+      if (auth.user?.generation_quota) await auth.refreshUser()
       if ((kind === "generate" || kind === "refine") && activeJob.value.status === "completed") {
         const followupJobId = String(activeJob.value.result?.followup_job_id ?? "").trim()
         if (followupJobId) {
@@ -1995,7 +1996,7 @@ async function generate() {
     activeJob.value = job
     await pollJob(job.job_id, "generate")
   } catch (value) {
-    const message = getErrorMessage(value, t("tripDetail.generationFailedTitle"))
+    const message = isDebug.value ? getErrorMessage(value, t("tripDetail.generationFailedTitle")) : publicJobError(value)
     generateError.value = message
   } finally {
     generatePending.value = false
@@ -2017,7 +2018,7 @@ async function resumeFailedGeneration() {
     activeJob.value = job
     await pollJob(job.job_id, "generate")
   } catch (value) {
-    resumeGenerateError.value = getErrorMessage(value, copy.value.resumeGenerationFailedTitle)
+    resumeGenerateError.value = isDebug.value ? getErrorMessage(value, copy.value.resumeGenerationFailedTitle) : publicJobError(value)
   } finally {
     resumeGeneratePending.value = false
   }

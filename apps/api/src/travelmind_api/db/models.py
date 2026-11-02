@@ -70,6 +70,17 @@ class GenerationQuota(Base):
     used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
+class GenerationQuotaCharge(Base):
+    """One durable debit per accepted job; refund and balance commit together."""
+
+    __tablename__ = "generation_quota_charges"
+
+    job_id: Mapped[str] = mapped_column(String(32), ForeignKey("job_records.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class XhsAccountSession(Base):
     __tablename__ = "xhs_account_sessions"
 

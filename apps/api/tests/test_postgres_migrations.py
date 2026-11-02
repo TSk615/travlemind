@@ -32,7 +32,7 @@ def test_postgres_upgrade_downgrade_cycle():
         inspector.get_table_names()
     )
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006_generation_quotas"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007_generation_quota_charges"
     assert "workflow_run_id" in {column["name"] for column in inspector.get_columns("job_records")}
 
     command.downgrade(config, "base")

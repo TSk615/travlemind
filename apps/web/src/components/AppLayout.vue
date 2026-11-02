@@ -107,11 +107,11 @@ watch(() => jobGuard.activeJob?.jobId, () => {
       <div v-if="auth.user?.generation_quota" class="tm-demo-quota" role="status">
         <template v-if="locale === 'zh-CN'">
           公开体验账户 · 剩余 {{ auth.user.generation_quota.remaining }} / {{ auth.user.generation_quota.limit }} 次
-          · 所有访客共享，重新生成 / AI 调整 / 手动重试均计次。请勿填写个人隐私，已有行程对其他访客可见。
+          · 所有访客共享，重新生成 / AI 调整 / 手动重试会预占次数，最终失败自动退回。请勿填写个人隐私，已有行程对其他访客可见。
         </template>
         <template v-else>
           Public demo · {{ auth.user.generation_quota.remaining }} / {{ auth.user.generation_quota.limit }} remaining.
-          Shared by all visitors; regeneration, AI refinement and manual retries count. Do not enter private information.
+          Shared by all visitors; regeneration, AI refinement and manual retries reserve a credit; terminal failures are refunded automatically. Do not enter private information.
         </template>
       </div>
       <div class="tm-shell-body">
