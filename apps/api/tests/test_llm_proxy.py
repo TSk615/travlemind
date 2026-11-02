@@ -522,8 +522,9 @@ def test_openai_compatible_client_honors_timeout_with_injected_http_client():
     assert reply == "ok"
     timeout = captured["timeout"]
     assert isinstance(timeout, dict)
-    assert timeout["read"] == 7.5
-    assert timeout["connect"] == 7.5
+    # The shared wall-clock deadline may consume microseconds before dispatch.
+    assert 0 < timeout["read"] <= 7.5
+    assert timeout["connect"] == timeout["read"]
 
 
 def test_openai_compatible_client_logs_usage_tokens(caplog):

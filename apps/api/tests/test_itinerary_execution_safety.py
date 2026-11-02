@@ -77,7 +77,8 @@ def test_generation_rejects_a_saved_trip_that_has_expired():
 
 
 def test_same_day_plan_rejects_items_before_the_generation_window():
-    now = datetime(2026, 9, 8, 17, 0, tzinfo=timezone(timedelta(hours=8)))
+    # This legacy rule uses host-local time: keep the fixture at 17:00 on both UTC CI and local Windows.
+    now = datetime(2026, 9, 8, 17, 0).astimezone()
     request = _request(start_date=now.date(), end_date=now.date(), generated_at=now)
     payload = _payload(
         [{"title": "当天", "summary": "", "total_cost": 500, "items": [_item("小公园", "09:00", "11:00")]}]
