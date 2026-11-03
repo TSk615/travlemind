@@ -9,7 +9,14 @@ def _object(properties):
 def _strict(node):
     if isinstance(node,list):return [_strict(v) for v in node]
     if not isinstance(node,dict):return node
-    result={k:_strict(v) for k,v in node.items() if k not in {"default","title","examples"}}
+    result = {}
+    for key, value in node.items():
+        if key in {"default", "title", "examples"}:
+            continue  # Schema annotations only, never names in properties/$defs.
+        if key in {"properties", "$defs", "patternProperties"}:
+            result[key] = {name: _strict(child) for name, child in value.items()}
+        else:
+            result[key] = _strict(value)
     if "const" in result:result["enum"]=[result.pop("const")]
     if result.get("type")=="object" or "properties" in result:
         props=result.get("properties",{})
@@ -40,4 +47,25 @@ def slot_operation_schema(allowed_fields, window_days, allow_lodging):
     if allow_lodging:properties['lodging_costs']={"type":"array","items":{k:v for k,v in lodging.items() if k!='$defs'}}
     schema=_object(properties)
     if defs:schema['$defs']=defs
+    return _strict(schema)
+
+
+def full_plan_schema():
+    """The active parser is the contract, not the historical example itinerary.
+
+    Raw evidence dictionaries are source/backend-owned, not planner-authored
+    output. They stay untouched in research input and use parser defaults when
+    absent from generated output. Every remaining field retains its real type,
+    nullability, enum and bounds, including rich production-only model fields.
+    """
+    from travelmind_api.services.llm.parser import LlmPlanningPayload
+
+    schema = deepcopy(LlmPlanningPayload.model_json_schema())
+    for name, fields in {
+        "LlmBookingInfo": ("operation_evidence",),
+        "TransportServiceCandidate": ("railway_snapshot",),
+    }.items():
+        model = schema.get("$defs", {}).get(name, {})
+        for field in fields:
+            model.get("properties", {}).pop(field, None)
     return _strict(schema)

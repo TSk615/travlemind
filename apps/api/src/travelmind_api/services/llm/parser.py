@@ -212,7 +212,10 @@ def parse_planning_response(content: str) -> LlmPlanningPayload:
     try:
         return LlmPlanningPayload.model_validate(raw_payload)
     except ValidationError as exc:
-        raise PlanningResponseValidationError(str(exc)) from exc
+        from travelmind_api.services.planner_schema_diagnostics import schema_validation_issues
+        error = PlanningResponseValidationError("Planner JSON did not match the required itinerary schema")
+        error.issues = schema_validation_issues(exc)
+        raise error from None
 
 
 def _normalize_planning_payload_times(payload: dict[str, Any]) -> dict[str, Any]:

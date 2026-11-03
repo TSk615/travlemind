@@ -1,0 +1,1403 @@
+{
+  "$defs": {
+    "FlexibleWindow": {
+      "description": "Intentional unfilled time, not a POI or a verified transit route.",
+      "properties": {
+        "start_time": {
+          "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "Start Time",
+          "type": "string"
+        },
+        "end_time": {
+          "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+          "title": "End Time",
+          "type": "string"
+        },
+        "purpose": {
+          "enum": [
+            "free_time",
+            "meal_break",
+            "rest",
+            "station_buffer",
+            "contingency"
+          ],
+          "title": "Purpose",
+          "type": "string"
+        },
+        "note": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Note",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_time",
+        "end_time",
+        "purpose",
+        "note"
+      ],
+      "title": "FlexibleWindow",
+      "type": "object"
+    },
+    "LlmBookingInfo": {
+      "properties": {
+        "price_status": {
+          "default": "unknown",
+          "enum": [
+            "unknown",
+            "estimated",
+            "verified",
+            "free"
+          ],
+          "title": "Price Status",
+          "type": "string"
+        },
+        "transport_scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "outbound",
+                "return",
+                "intercity",
+                "local"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transport Scope"
+        },
+        "passenger_count": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Passenger Count"
+        },
+        "unit_price": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit Price"
+        },
+        "duration_minutes_min": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Minutes Min"
+        },
+        "check_in_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Check In Date"
+        },
+        "check_out_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Check Out Date"
+        },
+        "room_count": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Room Count"
+        },
+        "nights": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nights"
+        },
+        "early_check_in_confirmed": {
+          "default": false,
+          "title": "Early Check In Confirmed",
+          "type": "boolean"
+        },
+        "schedule_status": {
+          "default": "unknown",
+          "enum": [
+            "unknown",
+            "reference",
+            "date_specific"
+          ],
+          "title": "Schedule Status",
+          "type": "string"
+        },
+        "evidence_status": {
+          "default": "unknown",
+          "enum": [
+            "verified",
+            "referenced",
+            "conflicted",
+            "unknown"
+          ],
+          "title": "Evidence Status",
+          "type": "string"
+        },
+        "evidence_checked_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Checked At"
+        },
+        "evidence_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Reason"
+        },
+        "operation_evidence": {
+          "additionalProperties": true,
+          "title": "Operation Evidence",
+          "type": "object"
+        },
+        "price_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price Label"
+        },
+        "estimated_price": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Price"
+        },
+        "booking_required": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Booking Required"
+        },
+        "reservation_required": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reservation Required"
+        },
+        "official_booking_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Official Booking Url"
+        },
+        "booking_window": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Booking Window"
+        },
+        "reminder": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reminder"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "source_urls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Urls",
+          "type": "array"
+        },
+        "schedule_verified": {
+          "default": false,
+          "title": "Schedule Verified",
+          "type": "boolean"
+        },
+        "service_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Number"
+        },
+        "schedule_checked_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule Checked At"
+        },
+        "schedule_source_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schedule Source Url"
+        }
+      },
+      "title": "LlmBookingInfo",
+      "type": "object"
+    },
+    "LlmPlanDay": {
+      "properties": {
+        "flexible_windows": {
+          "items": {
+            "$ref": "#/$defs/FlexibleWindow"
+          },
+          "title": "Flexible Windows",
+          "type": "array"
+        },
+        "title": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        },
+        "total_cost": {
+          "default": 0.0,
+          "title": "Total Cost",
+          "type": "number"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/LlmPlanItem"
+          },
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "title",
+        "items"
+      ],
+      "title": "LlmPlanDay",
+      "type": "object"
+    },
+    "LlmPlanItem": {
+      "properties": {
+        "item_ref": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Ref"
+        },
+        "type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "start_time": {
+          "pattern": "^\\d{2}:\\d{2}$",
+          "title": "Start Time",
+          "type": "string"
+        },
+        "end_day_offset": {
+          "default": 0,
+          "maximum": 7,
+          "minimum": 0,
+          "title": "End Day Offset",
+          "type": "integer"
+        },
+        "end_time": {
+          "pattern": "^\\d{2}:\\d{2}$",
+          "title": "End Time",
+          "type": "string"
+        },
+        "location": {
+          "default": "",
+          "title": "Location",
+          "type": "string"
+        },
+        "score": {
+          "default": 0.8,
+          "title": "Score",
+          "type": "number"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "visit_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisitIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "schedule_intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScheduleIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "booking_info": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LlmBookingInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "visit_requirements": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LlmVisitRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "start_time",
+        "end_time"
+      ],
+      "title": "LlmPlanItem",
+      "type": "object"
+    },
+    "LlmTransportBookingSummary": {
+      "properties": {
+        "legs": {
+          "items": {
+            "$ref": "#/$defs/TransportLeg"
+          },
+          "title": "Legs",
+          "type": "array"
+        },
+        "service_candidates": {
+          "items": {
+            "$ref": "#/$defs/TransportServiceCandidate"
+          },
+          "title": "Service Candidates",
+          "type": "array"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "recommended_option": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recommended Option"
+        },
+        "estimated_intercity_cost": {
+          "default": 0.0,
+          "title": "Estimated Intercity Cost",
+          "type": "number"
+        },
+        "estimated_local_transport_cost": {
+          "default": 0.0,
+          "title": "Estimated Local Transport Cost",
+          "type": "number"
+        },
+        "booking_required": {
+          "default": false,
+          "title": "Booking Required",
+          "type": "boolean"
+        },
+        "official_booking_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Official Booking Url"
+        },
+        "booking_window": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Booking Window"
+        },
+        "pass_or_ticket_notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Pass Or Ticket Notes",
+          "type": "array"
+        },
+        "reminders": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reminders",
+          "type": "array"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "source_urls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Urls",
+          "type": "array"
+        }
+      },
+      "title": "LlmTransportBookingSummary",
+      "type": "object"
+    },
+    "LlmVisitRequirements": {
+      "properties": {
+        "reservation_policy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reservation Policy"
+        },
+        "timed_entry": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timed Entry"
+        },
+        "identity_required": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identity Required"
+        },
+        "advance_booking_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Advance Booking Note"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "title": "LlmVisitRequirements",
+      "type": "object"
+    },
+    "LodgingCostEstimate": {
+      "description": "Agent-selected charge, independent of whether check-in is an activity.\n\nvalidation_status/validation_notes are replaced by the backend; model\nassertions of acceptance never constitute evidence.",
+      "properties": {
+        "cost_id": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Cost Id",
+          "type": "string"
+        },
+        "hotel_name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Hotel Name",
+          "type": "string"
+        },
+        "source_url": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Source Url",
+          "type": "string"
+        },
+        "rate_plan_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rate Plan Id"
+        },
+        "check_in": {
+          "format": "date",
+          "title": "Check In",
+          "type": "string"
+        },
+        "check_out": {
+          "format": "date",
+          "title": "Check Out",
+          "type": "string"
+        },
+        "room_count": {
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Room Count",
+          "type": "integer"
+        },
+        "adults_per_room": {
+          "maximum": 12,
+          "minimum": 1,
+          "title": "Adults Per Room",
+          "type": "integer"
+        },
+        "children_ages": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Children Ages",
+          "type": "array"
+        },
+        "nights": {
+          "maximum": 366,
+          "minimum": 1,
+          "title": "Nights",
+          "type": "integer"
+        },
+        "currency": {
+          "default": "CNY",
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        },
+        "pricing_unit": {
+          "enum": [
+            "per_room_per_night",
+            "per_stay"
+          ],
+          "title": "Pricing Unit",
+          "type": "string"
+        },
+        "unit_price": {
+          "exclusiveMinimum": 0,
+          "title": "Unit Price",
+          "type": "number"
+        },
+        "estimated_total": {
+          "exclusiveMinimum": 0,
+          "title": "Estimated Total",
+          "type": "number"
+        },
+        "pricing_assumption": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Pricing Assumption",
+          "type": "string"
+        },
+        "tax_status": {
+          "default": "unknown",
+          "enum": [
+            "unknown",
+            "included",
+            "excluded"
+          ],
+          "title": "Tax Status",
+          "type": "string"
+        },
+        "validation_status": {
+          "default": "pending",
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "duplicate"
+          ],
+          "title": "Validation Status",
+          "type": "string"
+        },
+        "validation_notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Notes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cost_id",
+        "hotel_name",
+        "source_url",
+        "check_in",
+        "check_out",
+        "room_count",
+        "adults_per_room",
+        "nights",
+        "pricing_unit",
+        "unit_price",
+        "estimated_total",
+        "pricing_assumption"
+      ],
+      "title": "LodgingCostEstimate",
+      "type": "object"
+    },
+    "ScheduleIntent": {
+      "description": "Planner intent, not a source-verification badge or an automatic retimer.",
+      "properties": {
+        "purpose": {
+          "anyOf": [
+            {
+              "enum": [
+                "visit",
+                "transfer",
+                "station_buffer",
+                "meal_break",
+                "free_time",
+                "lodging",
+                "luggage",
+                "mixed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Purpose"
+        },
+        "buffer_minutes": {
+          "anyOf": [
+            {
+              "maximum": 1440,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Buffer Minutes"
+        },
+        "flexible_minutes": {
+          "anyOf": [
+            {
+              "maximum": 1440,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flexible Minutes"
+        },
+        "meal_minutes": {
+          "anyOf": [
+            {
+              "maximum": 1440,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meal Minutes"
+        },
+        "transfer_minutes": {
+          "anyOf": [
+            {
+              "maximum": 1440,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transfer Minutes"
+        },
+        "luggage_action": {
+          "anyOf": [
+            {
+              "enum": [
+                "store",
+                "collect",
+                "carry"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Luggage Action"
+        },
+        "luggage_location": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Luggage Location"
+        }
+      },
+      "title": "ScheduleIntent",
+      "type": "object"
+    },
+    "SubvisitIntent": {
+      "properties": {
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "mode": {
+          "default": "unknown",
+          "enum": [
+            "entry",
+            "exterior",
+            "area_walk",
+            "unknown"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "SubvisitIntent",
+      "type": "object"
+    },
+    "TransportLeg": {
+      "properties": {
+        "scope": {
+          "enum": [
+            "outbound",
+            "return",
+            "intercity",
+            "local"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "origin": {
+          "title": "Origin",
+          "type": "string"
+        },
+        "destination": {
+          "title": "Destination",
+          "type": "string"
+        },
+        "departure_date": {
+          "format": "date",
+          "title": "Departure Date",
+          "type": "string"
+        },
+        "arrival_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Arrival Date"
+        },
+        "mode": {
+          "default": "",
+          "title": "Mode",
+          "type": "string"
+        },
+        "passenger_count": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Passenger Count",
+          "type": "integer"
+        },
+        "estimated_total": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Total"
+        },
+        "unit_price": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit Price"
+        },
+        "duration_minutes_min": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Minutes Min"
+        },
+        "duration_minutes_max": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Minutes Max"
+        },
+        "price_status": {
+          "default": "unknown",
+          "enum": [
+            "unknown",
+            "estimated",
+            "verified"
+          ],
+          "title": "Price Status",
+          "type": "string"
+        },
+        "pricing_note": {
+          "default": "",
+          "title": "Pricing Note",
+          "type": "string"
+        },
+        "source_urls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Urls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "scope",
+        "origin",
+        "destination",
+        "departure_date"
+      ],
+      "title": "TransportLeg",
+      "type": "object"
+    },
+    "TransportServiceCandidate": {
+      "properties": {
+        "scope": {
+          "enum": [
+            "outbound",
+            "return",
+            "intercity"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "service_number": {
+          "title": "Service Number",
+          "type": "string"
+        },
+        "origin": {
+          "title": "Origin",
+          "type": "string"
+        },
+        "destination": {
+          "title": "Destination",
+          "type": "string"
+        },
+        "departure_date": {
+          "format": "date",
+          "title": "Departure Date",
+          "type": "string"
+        },
+        "departure_time": {
+          "title": "Departure Time",
+          "type": "string"
+        },
+        "arrival_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Arrival Date"
+        },
+        "arrival_time": {
+          "title": "Arrival Time",
+          "type": "string"
+        },
+        "duration_minutes": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Minutes"
+        },
+        "fare_class": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fare Class"
+        },
+        "fare_amount": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fare Amount"
+        },
+        "price_status": {
+          "default": "unknown",
+          "enum": [
+            "unknown",
+            "estimated",
+            "verified"
+          ],
+          "title": "Price Status",
+          "type": "string"
+        },
+        "availability_status": {
+          "default": "unknown",
+          "title": "Availability Status",
+          "type": "string"
+        },
+        "schedule_status": {
+          "default": "reference",
+          "enum": [
+            "unknown",
+            "reference",
+            "date_specific"
+          ],
+          "title": "Schedule Status",
+          "type": "string"
+        },
+        "schedule_checked_at": {
+          "title": "Schedule Checked At",
+          "type": "string"
+        },
+        "source_url": {
+          "title": "Source Url",
+          "type": "string"
+        },
+        "evidence_status": {
+          "default": "unknown",
+          "enum": [
+            "verified",
+            "referenced",
+            "conflicted",
+            "unknown"
+          ],
+          "title": "Evidence Status",
+          "type": "string"
+        },
+        "evidence_checked_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Checked At"
+        },
+        "evidence_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Reason"
+        },
+        "railway_snapshot": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Railway Snapshot"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "scope",
+        "mode",
+        "service_number",
+        "origin",
+        "destination",
+        "departure_date",
+        "departure_time",
+        "arrival_time",
+        "schedule_checked_at",
+        "source_url"
+      ],
+      "title": "TransportServiceCandidate",
+      "type": "object"
+    },
+    "VisitIntent": {
+      "properties": {
+        "mode": {
+          "default": "unknown",
+          "enum": [
+            "entry",
+            "exterior",
+            "area_walk",
+            "unknown"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "components": {
+          "items": {
+            "$ref": "#/$defs/SubvisitIntent"
+          },
+          "maxItems": 16,
+          "title": "Components",
+          "type": "array"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "uncertainties": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Uncertainties",
+          "type": "array"
+        }
+      },
+      "title": "VisitIntent",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "lodging_costs": {
+      "items": {
+        "$ref": "#/$defs/LodgingCostEstimate"
+      },
+      "title": "Lodging Costs",
+      "type": "array"
+    },
+    "summary": {
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    },
+    "total_budget_estimate": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Total Budget Estimate"
+    },
+    "days": {
+      "items": {
+        "$ref": "#/$defs/LlmPlanDay"
+      },
+      "minItems": 1,
+      "title": "Days",
+      "type": "array"
+    },
+    "risks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Risks",
+      "type": "array"
+    },
+    "transport_booking_summary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LlmTransportBookingSummary"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "summary",
+    "days"
+  ],
+  "title": "LlmPlanningPayload",
+  "type": "object"
+}

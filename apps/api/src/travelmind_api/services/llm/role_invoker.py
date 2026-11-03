@@ -93,8 +93,14 @@ class OpenAICompatibleRoleInvoker:
         # their existing protocols. Unsupported protocols are not modified.
         client.json_object_mode = (invocation.role_name == "itinerary_planner"
                                    and str(invocation.endpoint.provider_protocol).lower() in {"openai", "newapi"})
-        client.structured_output_schema = (invocation.input_payload.get("structured_output_schema")
-                                           if client.json_object_mode else None)
+        input_payload = dict(invocation.input_payload)
+        client.structured_output_schema = None
+        if client.json_object_mode:
+            from travelmind_api.services.planner_output_schema import full_plan_schema
+            client.structured_output_schema = input_payload.get("structured_output_schema") or full_plan_schema()
+            # Replace the old hand-written sample (which can drift from runtime
+            # models). Slot repairs keep their own narrowly authorized schema.
+            input_payload["output_schema"] = client.structured_output_schema
         client.request_attempt_limit = max(int(invocation.max_request_attempts), 1)
         client.request_deadline_seconds = float(invocation.endpoint.timeout_seconds)
         request_id = generate_identifier("llmreq")
@@ -102,7 +108,7 @@ class OpenAICompatibleRoleInvoker:
             {"role": "system", "content": invocation.system_prompt + ("\n只输出一个完整的 JSON 对象，不输出 Markdown 或额外解释。" if client.json_object_mode else "")},
             {
                 "role": "user",
-                "content": json.dumps(dict(invocation.input_payload), ensure_ascii=False),
+                "content": json.dumps(input_payload, ensure_ascii=False),
             },
         ]
         started = time.perf_counter()

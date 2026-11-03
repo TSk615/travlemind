@@ -59,8 +59,9 @@ def decode_plan(orchestrator, result, transport):
         return {}, {"code": exc.code, **({"offset": exc.offset} if exc.offset is not None else {})}
     try:
         plan = parse_planning_response(json.dumps(raw, ensure_ascii=False))
-    except ValueError:
-        return {}, {"code": "schema_validation_failed"}
+    except ValueError as exc:
+        from travelmind_api.services.planner_schema_diagnostics import schema_validation_issues
+        return {}, {"code": "schema_validation_failed", "issues": schema_validation_issues(exc)}
     return orchestrator._normalize_draft(plan, transport).model_dump(mode="json"), None
 
 
