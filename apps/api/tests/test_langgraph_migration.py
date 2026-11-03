@@ -674,6 +674,17 @@ def test_langgraph_orchestrator_repairs_one_invalid_draft(monkeypatch):
                     invalid = json.loads(content)
                     invalid["days"][0]["items"][1]["start_time"] = "10:30"
                     content = json.dumps(invalid)
+                elif invocation.input_payload.get("repair_mode") == "conflict-days.v2":
+                    # The fixture follows the coordinated, bounded day protocol.
+                    reference = json.loads(content)
+                    contract = invocation.input_payload["repair_contract"]
+                    patch = {"day_replacements": {str(di): {**reference["days"][di-1], "flexible_windows": []}
+                                                  for di in contract["allowed_days"]}}
+                    if contract["window_only_days"]:
+                        patch["window_annotations"] = {
+                            di: {gap["gap_id"]: None for gap in gaps}
+                            for di, gaps in invocation.input_payload["free_gap_candidates"].items()}
+                    content = json.dumps(patch)
                 elif invocation.input_payload.get("repair_mode") == "slot-patch.v1":
                     # The fixture model follows the new local patch wire contract.
                     reference = json.loads(content)

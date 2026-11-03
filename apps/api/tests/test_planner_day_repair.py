@@ -63,3 +63,50 @@ def test_single_or_soft_or_explicit_field_only_targets_do_not_expand_scope():
     assert not isinstance(prepare_slot_repair(payload),ConflictDayRepair)
     payload['repair_targets']=payload['repair_targets'][:1]
     assert not isinstance(prepare_slot_repair(payload),ConflictDayRepair)
+
+def test_combined_timing_and_window_errors_keep_window_only_activities_fixed():
+    original,payload=fixture()
+    original['days'][0]['flexible_windows']=[{'start_time':'10:30','end_time':'12:00','purpose':'rest','note':'冲突'}]
+    payload['repair_targets']=[{'item_ref':'d4i1'},{'item_ref':'d4i2'}]
+    payload['validation_errors']=['转场出行窗口短于已提供的最短耗时']
+    c=prepare_slot_repair(payload)
+    assert c.days==frozenset({4}) and set(c.window_contract.gaps)=={'1'}
+    patch={'day_replacements':{'4':deepcopy(original['days'][3])},'window_annotations':{'1':{g['gap_id']:None for g in c.window_contract.gaps['1']}}}
+    patch['day_replacements']['4']['title']='协调后的活动'
+    merged,audit=c.apply(json.dumps(patch))
+    assert merged['days'][0]['items']==original['days'][0]['items']
+    assert merged['days'][0]['flexible_windows']==[]
+    assert merged['days'][1]==original['days'][1] and merged['days'][2]==original['days'][2] and merged['days'][4]==original['days'][4]
+    assert audit['window_only_days']==[1] and audit['authorized_days']==[4]
+
+
+def test_replanned_days_cannot_reintroduce_separate_overlapping_clock_annotations():
+    original,payload=fixture();c=prepare_slot_repair(payload)
+    patch={'day_replacements':{str(di):deepcopy(original['days'][di-1]) for di in c.days}}
+    patch['day_replacements']['4']['flexible_windows']=[{'start_time':'10:00','end_time':'11:00','purpose':'rest','note':'不能编造重叠留白'}]
+    with pytest.raises(SlotRepairError,match='replanned_day_windows_must_be_empty'):c.apply(json.dumps(patch))
+
+
+def test_model_item_ref_cannot_alias_a_locked_transport_item():
+    original,payload=fixture();c=prepare_slot_repair(payload)
+    patch={'day_replacements':{str(di):deepcopy(original['days'][di-1]) for di in c.days}}
+    patch['day_replacements']['1']['items'][1]['item_ref']='d1i0'
+    patch['day_replacements']['4']['title']='修复'
+    merged,_=c.apply(json.dumps(patch));refs=[i['item_ref'] for d in merged['days'] for i in d['items']]
+    assert len(refs)==len(set(refs))
+    assert merged['days'][0]['items'][0]==original['days'][0]['items'][0]
+
+def test_mixed_non_timing_anchor_repairs_only_core_day_and_fixed_gap_metadata():
+    original,payload=fixture();payload['repair_targets']=[{'item_ref':'d4i1'}]
+    payload['validation_errors']=['地点信息需要修正；留白重叠']
+    c=prepare_slot_repair(payload)
+    assert not isinstance(c,ConflictDayRepair)
+    assert c.payload['structured_output_schema']['properties']['day_updates']['minItems']==2
+
+
+def test_explicit_field_repair_does_not_generate_a_second_clock_schedule():
+    _,payload=fixture();payload['repair_targets']=[{'item_ref':'d4i1','allowed_fields':['note']}]
+    c=prepare_slot_repair(payload)
+    assert not isinstance(c,ConflictDayRepair)
+    schema=c.payload['structured_output_schema']
+    assert schema['properties']['day_updates']['items']['properties']['flexible_windows']['maxItems']==0

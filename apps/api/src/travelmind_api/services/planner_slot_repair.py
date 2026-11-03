@@ -212,6 +212,13 @@ def prepare_slot_repair(payload: dict[str, Any]) -> SlotRepairContract | None:
                                "unchanged_fields_are_server_preserved": True}
     from travelmind_api.services.planner_output_schema import slot_operation_schema
     wire["structured_output_schema"] = slot_operation_schema(allowed, frozenset(window_days), allow_lodging)
+    if window_days:
+        # While slots/ledger are changing, old clock annotations are not a
+        # second independently authored schedule. The model explicitly omits
+        # these optional annotations; real activities remain fully validated.
+        updates_schema = wire["structured_output_schema"]["properties"]["day_updates"]
+        updates_schema["minItems"] = updates_schema["maxItems"] = len(set(window_days))
+        updates_schema["items"]["properties"]["flexible_windows"]["maxItems"] = 0
     wire["output_schema"] = wire["structured_output_schema"]
-    wire["repair_instruction"] = "只输出符合 structured_output_schema 的 JSON 局部字段操作：item_operations 每项只修改一个 item_ref 的一个 field，value 为新值。没有变化的字段不要输出；day_updates 没有授权日期时必须为空数组。不重写整份行程，同一 item_ref+field 不重复；合并后仍执行完整结构与可执行性校验。"
+    wire["repair_instruction"] = "只输出符合 structured_output_schema 的 JSON 局部字段操作：item_operations 每项只修改一个 item_ref 的一个 field，value 为新值。没有变化的字段不要输出；day_updates 没有授权日期时必须为空数组。不重写整份行程，同一 item_ref+field 不重复；修复留白的 day_updates.flexible_windows 必须为空数组，明确移除不可靠的可选标注，不另填冲突时钟。合并后仍执行完整结构与可执行性校验。"
     return SlotRepairContract(deepcopy(original), wire, slots, allowed, frozenset(window_days), allow_lodging)

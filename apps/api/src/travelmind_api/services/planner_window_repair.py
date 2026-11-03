@@ -69,7 +69,7 @@ class FreeGapRepair:
             for gap in gaps:
                 choice=values[gap['gap_id']]
                 if choice is None:continue
-                if not isinstance(choice,dict) or set(choice)!={'purpose','note'} or choice['purpose'] not in {'free_time','meal_break','rest','station_buffer','contingency'} or not isinstance(choice['note'],str) or not 1<=len(choice['note'].strip())<=1000:
+                if not isinstance(choice,dict) or set(choice)!={'purpose','note'} or not isinstance(choice['purpose'],str) or choice['purpose'] not in {'free_time','meal_break','rest','station_buffer','contingency'} or not isinstance(choice['note'],str) or not 1<=len(choice['note'].strip())<=1000:
                     raise SlotRepairError('invalid_gap_annotation')
                 windows.append({'start_time':gap['start_time'],'end_time':gap['end_time'],**choice})
             merged['days'][int(di)-1]['flexible_windows']=windows
