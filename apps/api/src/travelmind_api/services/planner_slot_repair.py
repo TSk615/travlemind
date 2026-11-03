@@ -197,6 +197,13 @@ def prepare_slot_repair(payload: dict[str, Any]) -> SlotRepairContract | None:
     allow_lodging = payload.get("repair_lodging_costs") is True
     if not allowed and not window_days and not allow_lodging:
         return None  # Global structural failures keep the full-output repair contract.
+    if not allowed and window_days and not allow_lodging:
+        from travelmind_api.services.planner_window_repair import prepare_free_gap_repair
+        return prepare_free_gap_repair(payload, original, window_days)
+    from travelmind_api.services.planner_day_repair import prepare_conflict_day_repair
+    day_repair = prepare_conflict_day_repair(payload, original, slots, targets)
+    if day_repair is not None:
+        return day_repair
     wire = deepcopy(payload)
     wire["previous_itinerary"] = view
     wire["repair_mode"] = VERSION

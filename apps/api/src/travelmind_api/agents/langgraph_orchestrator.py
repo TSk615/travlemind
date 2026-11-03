@@ -667,8 +667,8 @@ class LangGraphOrchestrator(PlanningCore):
         slot_repair = prepare_slot_repair(input_payload) if role_name == "itinerary_planner" else None
         if slot_repair is not None:
             input_payload = slot_repair.payload
-            role_config = replace(role_config, system_prompt=SLOT_REPAIR_SYSTEM_PROMPT,
-                                  prompt_version=role_config.prompt_version + ".slot-patch.v1")
+            role_config = replace(role_config, system_prompt=getattr(slot_repair, "system_prompt", SLOT_REPAIR_SYSTEM_PROMPT),
+                                  prompt_version=role_config.prompt_version + "." + getattr(slot_repair, "version", "slot-patch.v1"))
         endpoint = self._workflow_llm_configs[role_name]
         runtime = self._runtime()
         runtime.emit_progress(
