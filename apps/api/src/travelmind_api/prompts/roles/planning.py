@@ -18,7 +18,7 @@ ATTRACTION_SPECIALIST_PROMPT_VERSION = "helloagents.attraction_specialist.v3"
 FOOD_SPECIALIST_PROMPT_VERSION = "helloagents.food_specialist.v1"
 WEATHER_SPECIALIST_PROMPT_VERSION = "helloagents.weather_specialist.v12"
 HOTEL_SPECIALIST_PROMPT_VERSION = "helloagents.hotel_specialist.v12"
-TRANSPORT_SPECIALIST_PROMPT_VERSION = "helloagents.transport_specialist.v8"
+TRANSPORT_SPECIALIST_PROMPT_VERSION = "helloagents.transport_specialist.v8-auto-v2"
 ITINERARY_PLANNER_PROMPT_VERSION = "helloagents.itinerary_planner.v17"
 IMAGE_CURATOR_PROMPT_VERSION = "helloagents.image_curator.v1"
 IMAGE_QUERY_PLANNER_PROMPT_VERSION = "helloagents.image_query_planner.v1"
@@ -400,6 +400,9 @@ def build_hotel_specialist_prompt() -> RolePromptSpec:
 def build_transport_specialist_prompt() -> RolePromptSpec:
     system_prompt = (
         "你是 TravelMind 交通专家。只返回一个 transport-guidance JSON 对象。"
+        "日期硬约束：行程结束日期包含返程到达，不是仅在当天出发。返程列车或航班必须在latest_return_arrival_date当日或之前抵达出发城市，填写真实arrival_date。末日出发次日到达的夜车不适用；应查询当天更早能按期到达的车次或飞机。不得延长行程日期、把跨日到达改成当日或篡改来源时刻来过检。"
+        "transport_mode=auto 表示由你选择，不是铁路优先；mixed 表示用户接受组合交通。跨城自动模式在原有工具和时间预算内先比较铁路与飞机；不适用的方式说明原因，不为凑比较反复搜索。比较全体旅客费用、门到门耗时（接驳、安检候车、行李）、出发返回日期、预算与节奏，给出推荐及取舍；不按距离阈值机械选择，也不要因只有铁路专用工具就排除飞机。尊重用户显式 rail/flight/car/walking 偏好，无法满足时说明并给替代建议。"
+        "飞机可通过搜索及读取航空公司、机场或可信OTA详情获取参考。没有实时航班票务接口；网页参考不等于实时余票或已确认机票。没有可靠日期票价时金额留null并标unknown，不编造航班、机票价格或可售状态。"
         "你会收到 poi_collection；如果输入 payload 中有 tool_results，请优先使用其中的搜索与抓取结果；如果没有 tool_results，并且当前模型具备联网搜索能力，请直接使用模型自身搜索能力核对跨城交通、票价区间、候选班次、官方购票入口和本地移动策略。"
         "请用 poi_collection 判断是否跨城、跨区、转场压力、合理串联方式和交通预算约束。"
         "提供数字费用估算时，使用和用户预算一致的隐含币种。交通可以占预算大部分；除非用户明确指定，不得自行设定交通或住宿占比上限；百分比交由预算账本计算。"

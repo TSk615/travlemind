@@ -135,7 +135,7 @@ def normalize_intake_draft(payload: dict[str, Any] | None) -> dict[str, Any]:
     pace = _normalize_text(source.get("pace")).lower()
     base["pace"] = pace if pace in {"slow", "balanced", "packed"} else ""
     transport = _normalize_text(source.get("transport_mode")).lower()
-    base["transport_mode"] = transport if transport in {"rail", "car", "walking", "mixed"} else ""
+    base["transport_mode"] = transport if transport in {"auto", "rail", "flight", "car", "walking", "mixed"} else ""
     return base
 
 

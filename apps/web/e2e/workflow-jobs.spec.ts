@@ -172,10 +172,15 @@ test("generation remains recoverable after the originating page closes", async (
 
   const originatingPage = await context.newPage()
   await originatingPage.goto("/trips/new")
+  await expect(originatingPage.getByLabel("交通方式", { exact: true })).toHaveValue("auto")
+  await expect(originatingPage.getByLabel("交通方式", { exact: true }).getByRole("option", { name: "飞机", exact: true })).toHaveCount(1)
+  await originatingPage.getByLabel("交通方式", { exact: true }).selectOption("flight")
+  await expect(originatingPage.getByLabel("交通方式", { exact: true })).toHaveValue("flight")
+  await originatingPage.getByLabel("交通方式", { exact: true }).selectOption("auto")
   await originatingPage.getByRole("button", { name: "创建并生成", exact: true }).click()
   await expect(originatingPage).toHaveURL(/\/trips\/trip_workflow_e2e\?.*jobId=job_generate_e2e/)
   await expect.poll(() => jobPolls).toBeGreaterThan(0)
-  expect(createPayload).toMatchObject({ destination: "汕头", pace: "balanced", transport_mode: "rail" })
+  expect(createPayload).toMatchObject({ destination: "汕头", pace: "balanced", transport_mode: "auto" })
 
   const durableUrl = originatingPage.url()
   await originatingPage.close()

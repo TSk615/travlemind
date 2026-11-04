@@ -416,8 +416,8 @@ def _resolve_job_agent_provider(*, user: User | None, job: JobRecord, existing_r
 def _emit_agent_progress(job_id: str, role_key: str, role_title: str, role_description: str, progress_percent: int) -> None:
     _transition_job(
         job_id,
-        stage="route_planning",
-        stage_message=f"{role_title}: {role_description}",
+        stage=f"role.{role_key}" if ":" not in role_key else "role." + role_key.replace(":", "."),
+        stage_message=role_title,
         progress_percent=progress_percent,
     )
 
@@ -751,9 +751,12 @@ def _process_trip_generation(job: JobExecution) -> dict:
         if provider != AGENT_PROVIDER_LANGGRAPH and callable(set_resume_checkpoint) and isinstance(resume_checkpoint, dict):
             set_resume_checkpoint(resume_checkpoint)
 
-        _transition_job(job.id, stage="source_search", stage_message="Collecting grounded source inputs.", progress_percent=25)
-        _transition_job(job.id, stage="source_scoring", stage_message="Scoring grounded source inputs.", progress_percent=45)
-        _transition_job(job.id, stage="route_planning", stage_message="Drafting the itinerary route.", progress_percent=72)
+        if provider == AGENT_PROVIDER_LANGGRAPH:
+            _transition_job(job.id, stage="source_search", stage_message="正在准备旅行信息查询。", progress_percent=10)
+        else:
+            _transition_job(job.id, stage="source_search", stage_message="Collecting grounded source inputs.", progress_percent=25)
+            _transition_job(job.id, stage="source_scoring", stage_message="Scoring grounded source inputs.", progress_percent=45)
+            _transition_job(job.id, stage="route_planning", stage_message="Drafting the itinerary route.", progress_percent=72)
         try:
             result = orchestrator.plan_trip(request)
         except (JobCancelledError, WorkflowCancelled) as exc:

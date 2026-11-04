@@ -683,7 +683,7 @@ const pendingImageDisplayTitle = computed(() => (locale.value === "zh-CN" ? "正
 const pendingImageDisplayMessage = computed(() =>
   locale.value === "zh-CN"
     ? "攻略已生成，正在补充可追溯的景点实景图。"
-    : "The itinerary is generated. We are adding images from Trip.com, Pixabay, and Pexels, then the full guide will appear automatically."
+    : "The itinerary is ready to read. Images are being added separately; you do not need to wait."
 )
 const imageEnrichmentCounts = computed(() => {
   const counts = { pending: 0, completed: 0, failed: 0, skipped: 0 }
@@ -1901,6 +1901,8 @@ async function pollJob(jobId: string, kind: "generate" | "refine" | "export" | "
       if ((kind === "generate" || kind === "refine") && activeJob.value.status === "completed") {
         const followupJobId = String(activeJob.value.result?.followup_job_id ?? "").trim()
         if (followupJobId) {
+          // The itinerary is already saved; images must not delay showing it.
+          await loadTrip(false)
           await pollJob(followupJobId, "image_enrich")
           return
         }

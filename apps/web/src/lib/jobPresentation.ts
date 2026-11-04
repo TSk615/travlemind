@@ -6,6 +6,7 @@ export interface JobPresentationInput {
   public_error_code?: string | null
   quota_refunded?: boolean
   progress_percent?: number | null
+  timeline_json?: Array<{ stage?: string | null; status?: string | null; recorded_at?: string | null }>
 }
 
 const stages: Record<string, string> = {
@@ -44,7 +45,37 @@ export function jobTitle(type?: string | null): string {
   return ({ "trip.generate": "生成行程", "trip.refine": "调整行程", "trip.image_enrich": "补充景点图片", "export.pdf": "导出旅行攻略", "image.generate": "生成图片" } as Record<string, string>)[type ?? ""] ?? "处理进度"
 }
 
+type ResearchState = "waiting" | "running" | "completed" | "degraded" | "skipped"
+const researchNames: Record<string, string> = {
+  poi_specialist: "景点", weather_specialist: "天气", hotel_specialist: "住宿", transport_specialist: "交通"
+}
+
+export function researchProgress(job: JobPresentationInput) {
+  if (job.status !== "running" || (job.type !== "trip.generate" && job.type !== "trip.refine")) return null
+  const current = /^role\.(poi_specialist|weather_specialist|hotel_specialist|transport_specialist)(?:\.(completed|degraded|skipped))?$/.exec(job.stage ?? "")
+  if (!current) return null
+  const group = ["poi_specialist", "weather_specialist"].includes(current[1])
+    ? ["poi_specialist", "weather_specialist"] : ["hotel_specialist", "transport_specialist"]
+  const states: Record<string, ResearchState> = {}
+  for (const event of [...(job.timeline_json ?? []), { stage: job.stage }]) {
+    if (event.status === "retrying" || event.stage === "retry_wait" || event.stage === "role.brief_parser") {
+      for (const key of Object.keys(states)) delete states[key]
+    }
+    const match = /^role\.(poi_specialist|weather_specialist|hotel_specialist|transport_specialist)(?:\.(completed|degraded|skipped))?$/.exec(event.stage ?? "")
+    if (match) states[match[1]] = (match[2] ?? "running") as ResearchState
+  }
+  const labels: Record<ResearchState, string> = { waiting: "等待查询", running: "查询中", completed: "已完成", degraded: "暂不可用", skipped: "无需查询" }
+  const branches = group.map(key => ({ name: researchNames[key], status: states[key] ?? "waiting", statusLabel: labels[states[key] ?? "waiting"] }))
+  const unfinished = branches.filter(branch => branch.status === "waiting" || branch.status === "running")
+  const finished = branches.filter(branch => branch.status !== "waiting" && branch.status !== "running")
+  const label = unfinished.length === 0 ? "参考信息已整理，正在准备下一步"
+    : finished.length ? `${finished.map(branch => branch.name + branch.statusLabel).join("，")}，正在查询${unfinished.map(branch => branch.name).join("和")}`
+    : `正在查询${unfinished.map(branch => branch.name).join("和")}`
+  return { label, branches }
+}
+
 export function jobPresentation(job: JobPresentationInput) {
+  const research = researchProgress(job)
   let label: string
   let detail: string
   let progress: number | null = typeof job.progress_percent === "number" && Number.isFinite(job.progress_percent)
@@ -68,16 +99,16 @@ export function jobPresentation(job: JobPresentationInput) {
     detail = "请求已收到，轮到后会开始处理。"
   } else {
     const role = roles.find(([pattern]) => pattern.test(job.stage ?? "") || pattern.test(job.stage_message ?? ""))
-    label = job.type === "trip.image_enrich" ? "正在补充景点图片"
+    label = job.type === "trip.image_enrich" ? "行程已生成，正在补充景点图片"
       : job.type === "export.pdf" ? "正在整理导出文件"
-      : role?.[1] ?? stages[job.stage ?? ""]
+      : research?.label ?? role?.[1] ?? stages[job.stage ?? ""]
         ?? [...Object.values(stages), ...roles.map(([, value]) => value)].find(value => value === job.stage_message)
         ?? "正在处理，请稍候"
     detail = job.type === "trip.image_enrich" ? "正在查找合适的配图，已有行程可以继续查看。"
       : job.type === "export.pdf" ? "文件准备好后，这里会显示下载入口。"
       : "复杂行程可能需要一些时间，离开页面后仍会继续处理。"
   }
-  return { title: jobTitle(job.type), label, detail, progress }
+  return { title: jobTitle(job.type), label, detail, progress, branches: research?.branches ?? [] }
 }
 
 // Public copy is an allowlist rather than the raw upstream exception text.

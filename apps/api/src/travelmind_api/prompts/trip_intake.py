@@ -48,7 +48,7 @@ def build_trip_intake_system_prompt() -> str:
         "Return one valid JSON object only. No markdown, no prose outside JSON. "
         "Update the full draft based on the latest user message and the existing draft. "
         "If title is still empty and origin/destination are available, generate a practical title. "
-        "Keep pace limited to slow, balanced, or packed. Keep transport_mode limited to rail, car, walking, or mixed. "
+        "Keep pace limited to slow, balanced, or packed. Keep transport_mode limited to auto, rail, flight, car, walking, or mixed. Use auto when the user asks you to choose; use flight for an explicit air-travel preference. "
         "Normalize interests into a list of short phrases. "
         f"Use this output schema shape: {json.dumps(INTAKE_OUTPUT_SCHEMA, ensure_ascii=True)}"
     )

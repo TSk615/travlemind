@@ -1,0 +1,20 @@
+--- a/apps/api/src/travelmind_api/services/llm/research_agent.py
++++ b/apps/api/src/travelmind_api/services/llm/research_agent.py
+@@ -4,0 +5 @@
++from travelmind_api.services.transport_selection import prefer_rail_followup
+@@ -175 +176,2 @@
+-            if railway_available and review and not page_missing:
++            if (railway_available and review and not page_missing
++                    and prefer_rail_followup(invocation.input_payload)):
+--- a/apps/api/src/travelmind_api/services/planning/research_completion.py
++++ b/apps/api/src/travelmind_api/services/planning/research_completion.py
+@@ -7,0 +8,2 @@
++
++from travelmind_api.services.transport_selection import transport_candidate_fits_dates
+@@ -106 +108,2 @@
+-            candidates.append(candidate.model_dump(mode="json"))
++            if transport_candidate_fits_dates(candidate, start, end):
++                candidates.append(candidate.model_dump(mode="json"))
+@@ -141 +144 @@
+-        "住宿优先落实1家；交通优先每个必要方向1个候选。"
++        "住宿优先落实1家；交通优先每个必要方向1个候选，返程须在行程结束日期内到达；末日夜车次日才到时改查更早班次或飞机。"

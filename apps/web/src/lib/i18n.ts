@@ -49,7 +49,7 @@ const messages: Record<LocaleCode, Record<string, unknown>> = {
       noItineraryYet: "No itinerary generated yet.",
       daysLabel: "Day {day}: {title}",
       pace: { slow: "Slow", balanced: "Balanced", packed: "Packed" },
-      transport: { rail: "Rail", car: "Car", walking: "Walking", mixed: "Mixed" }
+      transport: { auto: "Automatic (compare rail and flights)", flight: "Flight", rail: "Rail", car: "Car", walking: "Walking", mixed: "Mixed" }
     },
     home: {
       kicker: "MVP workspace",
@@ -219,7 +219,7 @@ const messages: Record<LocaleCode, Record<string, unknown>> = {
       noItineraryYet: "尚未生成行程。",
       daysLabel: "第 {day} 天：{title}",
       pace: { slow: "慢节奏", balanced: "均衡", packed: "紧凑" },
-      transport: { rail: "铁路", car: "自驾", walking: "步行", mixed: "混合" }
+      transport: { auto: "自动选择（比较铁路 / 飞机）", flight: "飞机", rail: "铁路", car: "自驾", walking: "步行", mixed: "混合" }
     },
     home: {
       kicker: "MVP 工作台",

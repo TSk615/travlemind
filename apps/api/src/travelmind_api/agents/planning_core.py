@@ -1,6 +1,8 @@
 """Framework-neutral deterministic travel-planning business rules."""
 from __future__ import annotations
 
+from travelmind_api.services.transport_selection import transport_selection_policy, constrain_transport_dates
+
 import logging
 import json
 import re
@@ -625,6 +627,7 @@ class PlanningCore(PlanningPayloadMixin, PlanningResultBuilderMixin, StubOrchest
         }
 
     def _build_transport_research_payload(self, request: PlanningRequest, brief: PlanningBrief, *, poi_collection: dict[str, Any] | None = None) -> dict[str, Any]:
+        same_city = normalize_identity(request.origin) == normalize_identity(request.destination)
         return {
             "trip_request": self._build_trip_payload(request),
             "planning_brief": brief.model_dump(mode="json"),
@@ -636,6 +639,9 @@ class PlanningCore(PlanningPayloadMixin, PlanningResultBuilderMixin, StubOrchest
                 "end_date": request.end_date.isoformat(),
                 "trip_days": max(1, (request.end_date - request.start_date).days + 1),
                 "transport_mode": request.transport_mode,
+                "latest_return_arrival_date": request.end_date.isoformat(),
+                "trip_dates_include_return_arrival": True,
+                "selection_policy": transport_selection_policy(request.transport_mode, same_city=same_city),
                 "travelers": request.travelers,
                 "pace": request.pace,
             },
@@ -650,6 +656,7 @@ class PlanningCore(PlanningPayloadMixin, PlanningResultBuilderMixin, StubOrchest
                     "departure_date",
                     "departure_time",
                     "arrival_time",
+                    "arrival_date",
                     "duration_minutes",
                     "fare_amount",
                     "schedule_checked_at",
@@ -1975,7 +1982,7 @@ class PlanningCore(PlanningPayloadMixin, PlanningResultBuilderMixin, StubOrchest
             return "car rental, toll, parking, and airport or station transfer costs"
         if normalized in {"walking", "walk"}:
             return "walkable area clustering with realistic transit backup options"
-        if normalized in {"mixed", "any", "flexible", ""}:
+        if normalized in {"auto", "mixed", "any", "flexible", ""}:
             return "a practical comparison of high-speed rail and scheduled flights, including exact stations or airports and local transfers"
         return "intercity arrival transfers and practical local transit options"
 
@@ -2614,6 +2621,7 @@ class PlanningCore(PlanningPayloadMixin, PlanningResultBuilderMixin, StubOrchest
         transport: TransportGuidance,
         request: PlanningRequest,
     ) -> TransportGuidance:
+        transport = constrain_transport_dates(transport, request.start_date, request.end_date)
         expected = {
             "outbound": (request.origin, request.destination, request.start_date),
             "return": (request.destination, request.origin, request.end_date),

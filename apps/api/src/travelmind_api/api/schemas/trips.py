@@ -284,7 +284,7 @@ class TripCreateRequest(BaseModel):
     interests: list[str] = Field(default_factory=list)
     accommodation_preference: str = Field(default="")
     pace: str = Field(default="balanced")
-    transport_mode: str = Field(default="mixed")
+    transport_mode: str = Field(default="auto")
 
 
 class TripUpdateRequest(BaseModel):

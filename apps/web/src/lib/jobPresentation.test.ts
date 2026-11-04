@@ -32,7 +32,7 @@ describe("面向用户的中文任务进度", () => {
   })
   it("正确处理任务名称和图片、导出阶段", () => {
     expect(jobTitle("unknown.job")).toBe("处理进度")
-    expect(jobPresentation({ type: "trip.image_enrich", status: "running" }).label).toBe("正在补充景点图片")
+    expect(jobPresentation({ type: "trip.image_enrich", status: "running" }).label).toBe("行程已生成，正在补充景点图片")
     expect(jobPresentation({ type: "export.pdf", status: "running" }).label).toBe("正在整理导出文件")
   })
   it("失败异常和日志路径不泄漏，额度错误仍给出可操作说明", () => {

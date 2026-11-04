@@ -268,11 +268,15 @@ def update_job_state(
     job = session.query(JobRecord).filter(JobRecord.id == job_id).one_or_none()
     if not job:
         return None
-    if status in TERMINAL_JOB_STATUSES and job.type in {"trip.generate", "trip.refine"}:
+    if job.type in {"trip.generate", "trip.refine"}:
         if lock_generation_quota(session, job.owner_user_id):
             # A concurrent worker may have finished/refunded since this session read.
             session.flush()
             session.refresh(job)
+    # Parallel research callbacks must append against a fresh, locked timeline.
+    # Keep quota -> job lock order, matching terminal refund transactions.
+    session.flush()
+    job = session.query(JobRecord).filter(JobRecord.id == job_id).populate_existing().with_for_update().one()
     if skip_if_terminal and job.status in TERMINAL_JOB_STATUSES:
         return job
 
@@ -284,7 +288,9 @@ def update_job_state(
     if stage_message is not UNSET:
         job.stage_message = stage_message
     if progress_percent is not UNSET:
-        job.progress_percent = _normalize_progress(progress_percent)
+        normalized = _normalize_progress(progress_percent)
+        job.progress_percent = (max(job.progress_percent or 0, normalized)
+                                if job.status == "running" and normalized is not None else normalized)
     if result is not UNSET:
         job.result_json = result
     if error_message is not UNSET:

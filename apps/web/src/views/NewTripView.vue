@@ -181,7 +181,7 @@ function createStarterTrip(): TripPreferenceInput {
     interests: ["美食", "城市漫步", "海边风景"],
     accommodation_preference: "靠近市区、方便步行觅食的酒店",
     pace: "balanced",
-    transport_mode: "rail"
+    transport_mode: "auto"
   }
 }
 
@@ -197,7 +197,7 @@ function createBlankTrip(): TripPreferenceInput {
     interests: [],
     accommodation_preference: "",
     pace: "",
-    transport_mode: ""
+    transport_mode: "auto"
   }
 }
 
@@ -233,7 +233,9 @@ const paceOptions = computed(() => [
 
 const transportOptions = computed(() => [
   { value: "", label: locale.value === "zh-CN" ? "请选择" : "Select" },
+  { value: "auto", label: t("common.transport.auto") },
   { value: "rail", label: t("common.transport.rail") },
+  { value: "flight", label: t("common.transport.flight") },
   { value: "car", label: t("common.transport.car") },
   { value: "walking", label: t("common.transport.walking") },
   { value: "mixed", label: t("common.transport.mixed") }
@@ -426,7 +428,7 @@ async function submitAndGenerate() {
 
           <TmFieldGroup :title="locale === 'zh-CN' ? '节奏与交通' : 'Pace & Transport'">
             <TmSelect id="pace" :model-value="form.pace" :label="copy.paceLabel" :options="paceOptions" @update:model-value="(v: string) => form.pace = v" />
-            <TmSelect id="transport-mode" :model-value="form.transport_mode" :label="copy.transportLabel" :options="transportOptions" @update:model-value="(v: string) => form.transport_mode = v" />
+            <TmSelect id="transport-mode" :model-value="form.transport_mode" :label="copy.transportLabel" :hint="locale === 'zh-CN' ? '自动选择会比较铁路、飞机的费用、全程耗时与接驳；票价和余票以购票平台为准。' : 'Automatic compares rail and flights by cost, total journey time and transfers. Confirm fares and availability with the booking provider.'" :options="transportOptions" @update:model-value="(v: string) => form.transport_mode = v" />
           </TmFieldGroup>
 
           <TmFieldGroup :title="locale === 'zh-CN' ? '偏好与住宿' : 'Preferences'">

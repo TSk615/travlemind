@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from travelmind_api.services.transport_selection import constrain_transport_dates
+
 import json
 from travelmind_api.services.planner_reliability import can_repair, repair_update, repair_counts, decode_plan, attempt_metadata, duplicate_visit_constraints
 from travelmind_api.services.planner_recovery import combined_planner_metadata
@@ -802,6 +804,7 @@ class LangGraphOrchestrator(PlanningCore):
         from travelmind_api.services.poi_research_guard import ensure_usable_poi_research
 
         ensure_usable_poi_research(grounding)
+        self._runtime().emit_progress("poi_specialist:completed", "", "", 0)
         return {
             "poi_payload": payload,
             "poi_grounding": grounding.model_dump(mode="json"),
@@ -825,6 +828,7 @@ class LangGraphOrchestrator(PlanningCore):
             )
         )
         self._validate_weather_date_coverage(weather, request)
+        self._runtime().emit_progress("weather_specialist:completed", "", "", 0)
         return {
             "weather_payload": payload,
             "weather_guidance": weather.model_dump(mode="json"),
@@ -848,6 +852,7 @@ class LangGraphOrchestrator(PlanningCore):
             ),
         )
         hotel = parse_structured_response(result.content, HotelRecommendation)
+        self._runtime().emit_progress("hotel_specialist:completed", "", "", 0)
         return {
             "hotel_payload": payload,
             "hotel_recommendation": hotel.model_dump(mode="json"),
@@ -865,6 +870,8 @@ class LangGraphOrchestrator(PlanningCore):
             ),
         )
         transport = parse_structured_response(result.content, TransportGuidance)
+        transport = constrain_transport_dates(transport, self._request().start_date, self._request().end_date)
+        self._runtime().emit_progress("transport_specialist:completed", "", "", 0)
         return {
             "transport_payload": payload,
             "transport_guidance": transport.model_dump(mode="json"),
